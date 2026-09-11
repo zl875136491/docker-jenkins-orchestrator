@@ -1,0 +1,44 @@
+version: "1"
+components:
+  python:
+    images: [python:3.11-slim, python:3.12-slim, python:3.13-slim]
+    port: 8000
+  go:
+    images: [golang:1.22-alpine, golang:1.23-alpine, golang:1.24-alpine]
+    port: 8080
+  java:
+    images: [eclipse-temurin:17-jre, eclipse-temurin:21-jre, eclipse-temurin:23-jre]
+    port: 8080
+  cpp:
+    images: [gcc:12, gcc:13, gcc:14]
+    port: 8080
+  react:
+    images: [node:20-alpine, node:22-alpine, node:24-alpine]
+    port: 3000
+  vue:
+    images: [node:20-alpine, node:22-alpine, node:24-alpine]
+    port: 3000
+  nextjs:
+    images: [node:20-alpine, node:22-alpine, node:24-alpine]
+    port: 3000
+  html:
+    images: [nginx:1.26-alpine, nginx:1.27-alpine, nginx:1.28-alpine]
+    port: 80
+  mongodb:
+    images: [mongo:7, mongo:8, mongo:latest]
+    port: 27017
+  mysql:
+    images: [mysql:8.0, mysql:8.4, mysql:9.0]
+    port: 3306
+  postgresql:
+    images: [postgres:15, postgres:16, postgres:17]
+    port: 5432
+  redis:
+    images: [redis:7.2-alpine, redis:7.4-alpine, redis:8-alpine]
+    port: 6379
+  minio:
+    images: [minio/minio:RELEASE.2024-06-13T22-53-53Z, minio/minio:RELEASE.2025-01-20T14-49-01Z]
+    port: 9000
+  etcd:
+    images: [quay.io/coreos/etcd:v3.5.15, quay.io/coreos/etcd:v3.5.16]
+    port: 2379

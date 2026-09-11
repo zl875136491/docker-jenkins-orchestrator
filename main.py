@@ -5,16 +5,19 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from uuid import uuid4
+from pathlib import Path
 
 from orchestrator.config import Settings, get_settings
 from orchestrator.models import BuildCreate, BuildJob, UserApp, UserAppCreate
 from orchestrator.repository import DuplicateAppError, InMemoryRepository
 from orchestrator.tasks import InMemoryTaskDispatcher
+from orchestrator.templates import TemplateCatalog, TemplateError
 
 app = FastAPI(title="Docker-Jenkins Orchestrator", version="0.1.0")
 bearer = HTTPBearer(auto_error=False)
 repository = InMemoryRepository()
 dispatcher = InMemoryTaskDispatcher()
+catalog = TemplateCatalog(Path(__file__).parent / "templates" / "catalog.yaml")
 
 
 class ConnectRequest(BaseModel):
@@ -102,3 +105,23 @@ def get_build(build_id: str, claims: dict = Depends(require_token)) -> BuildJob:
     if build is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found")
     return build
+
+
+@app.get("/api/templates")
+def list_templates(claims: dict = Depends(require_token)) -> dict[str, list[str]]:
+    del claims
+    return {"components": catalog.names()}
+
+
+class ComposeRequest(BaseModel):
+    components: list[str]
+    dependencies: dict[str, list[str]] = {}
+
+
+@app.post("/api/templates/compose")
+def compose_template(request: ComposeRequest, claims: dict = Depends(require_token)) -> dict:
+    del claims
+    try:
+        return catalog.compose(request.components, request.dependencies)
+    except TemplateError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
