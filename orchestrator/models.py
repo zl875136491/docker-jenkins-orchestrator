@@ -42,3 +42,10 @@ class BuildJob(BaseModel):
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class BaseImage(BaseModel):
+    image: str = Field(min_length=1)
+    harbor_repository: str
+    status: str = "pending"
+    synced_at: datetime | None = None
