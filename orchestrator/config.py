@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
     mongodb_url: str | None = None
     celery_broker_url: str | None = None
+    jenkins_url: str | None = None
+    jenkins_user: str | None = None
+    jenkins_password: str | None = None
+    harbor_url: str | None = None
+    harbor_user: str | None = None
+    harbor_password: str | None = None
+    docker_services_url: str | None = None
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")
 
