@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import uuid4
 from pathlib import Path
 
@@ -115,7 +115,7 @@ def list_templates(claims: dict = Depends(require_token)) -> dict[str, list[str]
 
 class ComposeRequest(BaseModel):
     components: list[str]
-    dependencies: dict[str, list[str]] = {}
+    dependencies: dict[str, list[str]] = Field(default_factory=dict)
 
 
 @app.post("/api/templates/compose")
