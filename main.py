@@ -4,11 +4,17 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from uuid import uuid4
 
 from orchestrator.config import Settings, get_settings
+from orchestrator.models import BuildCreate, BuildJob, UserApp, UserAppCreate
+from orchestrator.repository import DuplicateAppError, InMemoryRepository
+from orchestrator.tasks import InMemoryTaskDispatcher
 
 app = FastAPI(title="Docker-Jenkins Orchestrator", version="0.1.0")
 bearer = HTTPBearer(auto_error=False)
+repository = InMemoryRepository()
+dispatcher = InMemoryTaskDispatcher()
 
 
 class ConnectRequest(BaseModel):
@@ -57,3 +63,42 @@ def connect(request: ConnectRequest, settings: Settings = Depends(get_settings))
 @app.get("/api/me")
 def me(claims: dict = Depends(require_token)) -> dict[str, str]:
     return {"worker_name": str(claims["sub"]), "scope": str(claims.get("scope", ""))}
+
+
+@app.post("/api/apps", response_model=UserApp, status_code=status.HTTP_201_CREATED)
+def create_app(request: UserAppCreate, claims: dict = Depends(require_token)) -> UserApp:
+    del claims
+    app_record = UserApp(**request.model_dump())
+    try:
+        return repository.create_app(app_record)
+    except DuplicateAppError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="appid already exists") from exc
+
+
+@app.get("/api/apps/{appid}", response_model=UserApp)
+def get_app(appid: str, claims: dict = Depends(require_token)) -> UserApp:
+    del claims
+    app_record = repository.get_app(appid)
+    if app_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
+    return app_record
+
+
+@app.post("/api/apps/{appid}/builds", response_model=BuildJob, status_code=status.HTTP_202_ACCEPTED)
+def create_build(appid: str, request: BuildCreate, claims: dict = Depends(require_token)) -> BuildJob:
+    del claims
+    if repository.get_app(appid) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
+    build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref)
+    repository.create_build(build)
+    dispatcher.dispatch_build(build)
+    return build
+
+
+@app.get("/api/builds/{build_id}", response_model=BuildJob)
+def get_build(build_id: str, claims: dict = Depends(require_token)) -> BuildJob:
+    del claims
+    build = repository.get_build(build_id)
+    if build is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found")
+    return build
