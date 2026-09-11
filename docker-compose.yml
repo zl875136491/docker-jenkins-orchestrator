@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - mongo
+      - redis
+  worker:
+    build: .
+    command: celery -A orchestrator.celery_runtime worker --loglevel=INFO
+    env_file: .env
+    depends_on:
+      - redis
+  mongo:
+    image: mongo:8
+    volumes:
+      - mongo-data:/data/db
+  redis:
+    image: redis:7-alpine
+volumes:
+  mongo-data:

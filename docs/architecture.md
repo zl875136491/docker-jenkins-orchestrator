@@ -94,6 +94,8 @@ API 创建 `queued` 任务并调用 `TaskDispatcher`。Celery worker 后续执�
 5. **持久化与后台适配**：MongoDB/Celery/Jenkins/Harbor/Docker Services 的协议实现；验收为 mock adapter 集成测试通过。
 6. **基础镜像同步与部署加固**：Celery 定时同步、重试、结构化日志、容器化运行说明。
 
+仓库根目录的 `Dockerfile` 和 `docker-compose.yml` 提供 API、Celery worker、MongoDB 和 Redis 的开发编排；生产环境应替换默认密钥、固定镜像 digest，并通过 secret manager 注入 `.env` 中的变量。worker 入口为 `orchestrator.celery_runtime:celery_app`。
+
 每个功能点完成后先运行定向冒烟测试，再运行全量测试，提交信息必须说明变更、验证命令和已知限制。
 
 ## 10. 非目标与后续决策
