@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from orchestrator.registry import DockerRegistrySynchronizer, RegistrySyncError
@@ -87,3 +90,14 @@ def test_registry_sync_hides_registry_error_details_and_sync_many_keeps_failure_
     assert results[0].status == "failed"
     assert results[0].digest is None
     assert results[0].error == "Base image must use an explicit stable tag"
+
+
+def test_registry_uses_docker_environment_defaults_without_an_explicit_endpoint(monkeypatch) -> None:
+    expected_client = object()
+    docker_module = SimpleNamespace(
+        from_env=lambda: expected_client,
+        DockerClient=lambda **_: pytest.fail("DockerClient should not be called without an endpoint"),
+    )
+    monkeypatch.setitem(sys.modules, "docker", docker_module)
+
+    assert DockerRegistrySynchronizer._create_client(None) is expected_client

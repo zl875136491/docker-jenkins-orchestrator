@@ -185,7 +185,9 @@ class DockerRegistrySynchronizer:
             import docker
         except ImportError as exc:
             raise RegistrySyncError("Docker SDK is required for base-image synchronization") from exc
-        return docker.DockerClient(base_url=base_url)
+        if base_url:
+            return docker.DockerClient(base_url=base_url)
+        return docker.from_env()
 
     def _login(self, client: Any) -> None:
         if self.username is None:
