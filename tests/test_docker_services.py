@@ -224,10 +224,13 @@ def test_swarm_adapter_orders_dependencies_and_removes_stale_services() -> None:
 
 
 def test_swarm_adapter_accepts_standard_external_volume_metadata() -> None:
-    DockerSwarmAdapter.validate_compose(
-        {
-            "version": "3.9",
-            "services": {"api": {"image": "example/api:1", "volumes": ["shared:/data"]}},
-            "volumes": {"shared": {"name": "shared-data", "external": True}},
-        }
-    )
+    compose = {
+        "version": "3.9",
+        "services": {"api": {"image": "example/api:1", "volumes": ["shared:/data"]}},
+        "volumes": {"shared": {"name": "shared-data", "external": True}},
+    }
+    DockerSwarmAdapter.validate_compose(compose)
+
+    docker = FakeDocker()
+    DockerSwarmAdapter(docker_client=docker).deploy("demo", compose)
+    assert docker.services.create_calls[0][1]["mounts"] == ["shared-data:/data"]

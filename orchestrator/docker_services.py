@@ -182,6 +182,7 @@ class DockerSwarmAdapter:
         services = self._compose_services(compose)
         self._validate_top_level(compose)
         self._validate_compose_features(services)
+        volume_sources = self._volume_sources(compose)
         client = self._client()
         network_name, network_target = self._ensure_network(client, namespace)
 
@@ -195,6 +196,7 @@ class DockerSwarmAdapter:
                     compose_name,
                     definition,
                     network_target,
+                    volume_sources,
                 )
             )
         self._cleanup_stale_services(client, namespace, {item.service_name for item in deployments})
@@ -213,7 +215,7 @@ class DockerSwarmAdapter:
         self._validate_compose_features({service_name: service})
         client = self._client()
         _, network_target = self._ensure_network(client, namespace)
-        return self._deploy_one(client, namespace, service_name, service, network_target)
+        return self._deploy_one(client, namespace, service_name, service, network_target, {})
 
     def deployment_models(self, appid: str, build_id: str, compose: Mapping[str, Any]) -> list[DeploymentService]:
         """Deploy Compose services and return repository-ready domain records."""
@@ -322,6 +324,25 @@ class DockerSwarmAdapter:
         return None
 
     @classmethod
+    def _volume_sources(cls, compose: Mapping[str, Any]) -> dict[str, str]:
+        raw_volumes = compose.get("volumes")
+        if not isinstance(raw_volumes, Mapping):
+            return {}
+        sources: dict[str, str] = {}
+        for alias, definition in raw_volumes.items():
+            if not isinstance(alias, str) or not alias:
+                continue
+            if not isinstance(definition, Mapping):
+                sources[alias] = alias
+                continue
+            configured_name = definition.get("name")
+            if isinstance(configured_name, str) and configured_name.strip():
+                sources[alias] = configured_name.strip()
+            else:
+                sources[alias] = alias
+        return sources
+
+    @classmethod
     def _deployment_order(cls, services: Mapping[str, Mapping[str, Any]]) -> list[str]:
         """Return a dependency-first order for Compose service creation.
 
@@ -368,6 +389,7 @@ class DockerSwarmAdapter:
         compose_name: str,
         definition: Mapping[str, Any],
         network_target: str,
+        volume_sources: Mapping[str, str],
     ) -> ServiceDeployment:
         if not isinstance(compose_name, str) or not _NAME_PATTERN.fullmatch(compose_name):
             raise DockerServiceError("Compose service name is invalid")
@@ -379,7 +401,7 @@ class DockerSwarmAdapter:
 
         name = self._service_name(appid, compose_name)
         ports = self._ports(definition.get("ports"))
-        kwargs = self._service_kwargs(appid, compose_name, definition, network_target, ports)
+        kwargs = self._service_kwargs(appid, compose_name, definition, network_target, ports, volume_sources)
 
         try:
             existing = client.services.get(name)
@@ -417,6 +439,7 @@ class DockerSwarmAdapter:
         definition: Mapping[str, Any],
         network_target: str,
         ports: list[PublishedPort],
+        volume_sources: Mapping[str, str],
     ) -> dict[str, Any]:
         labels = self._labels(appid, compose_name, definition.get("labels"))
         kwargs: dict[str, Any] = {
@@ -432,7 +455,7 @@ class DockerSwarmAdapter:
             if not isinstance(working_dir, str) or not working_dir.startswith("/"):
                 raise DockerServiceError("Compose working directory is invalid")
             kwargs["workdir"] = working_dir
-        mounts = self._mounts(definition.get("volumes"))
+        mounts = self._mounts(definition.get("volumes"), volume_sources)
         shm_size = definition.get("shm_size")
         if shm_size is not None:
             mounts.append(self._shm_mount(shm_size))
@@ -798,14 +821,19 @@ class DockerSwarmAdapter:
         return None
 
     @staticmethod
-    def _mounts(raw: Any) -> list[str]:
+    def _mounts(raw: Any, volume_sources: Mapping[str, str] | None = None) -> list[str]:
         if raw is None:
             return []
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
             raise DockerServiceError("Compose service volumes must be a list")
         mounts: list[str] = []
+        volume_sources = volume_sources or {}
         for item in raw:
             if isinstance(item, str) and item:
+                parts = item.split(":")
+                if len(parts) in {2, 3} and not parts[0].startswith("/") and parts[0] in volume_sources:
+                    parts[0] = volume_sources[parts[0]]
+                    item = ":".join(parts)
                 mounts.append(item)
                 continue
             if not isinstance(item, Mapping):
@@ -814,6 +842,8 @@ class DockerSwarmAdapter:
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target.startswith("/"):
                 raise DockerServiceError("Compose service volume is invalid")
             mode = "ro" if item.get("read_only") is True else "rw"
+            if item.get("type", "volume") == "volume" and source in volume_sources:
+                source = volume_sources[source]
             mounts.append(f"{source}:{target}:{mode}")
         return mounts
 
