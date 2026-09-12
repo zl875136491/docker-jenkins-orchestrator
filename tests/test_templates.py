@@ -87,6 +87,18 @@ def test_legacy_dependencies_remain_list_form(catalog: TemplateCatalog) -> None:
     assert document["services"]["python"]["environment"]["MONGODB_HOST"] == "mongodb"
 
 
+def test_minimal_legacy_catalog_entries_keep_their_published_port(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(
+        "components:\n  example:\n    images: [example:1.0]\n    port: 8080\n",
+        encoding="utf-8",
+    )
+
+    document = TemplateCatalog(catalog_path).compose(["example"])
+
+    assert document["services"]["example"]["ports"] == ["8080:8080"]
+
+
 def test_common_stack_aliases_resolve_to_canonical_service_names(catalog: TemplateCatalog) -> None:
     document = catalog.compose(["C++", "react.js", "html+css+js"])
 

@@ -324,7 +324,7 @@ class TemplateCatalog:
             "port": ports[0],
             "ports": ports,
             "publish_ports": self._validate_boolean(
-                component.get("publish_ports", False),
+                component.get("publish_ports", True),
                 f"Component {name} publish_ports",
             ),
             "environment": environment,
