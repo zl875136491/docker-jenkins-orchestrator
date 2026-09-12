@@ -1,23 +1,149 @@
+x-orchestrator-runtime-environment: &orchestrator-runtime-environment
+  ORCHESTRATOR_ENVIRONMENT: "${ORCHESTRATOR_ENVIRONMENT:-production}"
+  ORCHESTRATOR_WORKER_NAME: "${ORCHESTRATOR_WORKER_NAME:-orchestrator-worker}"
+  ORCHESTRATOR_WORKER_SECRET: "${ORCHESTRATOR_WORKER_SECRET:?Set ORCHESTRATOR_WORKER_SECRET}"
+  ORCHESTRATOR_JWT_SECRET: "${ORCHESTRATOR_JWT_SECRET:?Set ORCHESTRATOR_JWT_SECRET}"
+  ORCHESTRATOR_JWT_EXPIRE_MINUTES: "${ORCHESTRATOR_JWT_EXPIRE_MINUTES:-60}"
+  ORCHESTRATOR_STORAGE_BACKEND: "mongo"
+  ORCHESTRATOR_MONGODB_URL: "${ORCHESTRATOR_MONGODB_URL:-mongodb://mongo:27017/orchestrator}"
+  ORCHESTRATOR_MONGODB_DATABASE: "${ORCHESTRATOR_MONGODB_DATABASE:-orchestrator}"
+  ORCHESTRATOR_MONGODB_TIMEOUT_MS: "${ORCHESTRATOR_MONGODB_TIMEOUT_MS:-5000}"
+  ORCHESTRATOR_DATA_ENCRYPTION_KEY: "${ORCHESTRATOR_DATA_ENCRYPTION_KEY:?Set ORCHESTRATOR_DATA_ENCRYPTION_KEY to a Fernet key}"
+  ORCHESTRATOR_TASK_DISPATCHER: "celery"
+  ORCHESTRATOR_CELERY_BROKER_URL: "${ORCHESTRATOR_CELERY_BROKER_URL:-redis://redis:6379/0}"
+  ORCHESTRATOR_CELERY_BUILD_QUEUE: "${ORCHESTRATOR_CELERY_BUILD_QUEUE:-orchestrator.builds}"
+  ORCHESTRATOR_CELERY_IMAGES_QUEUE: "${ORCHESTRATOR_CELERY_IMAGES_QUEUE:-orchestrator.images}"
+  ORCHESTRATOR_CELERY_POLL_INTERVAL_SECONDS: "${ORCHESTRATOR_CELERY_POLL_INTERVAL_SECONDS:-15}"
+  ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS: "${ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS:-240}"
+  ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS: "${ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS:-24}"
+  ORCHESTRATOR_JENKINS_URL: "${ORCHESTRATOR_JENKINS_URL:?Set ORCHESTRATOR_JENKINS_URL}"
+  ORCHESTRATOR_HARBOR_URL: "${ORCHESTRATOR_HARBOR_URL:?Set ORCHESTRATOR_HARBOR_URL}"
+  ORCHESTRATOR_DOCKER_BASE_URL: "${ORCHESTRATOR_DOCKER_BASE_URL:-unix:///var/run/docker.sock}"
+  ORCHESTRATOR_DOCKER_SERVICES_NETWORK: "${ORCHESTRATOR_DOCKER_SERVICES_NETWORK:-orchestrator}"
+  ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS: "${ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS:-30}"
+
+x-orchestrator-worker-environment: &orchestrator-worker-environment
+  <<: *orchestrator-runtime-environment
+  ORCHESTRATOR_GITLAB_URL: "${ORCHESTRATOR_GITLAB_URL:-}"
+  ORCHESTRATOR_GITLAB_TOKEN: "${ORCHESTRATOR_GITLAB_TOKEN:-}"
+  ORCHESTRATOR_JENKINS_USER: "${ORCHESTRATOR_JENKINS_USER:?Set ORCHESTRATOR_JENKINS_USER}"
+  ORCHESTRATOR_JENKINS_PASSWORD: "${ORCHESTRATOR_JENKINS_PASSWORD:?Set ORCHESTRATOR_JENKINS_PASSWORD}"
+  ORCHESTRATOR_JENKINS_JOB_NAME: "${ORCHESTRATOR_JENKINS_JOB_NAME:-apps-orchestrator}"
+  ORCHESTRATOR_HARBOR_USER: "${ORCHESTRATOR_HARBOR_USER:?Set ORCHESTRATOR_HARBOR_USER}"
+  ORCHESTRATOR_HARBOR_PASSWORD: "${ORCHESTRATOR_HARBOR_PASSWORD:?Set ORCHESTRATOR_HARBOR_PASSWORD}"
+  ORCHESTRATOR_HARBOR_PROJECT: "${ORCHESTRATOR_HARBOR_PROJECT:-apps}"
+  ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT: "${ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT:-boot-images}"
+
 services:
   api:
     build: .
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *orchestrator-runtime-environment
     ports:
-      - "8000:8000"
-    env_file: .env
+      - "${ORCHESTRATOR_API_BIND_ADDRESS:-127.0.0.1}:${ORCHESTRATOR_API_HOST_PORT:-8000}:8000"
+    restart: unless-stopped
+    init: true
     depends_on:
-      - mongo
-      - redis
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   worker:
     build: .
-    command: celery -A orchestrator.celery_runtime worker --loglevel=INFO
-    env_file: .env
+    command:
+      [
+        "celery",
+        "-A",
+        "orchestrator.celery_runtime:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--hostname=worker@%h",
+        "--queues=${ORCHESTRATOR_CELERY_BUILD_QUEUE:-orchestrator.builds},${ORCHESTRATOR_CELERY_IMAGES_QUEUE:-orchestrator.images}",
+      ]
+    environment: *orchestrator-worker-environment
+    # Local Docker Engine mode. For a remote Engine, set
+    # ORCHESTRATOR_DOCKER_BASE_URL and remove this bind mount in a deployment override.
+    volumes:
+      - type: bind
+        source: "${ORCHESTRATOR_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
+        target: /var/run/docker.sock
+    restart: unless-stopped
+    init: true
     depends_on:
-      - redis
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A orchestrator.celery_runtime:celery_app inspect ping --destination=worker@$$HOSTNAME --timeout=5 2>/dev/null | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  beat:
+    build: .
+    command:
+      [
+        "celery",
+        "-A",
+        "orchestrator.celery_runtime:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/var/lib/orchestrator/celerybeat-schedule",
+      ]
+    environment: *orchestrator-runtime-environment
+    volumes:
+      - beat-data:/var/lib/orchestrator
+    restart: unless-stopped
+    init: true
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('redis', 6379), 5).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   mongo:
     image: mongo:8
+    environment:
+      MONGO_INITDB_DATABASE: "${ORCHESTRATOR_MONGODB_DATABASE:-orchestrator}"
     volumes:
       - mongo-data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --host 127.0.0.1 --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--dir", "/data"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
 volumes:
   mongo-data:
+  redis-data:
+  beat-data:
