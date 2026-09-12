@@ -28,8 +28,14 @@ def test_celery_dispatcher_routes_build_and_image_tasks_to_separate_queues() -> 
 
 
 def test_celery_uses_redis_broker_without_result_backend() -> None:
-    settings = Settings(celery_broker_url="redis://redis:6379/0", base_image_sync_interval_hours=12)
+    settings = Settings(
+        celery_broker_url="redis://redis:6379/0",
+        base_image_sync_interval_hours=12,
+        celery_recovery_interval_seconds=120,
+    )
     app = create_celery_app(settings)
     assert app.conf.broker_url == "redis://redis:6379/0"
     assert app.conf.result_backend is None
     assert "sync-base-images" in app.conf.beat_schedule
+    assert "recover-incomplete-builds" in app.conf.beat_schedule
+    assert app.conf.beat_schedule["recover-incomplete-builds"]["options"]["queue"] == settings.celery_build_queue

@@ -21,6 +21,13 @@ def poll_build(self, build_id: str, attempt: int = 0) -> dict[str, str]:
     return get_worker_runtime().poll_build(build_id, attempt=attempt, task_id=self.request.id)
 
 
+@celery_app.task(name="orchestrator.pipeline.recover_builds", bind=True)
+def recover_builds(self) -> dict[str, int]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().recover_builds(task_id=self.request.id)
+
+
 @celery_app.task(name="orchestrator.images.sync_base_images", bind=True)
 def sync_base_images(self) -> dict[str, int]:
     from orchestrator.worker_runtime import get_worker_runtime

@@ -27,6 +27,7 @@ class BuildStatus(str, Enum):
 
 
 TERMINAL_BUILD_STATUSES = {BuildStatus.SUCCEEDED, BuildStatus.FAILED, BuildStatus.CANCELLED}
+ACTIVE_BUILD_STATUSES = set(BuildStatus) - TERMINAL_BUILD_STATUSES
 
 
 class EventLevel(str, Enum):

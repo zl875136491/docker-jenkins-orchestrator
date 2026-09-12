@@ -111,6 +111,7 @@ class FakeRegistry:
 class RuntimeHarness:
     container: ApplicationContainer
     runtime: WorkerRuntime
+    scheduled_starts: list[str]
     scheduled_polls: list[tuple[str, int, int]]
 
 
@@ -129,6 +130,7 @@ def make_harness(
         celery_poll_interval_seconds=7,
     )
     container = create_container(settings)
+    scheduled_starts: list[str] = []
     scheduled_polls: list[tuple[str, int, int]] = []
     runtime = WorkerRuntime(
         settings,
@@ -139,9 +141,15 @@ def make_harness(
         gitlab=gitlab,
         docker_services=docker_services,
         registry=registry,
+        start_scheduler=scheduled_starts.append,
         poll_scheduler=lambda build_id, attempt, countdown: scheduled_polls.append((build_id, attempt, countdown)),
     )
-    return RuntimeHarness(container=container, runtime=runtime, scheduled_polls=scheduled_polls)
+    return RuntimeHarness(
+        container=container,
+        runtime=runtime,
+        scheduled_starts=scheduled_starts,
+        scheduled_polls=scheduled_polls,
+    )
 
 
 def queue_build(harness: RuntimeHarness, appid: str = "demo"):
@@ -338,3 +346,17 @@ def test_base_image_sync_persists_only_base_images() -> None:
         "harbor.example/apps/demo:existing"
     ]
     assert {image.source_image for image in harness.container.repository.list_base_images()} == set(expected_sources)
+
+
+def test_recovery_requeues_queued_builds_and_restarts_polling_active_builds() -> None:
+    harness = make_harness()
+    queued = queue_build(harness, "queued")
+    active = queue_build(harness, "active")
+    for status in (BuildStatus.VALIDATING, BuildStatus.TRIGGERING, BuildStatus.BUILDING):
+        harness.container.builds.transition(active.build_id, status)
+
+    result = harness.runtime.recover_builds(task_id="recovery-task")
+
+    assert result == {"start_scheduled": 1, "poll_scheduled": 1}
+    assert harness.scheduled_starts == [queued.build_id]
+    assert harness.scheduled_polls == [(active.build_id, 0, 7)]

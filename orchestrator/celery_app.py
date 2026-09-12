@@ -32,6 +32,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "orchestrator.images.sync_base_images",
                 "schedule": timedelta(hours=settings.base_image_sync_interval_hours),
                 "options": {"queue": settings.celery_images_queue},
+            },
+            "recover-incomplete-builds": {
+                "task": "orchestrator.pipeline.recover_builds",
+                "schedule": timedelta(seconds=settings.celery_recovery_interval_seconds),
+                "options": {"queue": settings.celery_build_queue},
             }
         },
     )

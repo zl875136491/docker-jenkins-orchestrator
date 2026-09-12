@@ -32,6 +32,7 @@ def test_compose_runtime_environment_enforces_mongo_celery_and_separate_queues()
     assert "redis://redis:6379/0" in environment["ORCHESTRATOR_CELERY_BROKER_URL"]
     assert "ORCHESTRATOR_CELERY_BUILD_QUEUE" in environment
     assert "ORCHESTRATOR_CELERY_IMAGES_QUEUE" in environment
+    assert "ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS" in environment
     assert "ORCHESTRATOR_JENKINS_USER" in worker_environment
     assert "ORCHESTRATOR_HARBOR_PASSWORD" in worker_environment
 

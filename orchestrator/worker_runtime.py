@@ -42,6 +42,7 @@ class WorkerRuntime:
         jenkins: Any | None = None,
         registry: Any | None = None,
         docker_services: Any | None = None,
+        start_scheduler: Callable[[str], Any] | None = None,
         poll_scheduler: Callable[[str, int, int], Any] | None = None,
     ) -> None:
         self.settings = settings
@@ -52,6 +53,7 @@ class WorkerRuntime:
         self._jenkins = jenkins
         self._registry = registry
         self._docker_services = docker_services
+        self._start_scheduler = start_scheduler
         self._poll_scheduler = poll_scheduler
 
     def _ensure_dependencies(self) -> None:
@@ -254,6 +256,19 @@ class WorkerRuntime:
             results["synced"] += 1
         return results
 
+    def recover_builds(self, task_id: str | None) -> dict[str, int]:
+        """Requeue non-terminal builds after a worker or broker interruption."""
+
+        results = {"start_scheduled": 0, "poll_scheduled": 0}
+        for build in self.repository.list_active_builds():
+            if build.status in {BuildStatus.QUEUED, BuildStatus.VALIDATING, BuildStatus.TRIGGERING}:
+                self._schedule_start(build.build_id)
+                results["start_scheduled"] += 1
+            elif build.status in {BuildStatus.BUILDING, BuildStatus.DEPLOYING}:
+                self._schedule_poll(build.build_id, 0)
+                results["poll_scheduled"] += 1
+        return results
+
     def _application(self, build: BuildJob) -> UserAppRecord:
         app = self.repository.get_app(build.appid)
         if app is None:
@@ -337,6 +352,18 @@ class WorkerRuntime:
             args=[build_id, attempt],
             queue=self.settings.celery_build_queue,
             countdown=self.settings.celery_poll_interval_seconds,
+        )
+
+    def _schedule_start(self, build_id: str) -> None:
+        if self._start_scheduler is not None:
+            self._start_scheduler(build_id)
+            return
+        from orchestrator.celery_app import create_celery_app
+
+        create_celery_app(self.settings).send_task(
+            "orchestrator.pipeline.start_build",
+            args=[build_id],
+            queue=self.settings.celery_build_queue,
         )
 
     def _image_repository(self, appid: str) -> str:

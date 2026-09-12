@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     celery_images_queue: str = "orchestrator.images"
     celery_poll_interval_seconds: int = 15
     celery_max_poll_attempts: int = 240
+    celery_recovery_interval_seconds: int = 300
     base_image_sync_interval_hours: int = 24
 
     gitlab_url: str | None = None

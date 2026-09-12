@@ -5,6 +5,7 @@ from threading import RLock
 from typing import Any, Protocol, Sequence
 
 from orchestrator.models import (
+    ACTIVE_BUILD_STATUSES,
     Alert,
     AppEvent,
     BaseImage,
@@ -32,6 +33,7 @@ class Repository(Protocol):
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None: ...
     def create_build(self, build: BuildJob) -> BuildJob: ...
     def get_build(self, build_id: str) -> BuildJob | None: ...
+    def list_active_builds(self) -> list[BuildJob]: ...
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None: ...
     def transition_build(
         self, build_id: str, expected_statuses: Sequence[BuildStatus], status: BuildStatus, fields: dict[str, Any]
@@ -101,6 +103,11 @@ class InMemoryRepository:
         with self._lock:
             build = self.builds.get(build_id)
             return self._copy(build) if build else None
+
+    def list_active_builds(self) -> list[BuildJob]:
+        with self._lock:
+            values = [build for build in self.builds.values() if build.status in ACTIVE_BUILD_STATUSES]
+            return [self._copy(build) for build in sorted(values, key=lambda build: build.updated_at)]
 
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None:
         with self._lock:
@@ -207,6 +214,7 @@ class MongoRepository:
         self.apps.create_index("appid", unique=True, name="unique_appid")
         self.builds.create_index("build_id", unique=True, name="unique_build_id")
         self.builds.create_index([("appid", 1), ("status", 1), ("created_at", -1)], name="builds_by_app_status")
+        self.builds.create_index([("status", 1), ("updated_at", 1)], name="active_builds_by_status")
         self.events.create_index([("appid", 1), ("created_at", -1)], name="events_by_app")
         self.events.create_index([("build_id", 1), ("created_at", -1)], name="events_by_build")
         self.user_images.create_index([("appid", 1), ("build_id", 1), ("reference", 1)], unique=True, name="unique_user_image")
@@ -247,6 +255,13 @@ class MongoRepository:
 
     def get_build(self, build_id: str) -> BuildJob | None:
         return self._model(BuildJob, self.builds.find_one({"build_id": build_id}))
+
+    def list_active_builds(self) -> list[BuildJob]:
+        statuses = [status.value for status in ACTIVE_BUILD_STATUSES]
+        return [
+            self._model(BuildJob, document)
+            for document in self.builds.find({"status": {"$in": statuses}}).sort("updated_at", 1)
+        ]
 
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None:
         from pymongo import ReturnDocument
