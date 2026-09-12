@@ -205,6 +205,33 @@ def test_swarm_adapter_rejects_relative_bind_mount_before_side_effects() -> None
     assert docker.services.create_calls == []
 
 
+@pytest.mark.parametrize(
+    ("compose", "error"),
+    [
+        ({"services": {"api": {}}}, "must define an image"),
+        ({"services": {"api/name": {"image": "example/api:1"}}}, "service name is invalid"),
+        (
+            {
+                "services": {
+                    "api": {"image": "example/api:1", "depends_on": ["database"]},
+                    "database": {"image": "postgres:16", "depends_on": ["api"]},
+                }
+            },
+            "contains a cycle",
+        ),
+    ],
+)
+def test_swarm_adapter_rejects_invalid_compose_before_side_effects(compose: dict, error: str) -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match=error):
+        adapter.deploy("demo", compose)
+
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
 def test_swarm_adapter_orders_dependencies_and_removes_stale_services() -> None:
     docker = FakeDocker()
     stale = FakeService("demo-old")

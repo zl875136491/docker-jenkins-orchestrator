@@ -179,9 +179,11 @@ class DockerSwarmAdapter:
         """
 
         namespace = self._namespace(appid)
+        # Complete every deterministic validation before connecting to Docker.
+        # In particular, image presence, service names, and dependency cycles
+        # used to be checked while the deployment loop was already under way.
+        self.validate_compose(compose)
         services = self._compose_services(compose)
-        self._validate_top_level(compose)
-        self._validate_compose_features(services)
         volume_sources = self._volume_sources(compose)
         client = self._client()
         network_name, network_target = self._ensure_network(client, namespace)
@@ -213,6 +215,8 @@ class DockerSwarmAdapter:
         if not isinstance(service, Mapping):
             raise DockerServiceError("Compose service definition is invalid")
         self._validate_compose_features({service_name: service})
+        self._validate_service_name(service_name)
+        self._validate_service_image(service_name, service)
         client = self._client()
         _, network_target = self._ensure_network(client, namespace)
         return self._deploy_one(client, namespace, service_name, service, network_target, {})
@@ -230,11 +234,21 @@ class DockerSwarmAdapter:
         services = cls._compose_services(compose)
         cls._validate_compose_features(services)
         cls._deployment_order(services)
-        if require_images:
-            for name, definition in services.items():
-                image = definition.get("image")
-                if not isinstance(image, str) or not image.strip():
-                    raise DockerServiceError(f"Compose service {name} must define an image")
+        for name, definition in services.items():
+            cls._validate_service_name(name)
+            if require_images:
+                cls._validate_service_image(name, definition)
+
+    @staticmethod
+    def _validate_service_name(name: Any) -> None:
+        if not isinstance(name, str) or not _NAME_PATTERN.fullmatch(name):
+            raise DockerServiceError("Compose service name is invalid")
+
+    @staticmethod
+    def _validate_service_image(name: str, definition: Mapping[str, Any]) -> None:
+        image = definition.get("image")
+        if not isinstance(image, str) or not image.strip():
+            raise DockerServiceError(f"Compose service {name} must define an image")
 
     def _client(self) -> Any:
         if self._docker_client is None:
