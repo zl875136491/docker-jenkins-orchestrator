@@ -490,6 +490,25 @@ class DockerSwarmAdapter:
         """
 
         for name, definition in services.items():
+            # Run all pure input conversions before deploy() creates the
+            # application network. This keeps malformed artifacts atomic:
+            # validation errors must not leave infrastructure behind.
+            cls._environment(definition.get("environment"))
+            cls._labels("validation", name, definition.get("labels"))
+            cls._ports(definition.get("ports"))
+            command = definition.get("command")
+            if command is not None:
+                cls._command(command)
+            working_dir = definition.get("working_dir")
+            if working_dir is not None and (not isinstance(working_dir, str) or not working_dir.startswith("/")):
+                raise DockerServiceError("Compose working directory is invalid")
+            cls._mounts(definition.get("volumes"))
+            if definition.get("shm_size") is not None:
+                cls._shm_mount(definition["shm_size"])
+            cls._healthcheck(definition.get("healthcheck"))
+            cls._mode(definition.get("deploy"))
+            cls._restart_policy(definition.get("restart"), definition.get("deploy"))
+            cls._resources(definition.get("deploy"))
             if "env_file" in definition:
                 raise DockerServiceError(
                     f"Compose service {name} uses env_file; resolve it into environment before deployment"
@@ -834,6 +853,8 @@ class DockerSwarmAdapter:
                 if len(parts) in {2, 3} and not parts[0].startswith("/") and parts[0] in volume_sources:
                     parts[0] = volume_sources[parts[0]]
                     item = ":".join(parts)
+                elif len(parts) in {2, 3} and parts[0].startswith((".", "~")):
+                    raise DockerServiceError("Compose relative bind volume paths are not supported for Swarm services")
                 mounts.append(item)
                 continue
             if not isinstance(item, Mapping):
@@ -841,8 +862,15 @@ class DockerSwarmAdapter:
             source, target = item.get("source"), item.get("target")
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target.startswith("/"):
                 raise DockerServiceError("Compose service volume is invalid")
+            mount_type = item.get("type", "volume")
+            if mount_type not in {"volume", "bind"}:
+                raise DockerServiceError("Compose service volume type is invalid")
+            if mount_type == "bind" and not source.startswith("/"):
+                raise DockerServiceError("Compose relative bind volume paths are not supported for Swarm services")
+            if item.get("read_only") not in (None, True, False):
+                raise DockerServiceError("Compose service volume read_only flag is invalid")
             mode = "ro" if item.get("read_only") is True else "rw"
-            if item.get("type", "volume") == "volume" and source in volume_sources:
+            if mount_type == "volume" and source in volume_sources:
                 source = volume_sources[source]
             mounts.append(f"{source}:{target}:{mode}")
         return mounts

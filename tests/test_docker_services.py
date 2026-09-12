@@ -191,6 +191,20 @@ def test_swarm_adapter_rejects_unsupported_host_ip_port_binding_before_service_c
     assert docker.services.create_calls == []
 
 
+def test_swarm_adapter_rejects_relative_bind_mount_before_side_effects() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="relative bind"):
+        adapter.deploy(
+            "demo",
+            {"services": {"api": {"image": "example/api:1", "volumes": ["./data:/data"]}}},
+        )
+
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
 def test_swarm_adapter_orders_dependencies_and_removes_stale_services() -> None:
     docker = FakeDocker()
     stale = FakeService("demo-old")

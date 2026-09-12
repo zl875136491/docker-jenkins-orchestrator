@@ -7,7 +7,7 @@
 验证命令：
 
 ```text
-pytest -q                         # 70 passed
+pytest -q                         # 71 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -25,6 +25,7 @@ python3 -m compileall -q .        # passed
 - 每个项目的上游观察、用户输出和 manifest 位于 `tests/fixtures/complex_projects/<project>/`；统一参数化验收位于 `tests/test_complex_project_delivery.py`。
 - fixture manifest 固定了上游分支、源 Compose 路径及对应提交 SHA；测试还调用 Docker SDK 的 service 参数规范化器，确认 fake 调用的字段形状可被真实 SDK 接受。
 - 不能安全映射的 `env_file`、secrets/configs、GPU/devices、自定义网络、`container_name` 等字段现在会在创建网络或 service 前明确失败，不再静默丢弃。
+- 相对 bind mount（例如 `./data:/data`）以及其他非法挂载参数也会在创建 Docker network 或 service 前拒绝；非法 artifact 不会留下部分基础设施。
 
 ## 仍然存在的产品边界
 
