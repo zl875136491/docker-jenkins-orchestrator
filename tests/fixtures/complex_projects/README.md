@@ -8,11 +8,13 @@ These fixtures model the two roles used by the verification:
    orchestrator, using the upstream template as a reference. That output is
    the corresponding `user-compose.yml`.
 
-The orchestrator only receives `user-compose.yml`. It does not inspect a
-repository name, generate project-specific YAML, resolve `env_file`, build
-contexts, or guess missing services. The parameterized test loads every
-fixture and sends it through the same `DockerSwarmAdapter` validation and fake
-Docker deployment path.
+The successful delivery path only receives `user-compose.yml` as its final
+deployment input. It does not inspect a repository name, generate
+project-specific YAML, or guess missing services. A source Compose containing
+`build` or `env_file` may be passed to Jenkins as build input, but the final
+`orchestrator-result.json` artifact must be normalized before the generic
+`DockerSwarmAdapter` accepts it. The parameterized test loads every fixture and
+sends it through the same validation and fake Docker deployment path.
 
 The upstream observations were made from these branch/file commits on 2026-09-12:
 

@@ -191,12 +191,17 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
     ("project", "compose"),
     [
         ("immich", None),
-        ("plane", {"services": {"web": {"build": {"context": "."}}}}),
+        ("plane", {"services": {"web": {"image": "plane/web:source", "build": {"context": "."}}}}),
         ("paperless-ngx", {"services": {"webserver": {"image": "paperless:test", "env_file": ["docker-compose.env"]}}}),
     ],
 )
 def test_original_project_shape_requires_user_role_adjustment(project: str, compose: dict[str, Any] | None) -> None:
-    settings = Settings(environment="test", storage_backend="memory", task_dispatcher="memory")
+    settings = Settings(
+        environment="test",
+        storage_backend="memory",
+        task_dispatcher="memory",
+        harbor_url="https://harbor.example",
+    )
     container = create_container(settings)
     try:
         container.applications.create_app(
@@ -207,10 +212,41 @@ def test_original_project_shape_requires_user_role_adjustment(project: str, comp
                 compose=compose,
             )
         )
-        with pytest.raises(BuildInputError, match="(unsupported|env_file|Compose)"):
-            container.builds.queue_build(f"{project}-raw", BuildCreate())
-        assert container.repository.list_active_builds() == []
-        assert getattr(container.dispatcher, "build_ids", []) == []
+        if compose is None:
+            with pytest.raises(BuildInputError, match="Compose document"):
+                container.builds.queue_build(f"{project}-raw", BuildCreate())
+            assert container.repository.list_active_builds() == []
+            assert getattr(container.dispatcher, "build_ids", []) == []
+            return
+
+        # Source Compose may legitimately contain a build context or env_file;
+        # Jenkins has the repository/filesystem context needed to process it.
+        # The Swarm boundary is checked against the final artifact instead.
+        build = container.builds.queue_build(f"{project}-raw", BuildCreate())
+        artifact = JenkinsResultArtifact(
+            images=("example/raw:failed",),
+            compose=compose,
+            _payload={"images": ["example/raw:failed"], "compose": compose},
+        )
+        docker = FakeDocker()
+        runtime = WorkerRuntime(
+            settings,
+            repository=container.repository,
+            build_service=container.builds,
+            catalog=container.catalog,
+            jenkins=FakeJenkins(artifact),
+            docker_services=DockerSwarmAdapter(docker_client=docker),
+            poll_scheduler=lambda *_: None,
+        )
+        started = runtime.start_build(build.build_id, task_id=f"start-{project}")
+        assert started["status"] == "building", container.repository.get_build(build.build_id).model_dump()
+        result = runtime.poll_build(build.build_id, attempt=0, task_id=f"poll-{project}")
+        assert result == {"build_id": build.build_id, "status": "failed"}
+        stored = container.repository.get_build(build.build_id)
+        assert stored is not None and stored.error is not None
+        assert "unsupported" in stored.error or "env_file" in stored.error
+        assert docker.networks.items == {}
+        assert docker.services.create_calls == []
     finally:
         container.close()
 

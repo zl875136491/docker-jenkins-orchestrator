@@ -13,3 +13,6 @@ development Compose. The output:
   the proxy on a Swarm-published port;
 - supplied the resulting YAML as the Compose field of the user-app before
   requesting a build.
+
+System feedback handled by the user role: a final artifact that still
+contains `build` is rejected before any Swarm network or service is created.

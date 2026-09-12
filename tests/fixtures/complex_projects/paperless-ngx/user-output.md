@@ -11,3 +11,7 @@ PostgreSQL/Tika variant. The output:
 - selected an explicit Paperless image tag instead of `latest`;
 - supplied the resulting YAML as the Compose field of the user-app before
   requesting a build.
+
+System feedback handled by the user role: a final artifact that still
+contains `env_file` is rejected before any Swarm network or service is
+created, so the variables were expanded into `environment`.

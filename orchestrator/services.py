@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
-from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
 from orchestrator.models import (
     Alert,
     AppEvent,
@@ -136,14 +136,15 @@ class BuildService:
 
     def queue_build(self, appid: str, request: BuildCreate) -> BuildJob:
         app = self.application_service.get_record(appid)
-        if not isinstance(app.compose, dict) or not app.compose.get("services"):
+        if not isinstance(app.compose, Mapping):
             raise BuildInputError(
                 "A user-provided Docker Compose document with services is required before creating a build"
             )
-        try:
-            DockerSwarmAdapter.validate_compose(app.compose)
-        except DockerServiceError as exc:
-            raise BuildInputError(str(exc)) from exc
+        services = app.compose.get("services")
+        if not isinstance(services, Mapping) or not services or not all(
+            isinstance(name, str) and isinstance(service, Mapping) for name, service in services.items()
+        ):
+            raise BuildInputError("A user-provided Docker Compose document with services is required before creating a build")
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref)
         self.repository.create_build(build)
         self._event(appid, build.build_id, "build.queued", "Build queued")

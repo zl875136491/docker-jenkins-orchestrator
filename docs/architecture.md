@@ -58,7 +58,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
 
-创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
+创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
 
 ## 5. 构建状态机
 

@@ -12,3 +12,7 @@ template. The output:
   the 2283 endpoint, named/bind volumes, and dependencies;
 - supplied the resulting YAML as the Compose field of the user-app before
   requesting a build.
+
+System feedback handled by the user role: an app registered without Compose
+cannot create a build (`A user-provided Docker Compose document with services
+is required`).
