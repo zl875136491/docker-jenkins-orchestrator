@@ -225,6 +225,27 @@ def test_start_build_triggers_jenkins_and_schedules_the_first_poll() -> None:
     assert gitlab.calls == [("https://git.example/demo.git", "main")]
 
 
+def test_start_build_allows_jenkins_to_read_compose_from_repository() -> None:
+    jenkins = FakeJenkins([])
+    harness = make_harness(jenkins=jenkins)
+    harness.container.applications.create_app(
+        UserAppCreate(
+            appid="repository-compose",
+            name="Repository Compose",
+            repository_url="https://git.example/repository-compose.git",
+            git_ref="main",
+            compose=None,
+        )
+    )
+    build = harness.container.builds.queue_build("repository-compose", BuildCreate())
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    assert result == {"build_id": build.build_id, "status": "building"}
+    assert len(jenkins.requests) == 1
+    assert jenkins.requests[0].compose is None
+
+
 def test_pending_queue_then_success_persists_artifact_images_and_swarm_services() -> None:
     artifact = successful_artifact()
     jenkins = FakeJenkins(

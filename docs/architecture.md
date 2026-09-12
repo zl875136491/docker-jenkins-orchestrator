@@ -70,9 +70,9 @@ queued -> validating -> triggering -> building -> deploying -> succeeded
 
 Celery 执行步骤：
 
-1. 读取应用和构建记录，校验 Compose 的服务结构；
+1. 读取应用和构建记录；如果 conductor 已提供 Compose，校验其服务结构，否则由 Jenkins 从 Git 仓库检出并读取 `docker-compose.yaml`；
 2. 可选调用 GitLab API 验证仓库及 Git 引用；解析成功时将提交 SHA 写入 `build_jobs`，Jenkins 使用该 SHA 构建；
-3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose、环境变量和目标 Harbor 镜像仓库；
+3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、环境变量和目标 Harbor 镜像仓库；如果 conductor 提供了 Compose，传递 `COMPOSE_JSON`，否则传空值并要求 Jenkins 使用仓库内的 `docker-compose.yaml`；
 4. 定时 Celery 任务轮询 Jenkins queue/build 状态；
 5. 成功后读取 Jenkins `orchestrator-result.json` 产物，登记应用镜像；
 6. 调用 Docker Engine/Swarm 创建或更新 Services，登记 service ID 和端点；
@@ -106,7 +106,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 - **GitLab**：使用项目 API 验证仓库和分支；仓库检出仍由 Jenkins job 完成。
 - **Jenkins**：获取 crumb、触发参数化 build、解析 queue item、轮询 build、读取 JSON artifact。
 - **Harbor/Docker Registry**：通过 Docker SDK 的 pull/tag/push 同步基础镜像；应用镜像由 Jenkins 生成后登记。
-- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。
+- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。适配器映射镜像、环境、挂载、端口、健康检查、`shm_size`、资源、重启策略和副本数；`depends_on` 只用于依赖校验与依赖优先创建，不提供 Compose 的健康就绪闸门。`env_file`、secrets/configs、GPU/devices、自定义网络等无法安全映射的字段必须在创建 Docker 对象前显式拒绝。
 
 适配器不得记录密码、token 或完整环境变量。网络错误转换为包含安全上下文的领域错误，并写入事件及告警。
 
@@ -133,3 +133,5 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 5. 模板覆盖所有指定技术栈，组合的 Python+MongoDB+React 和 Java+MySQL+Vue 均生成有效 Compose；未知依赖和循环依赖被拒绝。
 6. 基础镜像同步任务为每个稳定版本写独立 `base_images` 记录，且不污染用户镜像集合。
 7. Docker Compose 配置、静态编译和全量测试通过；每个功能点完成后提交包含变更和验证结果的详尽 commit message。
+
+复杂应用交付走查及 Immich 风格 fake-Docker 验证见 [delivery-audit.md](delivery-audit.md)。

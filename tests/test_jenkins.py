@@ -97,6 +97,20 @@ def test_trigger_poll_build_and_fetch_result_artifact() -> None:
     assert "do-not-log" not in repr(request())
 
 
+def test_build_request_can_defer_compose_resolution_to_repository() -> None:
+    build_request = JenkinsBuildRequest(
+        appid="orders",
+        repository_url="https://gitlab.example/platform/orders.git",
+        git_ref="main",
+        environment={},
+        compose=None,
+        image_repository="harbor.example/apps/orders",
+    )
+
+    assert build_request.as_parameters()["COMPOSE_JSON"] == ""
+    assert "repository" in repr(build_request)
+
+
 def test_queue_pending_and_cancelled_are_explicit() -> None:
     transport = FakeTransport(
         [

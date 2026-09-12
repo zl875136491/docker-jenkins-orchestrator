@@ -21,3 +21,5 @@ docker compose up --build
 The production topology runs FastAPI, a Celery worker, Celery beat, MongoDB, and Redis. Redis is only the Celery broker; MongoDB persists application state, build lifecycle records, events, images, deployment services, and alerts. The worker requires Docker Engine access only when it deploys Swarm services or synchronizes base images.
 
 See [docs/architecture.md](docs/architecture.md) for the system boundaries, API contract, template catalog, task lifecycle, recovery behavior, and feature acceptance criteria.
+
+See [docs/delivery-audit.md](docs/delivery-audit.md) for the Immich-style complex Compose delivery test and the remaining production integration boundaries.

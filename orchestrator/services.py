@@ -135,8 +135,8 @@ class BuildService:
 
     def queue_build(self, appid: str, request: BuildCreate) -> BuildJob:
         app = self.application_service.get_record(appid)
-        if not app.compose:
-            raise BuildInputError("A Docker Compose document is required before creating a build")
+        if app.compose is not None and not isinstance(app.compose, dict):
+            raise BuildInputError("Application Docker Compose document must be a mapping")
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref)
         self.repository.create_build(build)
         self._event(appid, build.build_id, "build.queued", "Build queued")
