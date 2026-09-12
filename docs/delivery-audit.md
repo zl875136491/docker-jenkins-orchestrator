@@ -7,7 +7,7 @@
 验证命令：
 
 ```text
-pytest -q                         # 67 passed
+pytest -q                         # 70 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -23,6 +23,7 @@ python3 -m compileall -q .        # passed
 - 通用复杂项目测试覆盖 Immich（4 服务）、Plane（13 服务）和 Paperless-ngx（5 服务）的用户角色 Compose；同一条 pipeline 验证服务数、端口、镜像、依赖、健康检查、挂载和 Mongo 状态持久化。
 - 原始项目形态的失败测试覆盖缺少 Compose、`build` context 和 `env_file`，证明系统会要求用户角色先完成外部调整，而不是针对项目名称写适配逻辑。
 - 每个项目的上游观察、用户输出和 manifest 位于 `tests/fixtures/complex_projects/<project>/`；统一参数化验收位于 `tests/test_complex_project_delivery.py`。
+- fixture manifest 固定了上游分支、源 Compose 路径及对应提交 SHA；测试还调用 Docker SDK 的 service 参数规范化器，确认 fake 调用的字段形状可被真实 SDK 接受。
 - 不能安全映射的 `env_file`、secrets/configs、GPU/devices、自定义网络、`container_name` 等字段现在会在创建网络或 service 前明确失败，不再静默丢弃。
 
 ## 仍然存在的产品边界

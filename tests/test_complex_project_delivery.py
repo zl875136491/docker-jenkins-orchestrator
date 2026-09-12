@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
 import yaml
+from docker.models.services import _get_create_service_kwargs
 
 from orchestrator.container import create_container
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
@@ -114,6 +116,14 @@ def load_project(project: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 @pytest.mark.parametrize("project", PROJECTS)
+def test_project_fixture_has_pinned_upstream_provenance(project: str) -> None:
+    manifest, _ = load_project(project)
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"])
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["source_compose_commit"])
+    assert manifest["source_compose_path"].endswith((".yml", ".yaml"))
+
+
+@pytest.mark.parametrize("project", PROJECTS)
 def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(project: str) -> None:
     manifest, compose = load_project(project)
     DockerSwarmAdapter.validate_compose(compose)
@@ -169,6 +179,10 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
         assert jenkins.requests[0].compose == compose
         public_ports = [port for _, kwargs in docker.services.create_calls for port in kwargs.get("endpoint_spec", {}).get("Ports", [])]
         assert any(port["PublishedPort"] == manifest["public_port"] for port in public_ports)
+        for image, kwargs in docker.services.create_calls:
+            # Exercise the same Docker SDK normalization used by
+            # ServiceCollection.create; the fake daemon only records calls.
+            _get_create_service_kwargs("create", {"image": image, **kwargs})
     finally:
         container.close()
 
@@ -195,6 +209,8 @@ def test_original_project_shape_requires_user_role_adjustment(project: str, comp
         )
         with pytest.raises(BuildInputError, match="(unsupported|env_file|Compose)"):
             container.builds.queue_build(f"{project}-raw", BuildCreate())
+        assert container.repository.list_active_builds() == []
+        assert getattr(container.dispatcher, "build_ids", []) == []
     finally:
         container.close()
 
