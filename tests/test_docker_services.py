@@ -34,12 +34,17 @@ class FakeNetworks:
 
 class FakeService:
     def __init__(self, name: str) -> None:
+        self.name = name
         self.id = f"service-{name}-id"
         self.attrs = {"ID": self.id}
         self.update_calls: list[dict] = []
+        self.remove_calls = 0
 
     def update(self, **kwargs) -> None:
         self.update_calls.append(kwargs)
+
+    def remove(self) -> None:
+        self.remove_calls += 1
 
 
 class FakeServices:
@@ -59,6 +64,9 @@ class FakeServices:
         service = FakeService(kwargs["name"])
         self.items[kwargs["name"]] = service
         return service
+
+    def list(self, **kwargs) -> list[FakeService]:
+        return list(self.items.values())
 
 
 class FakeDocker:
@@ -181,3 +189,35 @@ def test_swarm_adapter_rejects_unsupported_host_ip_port_binding_before_service_c
         )
 
     assert docker.services.create_calls == []
+
+
+def test_swarm_adapter_orders_dependencies_and_removes_stale_services() -> None:
+    docker = FakeDocker()
+    stale = FakeService("demo-old")
+    docker.services.items[stale.name] = stale
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    deployment = adapter.deploy(
+        "demo",
+        {
+            "services": {
+                "api": {
+                    "image": "harbor.example/apps/api:build-45",
+                    "depends_on": {"database": {"condition": "service_healthy"}},
+                },
+                "database": {
+                    "image": "postgres:16",
+                    "healthcheck": {"test": ["CMD", "pg_isready"]},
+                    "deploy": {"resources": {"limits": {"cpus": "1.5", "memory": "512mb"}}},
+                },
+            }
+        },
+    )
+
+    assert [image for image, _ in docker.services.create_calls] == ["postgres:16", "harbor.example/apps/api:build-45"]
+    assert stale.remove_calls == 1
+    database_kwargs = docker.services.create_calls[0][1]
+    assert database_kwargs["resources"] == {
+        "Limits": {"NanoCPUs": 1_500_000_000, "MemoryBytes": 536_870_912}
+    }
+    assert [service.service_name for service in deployment.services] == ["demo-database", "demo-api"]
