@@ -647,7 +647,15 @@ class DockerSwarmAdapter:
                 continue
             if not isinstance(definition, Mapping):
                 raise DockerServiceError(f"Compose volume {name} is invalid")
-            raise DockerServiceError(f"Compose volume {name} uses unsupported options")
+            unsupported_volume = sorted(set(definition) - {"name", "external"})
+            if unsupported_volume:
+                raise DockerServiceError(
+                    f"Compose volume {name} uses unsupported fields: {', '.join(unsupported_volume)}"
+                )
+            if "name" in definition and (not isinstance(definition["name"], str) or not definition["name"].strip()):
+                raise DockerServiceError(f"Compose volume {name} has an invalid name")
+            if "external" in definition and not isinstance(definition["external"], bool):
+                raise DockerServiceError(f"Compose volume {name} has an invalid external flag")
 
     @staticmethod
     def _namespace(appid: str) -> str:

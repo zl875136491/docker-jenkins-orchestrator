@@ -7,7 +7,7 @@
 验证命令：
 
 ```text
-pytest -q                         # 66 passed
+pytest -q                         # 67 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -19,6 +19,7 @@ python3 -m compileall -q .        # passed
 - Jenkins queue/build/artifact 轮询、失败告警、重复投递幂等状态推进和 Docker service 记录已有 fake adapter 集成测试。
 - 构建输入要求 conductor/用户角色先提供包含 `services` 的 Compose；仓库没有可直接使用的 Compose 时，构建入口明确报错。用户根据通用模板在系统外完成调整并重新提交，系统不会替用户猜测或生成应用编排。
 - Docker Swarm 适配器支持 digest 镜像、环境变量、命令、工作目录、挂载、端口、labels、重启策略、replicas/global 模式、健康检查、`shm_size` 和 CPU/内存资源；更新时会按 appid 清理已删除的旧 service。
+- 顶层命名卷可携带标准的 `name` 与 `external` 元数据；其他未映射的卷驱动选项仍明确拒绝，避免声称已有 Swarm 卷驱动编排能力。
 - 通用复杂项目测试覆盖 Immich（4 服务）、Plane（13 服务）和 Paperless-ngx（5 服务）的用户角色 Compose；同一条 pipeline 验证服务数、端口、镜像、依赖、健康检查、挂载和 Mongo 状态持久化。
 - 原始项目形态的失败测试覆盖缺少 Compose、`build` context 和 `env_file`，证明系统会要求用户角色先完成外部调整，而不是针对项目名称写适配逻辑。
 - 每个项目的上游观察、用户输出和 manifest 位于 `tests/fixtures/complex_projects/<project>/`；统一参数化验收位于 `tests/test_complex_project_delivery.py`。

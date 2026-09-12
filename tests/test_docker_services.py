@@ -221,3 +221,13 @@ def test_swarm_adapter_orders_dependencies_and_removes_stale_services() -> None:
         "Limits": {"NanoCPUs": 1_500_000_000, "MemoryBytes": 536_870_912}
     }
     assert [service.service_name for service in deployment.services] == ["demo-database", "demo-api"]
+
+
+def test_swarm_adapter_accepts_standard_external_volume_metadata() -> None:
+    DockerSwarmAdapter.validate_compose(
+        {
+            "version": "3.9",
+            "services": {"api": {"image": "example/api:1", "volumes": ["shared:/data"]}},
+            "volumes": {"shared": {"name": "shared-data", "external": True}},
+        }
+    )
