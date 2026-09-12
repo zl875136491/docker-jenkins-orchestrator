@@ -120,6 +120,19 @@ class BuildService:
             )
         )
 
+    def record_event(
+        self,
+        appid: str,
+        build_id: str | None,
+        kind: str,
+        message: str,
+        level: EventLevel = EventLevel.INFO,
+        **details: Any,
+    ) -> None:
+        """Persist a safe operational event from an asynchronous worker."""
+
+        self._event(appid, build_id, kind, message, level, **details)
+
     def queue_build(self, appid: str, request: BuildCreate) -> BuildJob:
         app = self.application_service.get_record(appid)
         if not app.compose:

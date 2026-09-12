@@ -123,6 +123,7 @@ class BuildJob(DomainModel):
     build_id: str
     appid: str
     git_ref: str
+    git_commit_sha: str | None = None
     status: BuildStatus = BuildStatus.QUEUED
     celery_task_id: str | None = None
     jenkins_queue_url: str | None = None
