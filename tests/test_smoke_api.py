@@ -65,12 +65,13 @@ def test_duplicate_app_and_missing_app_are_reported() -> None:
     assert client.post("/api/apps/missing/builds", headers=headers, json={}).status_code == 404
 
 
-def test_build_can_defer_compose_resolution_to_repository() -> None:
+def test_build_requires_user_provided_compose_document() -> None:
     headers = auth_headers()
     payload = {"appid": "no-compose", "name": "No Compose", "repository_url": "https://git.example/no-compose.git"}
     assert client.post("/api/apps", headers=headers, json=payload).status_code == 201
     response = client.post("/api/apps/no-compose/builds", headers=headers, json={})
-    assert response.status_code == 202
+    assert response.status_code == 422
+    assert "Compose document" in response.json()["detail"]
 
 
 def test_template_composition_smoke() -> None:

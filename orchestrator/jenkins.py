@@ -48,7 +48,7 @@ class JenkinsBuildRequest:
     repository_url: str
     git_ref: str
     environment: Mapping[str, str]
-    compose: Mapping[str, Any] | None
+    compose: Mapping[str, Any]
     image_repository: str
 
     def __post_init__(self) -> None:
@@ -58,8 +58,8 @@ class JenkinsBuildRequest:
             isinstance(key, str) and isinstance(value, str) for key, value in self.environment.items()
         ):
             raise ValueError("environment must be a mapping of strings")
-        if self.compose is not None and not isinstance(self.compose, Mapping):
-            raise ValueError("compose must be a mapping when provided")
+        if not isinstance(self.compose, Mapping):
+            raise ValueError("compose must be a mapping")
 
     def __repr__(self) -> str:
         # Compose content may itself contain environment values, so expose only
@@ -68,7 +68,7 @@ class JenkinsBuildRequest:
             "JenkinsBuildRequest("
             f"appid={self.appid!r}, repository_url={_redact_url(self.repository_url)!r}, "
             f"git_ref={self.git_ref!r}, environment_keys={sorted(self.environment)!r}, "
-            f"compose={'provided' if self.compose is not None else 'repository'}, "
+            "compose='***', "
             f"image_repository={self.image_repository!r})"
         )
 
@@ -77,7 +77,7 @@ class JenkinsBuildRequest:
 
         try:
             environment = json.dumps(dict(self.environment), sort_keys=True, separators=(",", ":"))
-            compose = "" if self.compose is None else json.dumps(dict(self.compose), sort_keys=True, separators=(",", ":"))
+            compose = json.dumps(dict(self.compose), sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError):
             raise JenkinsError("Build input could not be serialized for Jenkins") from None
         return {

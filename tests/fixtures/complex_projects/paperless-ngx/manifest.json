@@ -1,0 +1,9 @@
+{
+  "project": "paperless-ngx",
+  "repository": "https://github.com/paperless-ngx/paperless-ngx",
+  "branch": "dev",
+  "source_compose_path": "docker/compose/docker-compose.postgres-tika.yml",
+  "root_compose_present": false,
+  "service_count": 5,
+  "public_port": 8000
+}

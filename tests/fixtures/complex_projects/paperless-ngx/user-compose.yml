@@ -1,0 +1,71 @@
+version: "3.9"
+name: paperless
+services:
+  paperless-broker:
+    image: docker.io/valkey/valkey:9-alpine
+    volumes:
+      - paperless-redisdata:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  paperless-db:
+    image: docker.io/library/postgres:18
+    volumes:
+      - paperless-pgdata:/var/lib/postgresql
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: managed-secret
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "paperless", "-d", "paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  paperless-gotenberg:
+    image: docker.io/gotenberg/gotenberg:8.36
+    command:
+      - gotenberg
+      - --chromium-disable-javascript=true
+      - --chromium-allow-list=file:///tmp/.*
+    restart: unless-stopped
+  paperless-tika:
+    image: docker.io/apache/tika:3.3.1.0
+    restart: unless-stopped
+  paperless-webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:2.17.1
+    ports:
+      - "8000:8000"
+    volumes:
+      - paperless-data:/usr/src/paperless/data
+      - paperless-media:/usr/src/paperless/media
+      - paperless-export:/usr/src/paperless/export
+      - paperless-consume:/usr/src/paperless/consume
+    environment:
+      PAPERLESS_REDIS: redis://paperless-broker:6379
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_TIKA_ENABLED: "1"
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://paperless-gotenberg:3000
+      PAPERLESS_TIKA_ENDPOINT: http://paperless-tika:9998
+      PAPERLESS_SECRET_KEY: user-managed-secret
+    depends_on:
+      paperless-db:
+        condition: service_healthy
+      paperless-broker:
+        condition: service_healthy
+      paperless-gotenberg:
+        condition: service_started
+      paperless-tika:
+        condition: service_started
+    restart: unless-stopped
+volumes:
+  paperless-redisdata: {}
+  paperless-pgdata: {}
+  paperless-data: {}
+  paperless-media: {}
+  paperless-export: {}
+  paperless-consume: {}

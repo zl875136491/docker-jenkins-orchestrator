@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
 from orchestrator.models import (
     Alert,
     AppEvent,
@@ -135,8 +136,14 @@ class BuildService:
 
     def queue_build(self, appid: str, request: BuildCreate) -> BuildJob:
         app = self.application_service.get_record(appid)
-        if app.compose is not None and not isinstance(app.compose, dict):
-            raise BuildInputError("Application Docker Compose document must be a mapping")
+        if not isinstance(app.compose, dict) or not app.compose.get("services"):
+            raise BuildInputError(
+                "A user-provided Docker Compose document with services is required before creating a build"
+            )
+        try:
+            DockerSwarmAdapter.validate_compose(app.compose)
+        except DockerServiceError as exc:
+            raise BuildInputError(str(exc)) from exc
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref)
         self.repository.create_build(build)
         self._event(appid, build.build_id, "build.queued", "Build queued")

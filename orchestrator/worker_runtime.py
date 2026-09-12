@@ -117,14 +117,7 @@ class WorkerRuntime:
 
             if build.status is BuildStatus.VALIDATING:
                 self._validate_source_compose(app.compose)
-                self.builds.record_event(
-                    app.appid,
-                    build_id,
-                    "build.compose_validated" if app.compose is not None else "build.compose_deferred",
-                    "Build compose input validated"
-                    if app.compose is not None
-                    else "Build compose will be read from the Git repository by Jenkins",
-                )
+                self.builds.record_event(app.appid, build_id, "build.compose_validated", "Build compose input validated")
                 git_ref = build.git_ref
                 gitlab = self._gitlab_adapter()
                 if gitlab is not None:
@@ -153,7 +146,7 @@ class WorkerRuntime:
                         repository_url=app.repository_url,
                         git_ref=git_ref,
                         environment=self.builds.application_service.get_environment(app.appid),
-                        compose=app.compose,
+                        compose=app.compose or {},
                         image_repository=self._image_repository(app.appid),
                     )
                 )
@@ -384,11 +377,6 @@ class WorkerRuntime:
 
     @staticmethod
     def _validate_source_compose(compose: Any) -> None:
-        # A missing source Compose is valid: Jenkins checks out the repository
-        # and uses its docker-compose.yaml.  When conductor supplies a
-        # generated document, validate its shape before triggering Jenkins.
-        if compose is None:
-            return
         if not isinstance(compose, Mapping):
             raise BuildInputError("Build compose document must be a mapping")
         services = compose.get("services")
@@ -400,8 +388,6 @@ class WorkerRuntime:
     @staticmethod
     def _validate_deployment_compose(compose: Any) -> None:
         WorkerRuntime._validate_source_compose(compose)
-        if not isinstance(compose, Mapping):
-            raise BuildInputError("Jenkins deployment compose document must be a mapping")
         services = compose["services"]
         if not all(isinstance(service.get("image"), str) and service["image"].strip() for service in services.values()):
             raise BuildInputError("Jenkins deployment compose services must define images")

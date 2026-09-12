@@ -1,0 +1,130 @@
+version: "3.9"
+name: plane
+services:
+  plane-web:
+    image: harbor.example/apps/plane-web:build-test
+    command: ["/app/bin/start-web"]
+    environment:
+      API_BASE_URL: http://plane-api:8000
+    depends_on: [plane-api]
+    restart: always
+  plane-admin:
+    image: harbor.example/apps/plane-admin:build-test
+    environment:
+      API_BASE_URL: http://plane-api:8000
+    depends_on: [plane-api, plane-web]
+    restart: always
+  plane-space:
+    image: harbor.example/apps/plane-space:build-test
+    environment:
+      API_BASE_URL: http://plane-api:8000
+    depends_on: [plane-api, plane-web]
+    restart: always
+  plane-api:
+    image: harbor.example/apps/plane-api:build-test
+    command: ["./bin/docker-entrypoint-api.sh"]
+    environment:
+      DATABASE_URL: postgres://plane:managed-secret@plane-db:5432/plane
+      REDIS_URL: redis://plane-redis:6379/0
+      AMQP_URL: amqp://plane:managed-secret@plane-mq:5672/plane
+      AWS_S3_ENDPOINT_URL: http://plane-minio:9000
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+    restart: always
+  plane-worker:
+    image: harbor.example/apps/plane-api:build-test
+    command: ["./bin/docker-entrypoint-worker.sh"]
+    environment:
+      DATABASE_URL: postgres://plane:managed-secret@plane-db:5432/plane
+      REDIS_URL: redis://plane-redis:6379/0
+      AMQP_URL: amqp://plane:managed-secret@plane-mq:5672/plane
+    depends_on: [plane-api, plane-db, plane-redis, plane-mq]
+    restart: always
+  plane-beat:
+    image: harbor.example/apps/plane-api:build-test
+    command: ["./bin/docker-entrypoint-beat.sh"]
+    environment:
+      DATABASE_URL: postgres://plane:managed-secret@plane-db:5432/plane
+      REDIS_URL: redis://plane-redis:6379/0
+    depends_on: [plane-api, plane-db, plane-redis]
+    restart: always
+  plane-migrator:
+    image: harbor.example/apps/plane-api:build-test
+    command: ["./bin/docker-entrypoint-migrator.sh"]
+    environment:
+      DATABASE_URL: postgres://plane:managed-secret@plane-db:5432/plane
+    depends_on:
+      plane-db:
+        condition: service_healthy
+    restart: "no"
+  plane-live:
+    image: harbor.example/apps/plane-live:build-test
+    restart: always
+  plane-proxy:
+    image: harbor.example/apps/plane-proxy:build-test
+    ports:
+      - "8080:80"
+    environment:
+      FILE_SIZE_LIMIT: "5242880"
+      BUCKET_NAME: uploads
+    depends_on: [plane-web, plane-api, plane-space, plane-admin]
+    restart: always
+  plane-db:
+    image: postgres:15.7-alpine
+    command: ["postgres", "-c", "max_connections=1000"]
+    environment:
+      POSTGRES_USER: plane
+      POSTGRES_DB: plane
+      POSTGRES_PASSWORD: managed-secret
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - plane-pgdata:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plane -d plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    volumes:
+      - plane-redisdata:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  plane-mq:
+    image: rabbitmq:3.13.6-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: plane
+      RABBITMQ_DEFAULT_PASS: managed-secret
+      RABBITMQ_DEFAULT_VHOST: plane
+    volumes:
+      - plane-rabbitmq:/var/lib/rabbitmq
+    restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  plane-minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: ["server", "/export", "--console-address", ":9090"]
+    environment:
+      MINIO_ROOT_USER: plane
+      MINIO_ROOT_PASSWORD: managed-secret
+    volumes:
+      - plane-uploads:/export
+    restart: always
+volumes:
+  plane-pgdata: {}
+  plane-redisdata: {}
+  plane-rabbitmq: {}
+  plane-uploads: {}

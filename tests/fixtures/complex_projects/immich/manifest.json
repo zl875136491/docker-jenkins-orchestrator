@@ -1,0 +1,9 @@
+{
+  "project": "immich",
+  "repository": "https://github.com/immich-app/immich",
+  "branch": "main",
+  "source_compose_path": "docker/docker-compose.yml",
+  "root_compose_present": false,
+  "service_count": 4,
+  "public_port": 2283
+}

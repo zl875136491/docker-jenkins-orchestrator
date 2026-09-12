@@ -58,6 +58,8 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
 
+创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
+
 ## 5. 构建状态机
 
 ```text
@@ -70,9 +72,9 @@ queued -> validating -> triggering -> building -> deploying -> succeeded
 
 Celery 执行步骤：
 
-1. 读取应用和构建记录；如果 conductor 已提供 Compose，校验其服务结构，否则由 Jenkins 从 Git 仓库检出并读取 `docker-compose.yaml`；
+1. 读取应用和构建记录，校验 conductor 提供的 Compose 服务结构；仓库内不存在可交付的 Compose 时，构建请求必须在入口处失败；
 2. 可选调用 GitLab API 验证仓库及 Git 引用；解析成功时将提交 SHA 写入 `build_jobs`，Jenkins 使用该 SHA 构建；
-3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、环境变量和目标 Harbor 镜像仓库；如果 conductor 提供了 Compose，传递 `COMPOSE_JSON`，否则传空值并要求 Jenkins 使用仓库内的 `docker-compose.yaml`；
+3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose、环境变量和目标 Harbor 镜像仓库；
 4. 定时 Celery 任务轮询 Jenkins queue/build 状态；
 5. 成功后读取 Jenkins `orchestrator-result.json` 产物，登记应用镜像；
 6. 调用 Docker Engine/Swarm 创建或更新 Services，登记 service ID 和端点；

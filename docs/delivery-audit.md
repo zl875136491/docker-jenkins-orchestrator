@@ -2,12 +2,12 @@
 
 ## 走查范围
 
-本次走查以项目根目录 `main.txt` 为需求基线，结合当前架构文档、FastAPI、Celery worker、Mongo repository、Jenkins/GitLab/Harbor/Docker 适配器和生产 Compose 配置进行验证。参考应用使用 Immich 官方 Compose 的四服务形态：`immich-server`、`immich-machine-learning`、Redis/Valkey 和 PostgreSQL；测试只使用 fake Docker client，不拉取镜像，也不连接任何真实外部系统。
+本次走查以项目根目录 `main.txt` 为需求基线，结合当前架构文档、FastAPI、Celery worker、Mongo repository、Jenkins/GitLab/Harbor/Docker 适配器和生产 Compose 配置进行验证。参考项目使用 Immich、Plane 和 Paperless-ngx 的官方 Compose/部署模板；测试只使用 fake Docker client，不拉取镜像，也不连接任何真实外部系统。
 
 验证命令：
 
 ```text
-pytest -q                         # 59 passed
+pytest -q                         # 66 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -17,9 +17,11 @@ python3 -m compileall -q .        # passed
 - FastAPI 通过 `worker-name`/`worker-secret` 签发 JWT，业务路由要求 Bearer token；应用、构建、事件、镜像、服务和告警均以 `appid` 关联。
 - Mongo 是业务状态的权威存储，Redis 只作为 Celery broker；worker/beat 可以从 Mongo 重新发现非终态构建，不依赖 Celery result backend。
 - Jenkins queue/build/artifact 轮询、失败告警、重复投递幂等状态推进和 Docker service 记录已有 fake adapter 集成测试。
-- 构建输入支持两种来源：conductor 提供已组合 Compose 时在触发 Jenkins 前校验；Compose 缺省时，Jenkins 从 Git 仓库检出并读取仓库中的 Compose，最终产物仍必须返回可部署 Compose。
+- 构建输入要求 conductor/用户角色先提供包含 `services` 的 Compose；仓库没有可直接使用的 Compose 时，构建入口明确报错。用户根据通用模板在系统外完成调整并重新提交，系统不会替用户猜测或生成应用编排。
 - Docker Swarm 适配器支持 digest 镜像、环境变量、命令、工作目录、挂载、端口、labels、重启策略、replicas/global 模式、健康检查、`shm_size` 和 CPU/内存资源；更新时会按 appid 清理已删除的旧 service。
-- Immich 风格测试覆盖四服务识别、digest 镜像、bind/命名卷、2283 端口、restart policy、healthcheck、`shm_size`、依赖优先创建和旧服务清理。
+- 通用复杂项目测试覆盖 Immich（4 服务）、Plane（13 服务）和 Paperless-ngx（5 服务）的用户角色 Compose；同一条 pipeline 验证服务数、端口、镜像、依赖、健康检查、挂载和 Mongo 状态持久化。
+- 原始项目形态的失败测试覆盖缺少 Compose、`build` context 和 `env_file`，证明系统会要求用户角色先完成外部调整，而不是针对项目名称写适配逻辑。
+- 每个项目的上游观察、用户输出和 manifest 位于 `tests/fixtures/complex_projects/<project>/`；统一参数化验收位于 `tests/test_complex_project_delivery.py`。
 - 不能安全映射的 `env_file`、secrets/configs、GPU/devices、自定义网络、`container_name` 等字段现在会在创建网络或 service 前明确失败，不再静默丢弃。
 
 ## 仍然存在的产品边界
@@ -32,9 +34,9 @@ python3 -m compileall -q .        # passed
 
 `depends_on` 会被验证并用于依赖优先创建，但 Docker Swarm Service API 没有 Compose 的 `service_healthy` 启动闸门。healthcheck 会进入 service task spec，worker 不会等待数据库/Redis 健康后才标记部署成功。像 Immich 这样的应用必须自身具备连接重试，或后续增加部署后健康检查/回滚流程。
 
-### 中优先级：`env_file` 必须在 Jenkins 侧展开
+### 中优先级：`env_file` 必须在用户角色/Jenkins 侧展开
 
-Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上下文。当前适配器会拒绝 `env_file`，要求 Jenkins 把 `.env` 解析为 `environment` 后再输出 artifact。若 Jenkins job 继续原样传递 Immich 官方 Compose，构建会安全失败而不是错误部署；这属于明确的集成前置条件。
+Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上下文。当前适配器会拒绝 `env_file`，要求用户角色在系统外将模板中的变量填入 `environment`，再由 Jenkins 输出 artifact。若 Jenkins job 继续原样传递官方 Compose，构建会安全失败而不是错误部署；这属于明确的输入前置条件。
 
 ### 中优先级：Swarm 不是完整 Compose 实现
 

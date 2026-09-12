@@ -1,0 +1,9 @@
+{
+  "project": "plane",
+  "repository": "https://github.com/makeplane/plane",
+  "branch": "preview",
+  "source_compose_path": "docker-compose.yml",
+  "root_compose_present": true,
+  "service_count": 13,
+  "public_port": 8080
+}
