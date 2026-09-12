@@ -36,7 +36,13 @@ def test_app_build_lifecycle_smoke() -> None:
     app_response = client.post(
         "/api/apps",
         headers=headers,
-        json={"appid": "demo-app", "name": "Demo", "repository_url": "https://git.example/demo.git"},
+        json={
+            "appid": "demo-app",
+            "name": "Demo",
+            "repository_url": "https://git.example/demo.git",
+            "environment": {"DATABASE_URL": "mongodb://mongodb/demo"},
+            "compose": {"services": {"api": {"image": "example/demo:latest"}}},
+        },
     )
     assert app_response.status_code == 201
     assert client.get("/api/apps/demo-app", headers=headers).status_code == 200
@@ -46,6 +52,9 @@ def test_app_build_lifecycle_smoke() -> None:
     build = build_response.json()
     assert build["status"] == "queued"
     assert client.get(f"/api/builds/{build['build_id']}", headers=headers).json()["appid"] == "demo-app"
+    app_document = client.get("/api/apps/demo-app", headers=headers).json()
+    assert app_document["environment_keys"] == ["DATABASE_URL"]
+    assert "mongodb://mongodb/demo" not in str(app_document)
 
 
 def test_duplicate_app_and_missing_app_are_reported() -> None:
@@ -54,6 +63,14 @@ def test_duplicate_app_and_missing_app_are_reported() -> None:
     assert client.post("/api/apps", headers=headers, json=payload).status_code == 201
     assert client.post("/api/apps", headers=headers, json=payload).status_code == 409
     assert client.post("/api/apps/missing/builds", headers=headers, json={}).status_code == 404
+
+
+def test_build_requires_compose_document() -> None:
+    headers = auth_headers()
+    payload = {"appid": "no-compose", "name": "No Compose", "repository_url": "https://git.example/no-compose.git"}
+    assert client.post("/api/apps", headers=headers, json=payload).status_code == 201
+    response = client.post("/api/apps/no-compose/builds", headers=headers, json={})
+    assert response.status_code == 422
 
 
 def test_template_composition_smoke() -> None:

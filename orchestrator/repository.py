@@ -1,76 +1,310 @@
-from typing import Protocol
+from __future__ import annotations
 
-from orchestrator.models import BaseImage, BuildJob, UserApp
+from datetime import datetime
+from threading import RLock
+from typing import Any, Protocol, Sequence
+
+from orchestrator.models import (
+    Alert,
+    AppEvent,
+    BaseImage,
+    BuildJob,
+    BuildStatus,
+    DeploymentService,
+    UserAppRecord,
+    UserImage,
+)
 
 
-class Repository(Protocol):
-    def create_app(self, app: UserApp) -> UserApp: ...
-    def get_app(self, appid: str) -> UserApp | None: ...
-    def create_build(self, build: BuildJob) -> BuildJob: ...
-    def get_build(self, build_id: str) -> BuildJob | None: ...
-    def save_base_image(self, image: BaseImage) -> BaseImage: ...
-
-
-class DuplicateAppError(Exception):
+class RepositoryError(RuntimeError):
     pass
 
 
+class DuplicateAppError(RepositoryError):
+    pass
+
+
+class Repository(Protocol):
+    def ensure_indexes(self) -> None: ...
+    def close(self) -> None: ...
+    def create_app(self, app: UserAppRecord) -> UserAppRecord: ...
+    def get_app(self, appid: str) -> UserAppRecord | None: ...
+    def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None: ...
+    def create_build(self, build: BuildJob) -> BuildJob: ...
+    def get_build(self, build_id: str) -> BuildJob | None: ...
+    def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None: ...
+    def transition_build(
+        self, build_id: str, expected_statuses: Sequence[BuildStatus], status: BuildStatus, fields: dict[str, Any]
+    ) -> BuildJob | None: ...
+    def append_event(self, event: AppEvent) -> AppEvent: ...
+    def list_events(self, appid: str, limit: int = 100) -> list[AppEvent]: ...
+    def save_user_image(self, image: UserImage) -> UserImage: ...
+    def list_user_images(self, appid: str) -> list[UserImage]: ...
+    def save_base_image(self, image: BaseImage) -> BaseImage: ...
+    def list_base_images(self) -> list[BaseImage]: ...
+    def save_service(self, service: DeploymentService) -> DeploymentService: ...
+    def list_services(self, appid: str) -> list[DeploymentService]: ...
+    def create_alert(self, alert: Alert) -> Alert: ...
+    def list_alerts(self, appid: str) -> list[Alert]: ...
+
+
 class InMemoryRepository:
+    """Thread-safe development/test repository mirroring the MongoDB contract."""
+
     def __init__(self) -> None:
-        self.apps: dict[str, UserApp] = {}
+        self._lock = RLock()
+        self.apps: dict[str, UserAppRecord] = {}
         self.builds: dict[str, BuildJob] = {}
+        self.events: list[AppEvent] = []
+        self.user_images: dict[str, UserImage] = {}
         self.base_images: dict[str, BaseImage] = {}
+        self.services: dict[str, DeploymentService] = {}
+        self.alerts: dict[str, Alert] = {}
 
-    def create_app(self, app: UserApp) -> UserApp:
-        if app.appid in self.apps:
-            raise DuplicateAppError(app.appid)
-        self.apps[app.appid] = app
-        return app
+    @staticmethod
+    def _copy(model):
+        return model.model_copy(deep=True)
 
-    def get_app(self, appid: str) -> UserApp | None:
-        return self.apps.get(appid)
+    def ensure_indexes(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def create_app(self, app: UserAppRecord) -> UserAppRecord:
+        with self._lock:
+            if app.appid in self.apps:
+                raise DuplicateAppError(app.appid)
+            self.apps[app.appid] = self._copy(app)
+            return self._copy(app)
+
+    def get_app(self, appid: str) -> UserAppRecord | None:
+        with self._lock:
+            app = self.apps.get(appid)
+            return self._copy(app) if app else None
+
+    def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
+        with self._lock:
+            existing = self.apps.get(appid)
+            if existing is None:
+                return None
+            updated = existing.model_copy(update=fields, deep=True)
+            self.apps[appid] = updated
+            return self._copy(updated)
 
     def create_build(self, build: BuildJob) -> BuildJob:
-        self.builds[build.build_id] = build
-        return build
+        with self._lock:
+            self.builds[build.build_id] = self._copy(build)
+            return self._copy(build)
 
     def get_build(self, build_id: str) -> BuildJob | None:
-        return self.builds.get(build_id)
+        with self._lock:
+            build = self.builds.get(build_id)
+            return self._copy(build) if build else None
+
+    def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None:
+        with self._lock:
+            existing = self.builds.get(build_id)
+            if existing is None:
+                return None
+            updated = existing.model_copy(update=fields, deep=True)
+            self.builds[build_id] = updated
+            return self._copy(updated)
+
+    def transition_build(
+        self, build_id: str, expected_statuses: Sequence[BuildStatus], status: BuildStatus, fields: dict[str, Any]
+    ) -> BuildJob | None:
+        with self._lock:
+            existing = self.builds.get(build_id)
+            if existing is None or existing.status not in set(expected_statuses):
+                return None
+            updated = existing.model_copy(update={**fields, "status": status}, deep=True)
+            self.builds[build_id] = updated
+            return self._copy(updated)
+
+    def append_event(self, event: AppEvent) -> AppEvent:
+        with self._lock:
+            self.events.append(self._copy(event))
+            return self._copy(event)
+
+    def list_events(self, appid: str, limit: int = 100) -> list[AppEvent]:
+        with self._lock:
+            values = [event for event in self.events if event.appid == appid]
+            return [self._copy(event) for event in sorted(values, key=lambda event: event.created_at, reverse=True)[:limit]]
+
+    def save_user_image(self, image: UserImage) -> UserImage:
+        with self._lock:
+            self.user_images[image.image_id] = self._copy(image)
+            return self._copy(image)
+
+    def list_user_images(self, appid: str) -> list[UserImage]:
+        with self._lock:
+            return [self._copy(image) for image in self.user_images.values() if image.appid == appid]
 
     def save_base_image(self, image: BaseImage) -> BaseImage:
-        self.base_images[image.image] = image
-        return image
+        with self._lock:
+            self.base_images[image.source_image] = self._copy(image)
+            return self._copy(image)
+
+    def list_base_images(self) -> list[BaseImage]:
+        with self._lock:
+            return [self._copy(image) for image in self.base_images.values()]
+
+    def save_service(self, service: DeploymentService) -> DeploymentService:
+        with self._lock:
+            self.services[service.service_id] = self._copy(service)
+            return self._copy(service)
+
+    def list_services(self, appid: str) -> list[DeploymentService]:
+        with self._lock:
+            return [self._copy(service) for service in self.services.values() if service.appid == appid]
+
+    def create_alert(self, alert: Alert) -> Alert:
+        with self._lock:
+            self.alerts[alert.alert_id] = self._copy(alert)
+            return self._copy(alert)
+
+    def list_alerts(self, appid: str) -> list[Alert]:
+        with self._lock:
+            return [self._copy(alert) for alert in self.alerts.values() if alert.appid == appid]
 
 
 class MongoRepository:
-    """Mongo-backed repository using small collection methods for easy mocking."""
+    """MongoDB repository. The client is owned by this object when supplied."""
 
-    def __init__(self, database) -> None:
+    def __init__(self, database, client=None) -> None:
+        self._client = client
         self.apps = database["user_apps"]
         self.builds = database["build_jobs"]
+        self.events = database["app_events"]
+        self.user_images = database["user_images"]
         self.base_images = database["base_images"]
+        self.services = database["deployment_services"]
+        self.alerts = database["alerts"]
 
-    def create_app(self, app: UserApp) -> UserApp:
+    @classmethod
+    def connect(cls, url: str, database_name: str, timeout_ms: int = 5000) -> "MongoRepository":
+        from pymongo import MongoClient
+
+        client = MongoClient(url, serverSelectionTimeoutMS=timeout_ms, connectTimeoutMS=timeout_ms)
+        repository = cls(client[database_name], client=client)
+        repository.ensure_indexes()
+        return repository
+
+    @staticmethod
+    def _document(model) -> dict[str, Any]:
+        return model.model_dump(mode="python")
+
+    @staticmethod
+    def _model(model_type, document: dict[str, Any] | None):
+        if document is None:
+            return None
+        document = dict(document)
+        document.pop("_id", None)
+        return model_type.model_validate(document)
+
+    def ensure_indexes(self) -> None:
+        self.apps.create_index("appid", unique=True, name="unique_appid")
+        self.builds.create_index("build_id", unique=True, name="unique_build_id")
+        self.builds.create_index([("appid", 1), ("status", 1), ("created_at", -1)], name="builds_by_app_status")
+        self.events.create_index([("appid", 1), ("created_at", -1)], name="events_by_app")
+        self.events.create_index([("build_id", 1), ("created_at", -1)], name="events_by_build")
+        self.user_images.create_index([("appid", 1), ("build_id", 1), ("reference", 1)], unique=True, name="unique_user_image")
+        self.base_images.create_index("source_image", unique=True, name="unique_base_image")
+        self.services.create_index([("appid", 1), ("build_id", 1), ("service_name", 1)], unique=True, name="unique_deployment_service")
+        self.alerts.create_index([("appid", 1), ("created_at", -1)], name="alerts_by_app")
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+
+    def create_app(self, app: UserAppRecord) -> UserAppRecord:
         try:
-            self.apps.insert_one(app.model_dump(mode="json"))
+            self.apps.insert_one(self._document(app))
         except Exception as exc:
-            if "duplicate" in str(exc).lower() or getattr(exc, "code", None) == 11000:
+            if getattr(exc, "code", None) == 11000:
                 raise DuplicateAppError(app.appid) from exc
-            raise
+            raise RepositoryError("Unable to create user-app") from exc
         return app
 
-    def get_app(self, appid: str) -> UserApp | None:
-        document = self.apps.find_one({"appid": appid})
-        return UserApp.model_validate(document) if document else None
+    def get_app(self, appid: str) -> UserAppRecord | None:
+        return self._model(UserAppRecord, self.apps.find_one({"appid": appid}))
+
+    def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
+        from pymongo import ReturnDocument
+
+        document = self.apps.find_one_and_update(
+            {"appid": appid}, {"$set": fields}, return_document=ReturnDocument.AFTER
+        )
+        return self._model(UserAppRecord, document)
 
     def create_build(self, build: BuildJob) -> BuildJob:
-        self.builds.insert_one(build.model_dump(mode="json"))
+        try:
+            self.builds.insert_one(self._document(build))
+        except Exception as exc:
+            raise RepositoryError("Unable to create build job") from exc
         return build
 
     def get_build(self, build_id: str) -> BuildJob | None:
-        document = self.builds.find_one({"build_id": build_id})
-        return BuildJob.model_validate(document) if document else None
+        return self._model(BuildJob, self.builds.find_one({"build_id": build_id}))
+
+    def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None:
+        from pymongo import ReturnDocument
+
+        document = self.builds.find_one_and_update(
+            {"build_id": build_id}, {"$set": fields}, return_document=ReturnDocument.AFTER
+        )
+        return self._model(BuildJob, document)
+
+    def transition_build(
+        self, build_id: str, expected_statuses: Sequence[BuildStatus], status: BuildStatus, fields: dict[str, Any]
+    ) -> BuildJob | None:
+        from pymongo import ReturnDocument
+
+        document = self.builds.find_one_and_update(
+            {"build_id": build_id, "status": {"$in": [item.value for item in expected_statuses]}},
+            {"$set": {**fields, "status": status.value}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._model(BuildJob, document)
+
+    def append_event(self, event: AppEvent) -> AppEvent:
+        self.events.insert_one(self._document(event))
+        return event
+
+    def list_events(self, appid: str, limit: int = 100) -> list[AppEvent]:
+        return [self._model(AppEvent, document) for document in self.events.find({"appid": appid}).sort("created_at", -1).limit(limit)]
+
+    def save_user_image(self, image: UserImage) -> UserImage:
+        self.user_images.replace_one(
+            {"appid": image.appid, "build_id": image.build_id, "reference": image.reference}, self._document(image), upsert=True
+        )
+        return image
+
+    def list_user_images(self, appid: str) -> list[UserImage]:
+        return [self._model(UserImage, document) for document in self.user_images.find({"appid": appid}).sort("created_at", -1)]
 
     def save_base_image(self, image: BaseImage) -> BaseImage:
-        self.base_images.replace_one({"image": image.image}, image.model_dump(mode="json"), upsert=True)
+        self.base_images.replace_one({"source_image": image.source_image}, self._document(image), upsert=True)
         return image
+
+    def list_base_images(self) -> list[BaseImage]:
+        return [self._model(BaseImage, document) for document in self.base_images.find({}).sort("source_image", 1)]
+
+    def save_service(self, service: DeploymentService) -> DeploymentService:
+        self.services.replace_one(
+            {"appid": service.appid, "build_id": service.build_id, "service_name": service.service_name},
+            self._document(service),
+            upsert=True,
+        )
+        return service
+
+    def list_services(self, appid: str) -> list[DeploymentService]:
+        return [self._model(DeploymentService, document) for document in self.services.find({"appid": appid}).sort("created_at", -1)]
+
+    def create_alert(self, alert: Alert) -> Alert:
+        self.alerts.insert_one(self._document(alert))
+        return alert
+
+    def list_alerts(self, appid: str) -> list[Alert]:
+        return [self._model(Alert, document) for document in self.alerts.find({"appid": appid}).sort("created_at", -1)]
