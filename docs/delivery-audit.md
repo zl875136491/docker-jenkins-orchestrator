@@ -2,12 +2,12 @@
 
 ## 走查范围
 
-本次走查以项目根目录 `main.txt` 为需求基线，结合当前架构文档、FastAPI、Celery worker、Mongo repository、Jenkins/GitLab/Harbor/Docker 适配器和生产 Compose 配置进行验证。参考项目使用 Immich、Plane 和 Paperless-ngx 的官方 Compose/部署模板；测试只使用 fake Docker client，不拉取镜像，也不连接任何真实外部系统。
+本次走查以项目根目录 `main.txt` 为需求基线，结合当前架构文档、FastAPI、Celery worker、Mongo repository、Jenkins/GitLab/Harbor/Docker 适配器和生产 Compose 配置进行验证。参考项目使用 Immich、Plane、Paperless-ngx、Umami、SearXNG、Open WebUI、Linkwarden 和 Planka 的官方 Compose/部署模板；复杂项目验收使用 memory repository 和 fake Docker/Jenkins client，不拉取镜像，也不连接任何真实外部系统。Mongo 持久化契约由独立 repository 测试覆盖。
 
 验证命令：
 
 ```text
-pytest -q                         # 74 passed
+pytest -q                         # 102 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -20,9 +20,10 @@ python3 -m compileall -q .        # passed
 - 构建输入要求 conductor/用户角色先提供包含 `services` 的 Compose；仓库没有可直接使用的 Compose 时，构建入口明确报错。用户根据通用模板在系统外完成调整并重新提交，系统不会替用户猜测或生成应用编排。
 - Docker Swarm 适配器支持 digest 镜像、环境变量、命令、工作目录、挂载、端口、labels、重启策略、replicas/global 模式、健康检查、`shm_size` 和 CPU/内存资源；更新时会按 appid 清理已删除的旧 service。
 - 顶层命名卷可携带标准的 `name` 与 `external` 元数据；其他未映射的卷驱动选项仍明确拒绝，避免声称已有 Swarm 卷驱动编排能力。
-- 通用复杂项目测试覆盖 Immich（4 服务）、Plane（13 服务）和 Paperless-ngx（5 服务）的用户角色 Compose；同一条 pipeline 验证服务数、端口、镜像、依赖、健康检查、挂载和 Mongo 状态持久化。
-- 原始项目形态的失败测试覆盖缺少 Compose、以及最终 artifact 中仍残留 `build` context 或 `env_file`；源 Compose 可以先交给 Jenkins 处理，但交付边界会拒绝未规范化的 artifact，证明系统要求用户/流水线完成外部调整而不是针对项目名称写适配逻辑。
+- 通用复杂项目测试覆盖 Immich（4 服务）、Plane（13 服务）、Paperless-ngx（5 服务）、Umami（2 服务）、SearXNG（2 服务）、Open WebUI（2 服务）、Linkwarden（3 服务）和 Planka（2 服务）的用户角色 Compose；同一条 pipeline 验证服务数、端口、镜像、依赖、健康检查、挂载和 repository 状态记录。
+- 原始项目形态的失败测试覆盖缺少 Compose，以及最终 artifact 中仍残留 `build` context、`env_file`、`container_name` 或 `init`；Planka 还验证了“源文件结构已可映射、但用户仍需替换示例密钥”的路径。源 Compose 可以先交给 Jenkins 处理，但交付边界会拒绝未规范化的 artifact，证明系统要求用户/流水线完成外部调整而不是针对项目名称写适配逻辑。
 - 每个项目的上游观察、用户输出和 manifest 位于 `tests/fixtures/complex_projects/<project>/`；统一参数化验收位于 `tests/test_complex_project_delivery.py`。
+- fixture 完整性测试逐项确认四类用户角色产物存在，manifest 的项目名和服务数与 YAML 一致，且用户输出记录了系统反馈和调整结果。
 - fixture manifest 固定了上游分支、源 Compose 路径及对应提交 SHA；测试还调用 Docker SDK 的 service 参数规范化器，确认 fake 调用的字段形状可被真实 SDK 接受。
 - 不能安全映射的 `env_file`、secrets/configs、GPU/devices、自定义网络、`container_name` 等字段现在会在创建网络或 service 前明确失败，不再静默丢弃。
 - 镜像缺失、非法服务名、依赖环、相对 bind mount（例如 `./data:/data`）以及其他非法参数都会在创建 Docker network 或 service 前拒绝；非法 artifact 不会留下部分基础设施。

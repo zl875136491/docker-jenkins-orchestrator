@@ -5,6 +5,8 @@
   "source_commit": "2f895b82dad839c730c36a5c0cbc046f1e5d6b56",
   "source_compose_path": "docker-compose.yml",
   "source_compose_commit": "787ba640aa6634916b02d2b51724d7720863c8c1",
+  "source_service_count": 13,
+  "source_swarm_compatible": false,
   "root_compose_present": true,
   "service_count": 13,
   "public_port": 8080

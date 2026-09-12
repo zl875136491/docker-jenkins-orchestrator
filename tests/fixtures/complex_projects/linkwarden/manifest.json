@@ -1,0 +1,13 @@
+{
+  "project": "linkwarden",
+  "repository": "https://github.com/linkwarden/linkwarden",
+  "branch": "main",
+  "source_commit": "952ac4540657cae3a67c3ca59433899d2fda8374",
+  "source_compose_path": "docker-compose.yml",
+  "source_compose_commit": "e0cd593b5b5b657d8db96666a0d4ccc331861fc5",
+  "source_service_count": 3,
+  "source_swarm_compatible": false,
+  "root_compose_present": true,
+  "service_count": 3,
+  "public_port": 3000
+}

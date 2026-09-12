@@ -118,9 +118,27 @@ def load_project(project: str) -> tuple[dict[str, Any], dict[str, Any]]:
 @pytest.mark.parametrize("project", PROJECTS)
 def test_project_fixture_has_pinned_upstream_provenance(project: str) -> None:
     manifest, _ = load_project(project)
+    assert manifest["project"] == project
     assert re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"])
     assert re.fullmatch(r"[0-9a-f]{40}", manifest["source_compose_commit"])
     assert manifest["source_compose_path"].endswith((".yml", ".yaml"))
+    assert isinstance(manifest["source_service_count"], int) and manifest["source_service_count"] > 0
+    assert isinstance(manifest["source_swarm_compatible"], bool)
+    assert isinstance(manifest["root_compose_present"], bool)
+
+
+@pytest.mark.parametrize("project", PROJECTS)
+def test_project_fixture_records_all_user_role_outputs(project: str) -> None:
+    path = FIXTURES / project
+    expected_files = {"manifest.json", "source-observation.md", "user-compose.yml", "user-output.md"}
+    assert expected_files <= {item.name for item in path.iterdir()}
+    manifest, compose = load_project(project)
+    assert manifest["service_count"] == len(compose["services"])
+    assert manifest["source_service_count"] == manifest["service_count"]
+    output = (path / "user-output.md").read_text(encoding="utf-8").lower()
+    assert "user role" in output
+    assert "user-compose.yml" in output
+    assert "system feedback" in output
 
 
 @pytest.mark.parametrize("project", PROJECTS)
@@ -193,9 +211,29 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
         ("immich", None),
         ("plane", {"services": {"web": {"image": "plane/web:source", "build": {"context": "."}}}}),
         ("paperless-ngx", {"services": {"webserver": {"image": "paperless:test", "env_file": ["docker-compose.env"]}}}),
+        ("umami", {"services": {"umami": {"image": "umami:source", "init": True}}}),
+        (
+            "searxng",
+            {"services": {"core": {"image": "searxng:source", "container_name": "searxng-core", "env_file": [".env"]}}},
+        ),
+        (
+            "open-webui",
+            {
+                "services": {
+                    "open-webui": {
+                        "image": "open-webui:source",
+                        "build": {"context": ".", "dockerfile": "Dockerfile"},
+                    }
+                }
+            },
+        ),
+        (
+            "linkwarden",
+            {"services": {"linkwarden": {"image": "linkwarden:source", "env_file": [".env"], "volumes": ["./data:/data"]}}},
+        ),
     ],
 )
-def test_original_project_shape_requires_user_role_adjustment(project: str, compose: dict[str, Any] | None) -> None:
+def test_unportable_project_shape_requires_user_role_adjustment(project: str, compose: dict[str, Any] | None) -> None:
     settings = Settings(
         environment="test",
         storage_backend="memory",
@@ -244,11 +282,40 @@ def test_original_project_shape_requires_user_role_adjustment(project: str, comp
         assert result == {"build_id": build.build_id, "status": "failed"}
         stored = container.repository.get_build(build.build_id)
         assert stored is not None and stored.error is not None
-        assert "unsupported" in stored.error or "env_file" in stored.error
+        assert any(fragment in stored.error for fragment in ("unsupported", "env_file", "relative bind"))
         assert docker.networks.items == {}
         assert docker.services.create_calls == []
     finally:
         container.close()
+
+
+def test_planka_source_shape_is_already_structurally_swarm_compatible() -> None:
+    """Some upstream Compose files need secret/value hardening, not field translation."""
+
+    compose = {
+        "services": {
+            "planka": {
+                "image": "ghcr.io/plankanban/planka:latest",
+                "environment": [
+                    "BASE_URL=http://localhost:3000",
+                    "DATABASE_URL=postgresql://postgres@postgres/planka",
+                    "SECRET_KEY=notsecretkey",
+                ],
+                "ports": ["3000:1337"],
+                "depends_on": {"postgres": {"condition": "service_healthy"}},
+                "restart": "on-failure",
+            },
+            "postgres": {
+                "image": "postgres:16-alpine",
+                "environment": ["POSTGRES_DB=planka", "POSTGRES_HOST_AUTH_METHOD=trust"],
+                "healthcheck": {"test": ["CMD-SHELL", "pg_isready -U postgres -d planka"]},
+                "volumes": ["db-data:/var/lib/postgresql/data"],
+                "restart": "on-failure",
+            },
+        },
+        "volumes": {"db-data": {}},
+    }
+    DockerSwarmAdapter.validate_compose(compose)
 
 
 @pytest.mark.parametrize("project", PROJECTS)

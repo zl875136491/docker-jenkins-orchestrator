@@ -1,0 +1,13 @@
+{
+  "project": "open-webui",
+  "repository": "https://github.com/open-webui/open-webui",
+  "branch": "main",
+  "source_commit": "0a7c15832fb30b1903753e83f81dc7d27e5b0944",
+  "source_compose_path": "docker-compose.yaml",
+  "source_compose_commit": "ca332db7eb8bbc8496a9fc771834bea257446e54",
+  "source_service_count": 2,
+  "source_swarm_compatible": false,
+  "root_compose_present": true,
+  "service_count": 2,
+  "public_port": 3000
+}

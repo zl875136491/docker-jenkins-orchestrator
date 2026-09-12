@@ -1,0 +1,33 @@
+version: "3.9"
+name: planka
+services:
+  planka-db:
+    image: postgres:16-alpine
+    restart: on-failure
+    volumes:
+      - planka-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: planka
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d planka"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  planka:
+    image: ghcr.io/plankanban/planka:latest
+    restart: on-failure
+    volumes:
+      - planka-data:/app/data
+    ports:
+      - "3000:1337"
+    environment:
+      BASE_URL: "http://localhost:3000"
+      DATABASE_URL: "postgresql://postgres@planka-db/planka"
+      SECRET_KEY: managed-planka-secret
+    depends_on:
+      planka-db:
+        condition: service_healthy
+volumes:
+  planka-data: {}
+  planka-db-data: {}

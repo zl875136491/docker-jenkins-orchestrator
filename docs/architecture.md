@@ -136,4 +136,4 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 6. 基础镜像同步任务为每个稳定版本写独立 `base_images` 记录，且不污染用户镜像集合。
 7. Docker Compose 配置、静态编译和全量测试通过；每个功能点完成后提交包含变更和验证结果的详尽 commit message。
 
-复杂应用交付走查及 Immich 风格 fake-Docker 验证见 [delivery-audit.md](delivery-audit.md)。
+复杂应用交付走查及八个异构开源项目的 fake-Docker 验证见 [delivery-audit.md](delivery-audit.md)。

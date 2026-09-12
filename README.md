@@ -24,4 +24,4 @@ Before requesting a build, conductor must store a user-provided Compose document
 
 See [docs/architecture.md](docs/architecture.md) for the system boundaries, API contract, template catalog, task lifecycle, recovery behavior, and feature acceptance criteria.
 
-See [docs/delivery-audit.md](docs/delivery-audit.md) for the Immich-style complex Compose delivery test and the remaining production integration boundaries.
+See [docs/delivery-audit.md](docs/delivery-audit.md) for the eight-project complex Compose delivery test and the remaining production integration boundaries.

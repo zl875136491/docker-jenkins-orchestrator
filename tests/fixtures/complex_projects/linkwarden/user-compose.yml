@@ -1,0 +1,51 @@
+version: "3.9"
+name: linkwarden
+services:
+  linkwarden-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: managed-secret
+      POSTGRES_DB: postgres
+    restart: always
+    volumes:
+      - linkwarden-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  linkwarden-meilisearch:
+    image: getmeili/meilisearch:v1.13.3
+    environment:
+      MEILI_MASTER_KEY: managed-meili-key
+    restart: always
+    volumes:
+      - linkwarden-meili-data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  linkwarden:
+    image: ghcr.io/linkwarden/linkwarden:latest
+    environment:
+      DATABASE_URL: "postgresql://postgres:managed-secret@linkwarden-postgres:5432/postgres"
+      NEXTAUTH_SECRET: managed-nextauth-secret
+      NEXTAUTH_URL: "http://localhost:3000"
+      MEILI_HOST: http://linkwarden-meilisearch:7700
+      MEILI_MASTER_KEY: managed-meili-key
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - linkwarden-data:/data/data
+    depends_on:
+      linkwarden-postgres:
+        condition: service_healthy
+      linkwarden-meilisearch:
+        condition: service_healthy
+volumes:
+  linkwarden-pgdata: {}
+  linkwarden-meili-data: {}
+  linkwarden-data: {}

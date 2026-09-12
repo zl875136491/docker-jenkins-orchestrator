@@ -1,0 +1,28 @@
+version: "3.9"
+name: searxng
+services:
+  searxng-core:
+    image: docker.io/searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: "http://localhost:8080/"
+      SEARXNG_SECRET: managed-searxng-secret
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - /srv/searxng/core-config:/etc/searxng:ro
+      - searxng-core-data:/var/cache/searxng
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  searxng-valkey:
+    image: docker.io/valkey/valkey:9-alpine
+    command: ["valkey-server", "--save", "30", "1", "--loglevel", "warning"]
+    restart: always
+    volumes:
+      - searxng-valkey-data:/data
+volumes:
+  searxng-core-data: {}
+  searxng-valkey-data: {}

@@ -1,0 +1,13 @@
+{
+  "project": "planka",
+  "repository": "https://github.com/plankanban/planka",
+  "branch": "master",
+  "source_commit": "26b512193a6a726e4de46dcdbf21ddb1c34c365b",
+  "source_compose_path": "docker-compose.yml",
+  "source_compose_commit": "de4d7688317829e2a0b665fe9dbf39eaf127b6f9",
+  "source_service_count": 2,
+  "source_swarm_compatible": true,
+  "root_compose_present": true,
+  "service_count": 2,
+  "public_port": 3000
+}

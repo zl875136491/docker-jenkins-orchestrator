@@ -1,0 +1,13 @@
+{
+  "project": "searxng",
+  "repository": "https://github.com/searxng/searxng",
+  "branch": "master",
+  "source_commit": "56b1f64541ff6ce02dc4c8bf1aa83a799a538657",
+  "source_compose_path": "container/docker-compose.yml",
+  "source_compose_commit": "6b9856d6438a546cbacbcb401334c8bdd33385b6",
+  "source_service_count": 2,
+  "source_swarm_compatible": false,
+  "root_compose_present": false,
+  "service_count": 2,
+  "public_port": 8080
+}

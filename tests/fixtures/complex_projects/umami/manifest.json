@@ -1,0 +1,13 @@
+{
+  "project": "umami",
+  "repository": "https://github.com/umami-software/umami",
+  "branch": "master",
+  "source_commit": "ca661c7057984aa98ed4f7083d84dae2f65bfcb0",
+  "source_compose_path": "docker-compose.yml",
+  "source_compose_commit": "a40b418038a1d3e61d152a3d3869557aecfbbce6",
+  "source_service_count": 2,
+  "source_swarm_compatible": false,
+  "root_compose_present": true,
+  "service_count": 2,
+  "public_port": 3000
+}
