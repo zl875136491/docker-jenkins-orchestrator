@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "cf3a83cee215bd82a2b5fbeb5e9596cc1ca5b575",
-    "indexed_at": "2026-09-11T18:05:14Z",
+    "commit": "8cdc577bff316822d2d60ac4cb5a2a9c49ba0d6b",
+    "indexed_at": "2026-09-12T04:22:22Z",
     "project": "worker_space-orchestrator-docker-jenkins-orchestrator",
-    "nodes": 162,
-    "edges": 458,
-    "original_size": 1900544,
-    "compressed_size": 133377,
+    "nodes": 663,
+    "edges": 3199,
+    "original_size": 4194304,
+    "compressed_size": 584526,
     "compression_level": 9
 }
