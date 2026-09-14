@@ -1,8 +1,10 @@
 import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 import pytest
 
-from orchestrator.gitlab import GitLabError, GitLabHttpAdapter, GitLabNotFoundError, HttpResponse
+from orchestrator.gitlab import GitLabError, GitLabHttpAdapter, GitLabNotFoundError, HttpResponse, UrllibHttpTransport
 
 
 class FakeTransport:
@@ -73,3 +75,36 @@ def test_validate_repository_ref_rejects_other_gitlab_hosts_before_request() -> 
         adapter.validate_repository_ref("https://other-gitlab.example/team/api.git", "main")
 
     assert transport.calls == []
+
+
+def test_urllib_transport_reuses_set_cookie_for_follow_up_requests() -> None:
+    seen_cookie: list[str | None] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler API
+            self.send_response(200)
+            if self.path == "/crumb":
+                self.send_header("Set-Cookie", "JSESSIONID=test-session; Path=/")
+                body = b"crumb"
+            else:
+                seen_cookie.append(self.headers.get("Cookie"))
+                body = b"build"
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return None
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = UrllibHttpTransport(timeout=2)
+        base = f"http://127.0.0.1:{server.server_port}"
+        first = transport.request("GET", f"{base}/crumb", headers={})
+        second = transport.request("GET", f"{base}/build", headers={})
+        assert first.status_code == second.status_code == 200
+        assert seen_cookie == ["JSESSIONID=test-session"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)

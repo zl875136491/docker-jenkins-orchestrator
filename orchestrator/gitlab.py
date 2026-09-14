@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlsplit
-from urllib.request import Request, urlopen
+from http.cookiejar import CookieJar
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from orchestrator.adapters import AdapterError
 
@@ -63,6 +64,13 @@ class UrllibHttpTransport:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self._timeout = timeout
+        # Jenkins' CSRF crumb issuer sets a session cookie that must accompany
+        # the following build request. Keep it in this transport instance so
+        # adapters share one authenticated HTTP session without exposing it to
+        # callers or logs.
+        self._opener = build_opener()
+        self._cookie_jar = CookieJar()
+        self._opener.add_handler(HTTPCookieProcessor(self._cookie_jar))
 
     def request(
         self,
@@ -74,7 +82,7 @@ class UrllibHttpTransport:
     ) -> HttpResponse:
         request = Request(url, data=body, headers=dict(headers), method=method.upper())
         try:
-            with urlopen(request, timeout=self._timeout) as response:
+            with self._opener.open(request, timeout=self._timeout) as response:
                 return HttpResponse(
                     status_code=response.status,
                     headers=dict(response.headers.items()),
