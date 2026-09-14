@@ -1,5 +1,11 @@
 # 复杂应用交付走查报告
 
+> **重要：本报告是离线验收，不是生产执行记录。** 本轮没有读取或使用
+> `auth.txt` 中的真实凭据，没有调用真实 Jenkins、GitLab、Harbor、MongoDB、
+> Redis 或 Docker Engine，也没有创建 Jenkins build、推送 Harbor 镜像或创建
+> Swarm service。报告中的“成功”仅表示 fake adapter 和内存 repository 测试
+> 通过。
+
 ## 走查范围
 
 本次走查以项目根目录 `main.txt` 为需求基线，结合当前架构文档、FastAPI、Celery worker、Mongo repository、Jenkins/GitLab/Harbor/Docker 适配器和生产 Compose 配置进行验证。参考项目使用 Immich、Plane、Paperless-ngx、Umami、SearXNG、Open WebUI、Linkwarden 和 Planka 的官方 Compose/部署模板；复杂项目验收使用 memory repository 和 fake Docker/Jenkins client，不拉取镜像，也不连接任何真实外部系统。Mongo 持久化契约由独立 repository 测试覆盖。

@@ -9,7 +9,7 @@ pytest -q
 uvicorn main:app --reload
 ```
 
-The default settings use an in-memory repository and dispatcher, so the API can be exercised without MongoDB, Celery, Jenkins, Harbor, or Docker Services. Set the `ORCHESTRATOR_*` variables from `.env.example` for deployment; never commit service credentials.
+The default settings use an in-memory repository and dispatcher, so the API can be exercised without MongoDB, Celery, Jenkins, Harbor, or Docker Services. The test suite uses fake external adapters and never creates real Jenkins builds or Harbor pushes. Set the `ORCHESTRATOR_*` variables from `.env.example` for deployment; never commit service credentials.
 
 For the container topology, copy `.env.example` to `.env`, supply every required secret, and validate the rendered deployment before starting it:
 
