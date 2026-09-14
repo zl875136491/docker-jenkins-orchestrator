@@ -40,6 +40,13 @@ Linkwarden，并显式使用 `--retain-evidence`。本轮的应用标识符合
 标签：`1-linkwarden`、`1-linkwarden-meilisearch`、`1-linkwarden-postgres`。三个镜像的
 manifest digest 均为 `sha256:a81e7e3358fc362a16eaabb874be9b382d90dc1c64f4737d3cdef5dec9806f18`。
 
+本轮 Jenkins job 是隔离联调用的交付合同 fixture：它将已验证的构建源镜像重新标记并推送
+到本轮 Harbor 仓库，再生成包含 Linkwarden 三服务拓扑的规范化 artifact（每个 service 使用
+长驻测试命令）。因此本轮真实验证的是 FastAPI -> Celery/Redis -> Jenkins -> Harbor ->
+Swarm -> Mongo 的交付链路、参数传递和资源生命周期；不应将其解读为 Linkwarden 源码编译、
+业务页面可用性或生产镜像供应链验收。生产环境仍需配置实际的源码构建 Jenkins job，并增加
+部署后的应用健康检查。
+
 保留范围仅限上述 Jenkins job/build/artifact 和 Harbor repository/tag。验证结束后已
 删除本轮 Mongo 临时数据库、Redis DB 15 中的运行专属 key、Swarm service/network/image
 以及本机 API、Celery worker 和 Redis monitor；独立复查结果分别为 Mongo 不存在、Redis
