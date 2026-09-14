@@ -75,6 +75,12 @@ class FakeDocker:
         self.services = FakeServices()
 
 
+class DockerApiFailure(Exception):
+    def __init__(self, explanation: str) -> None:
+        super().__init__(explanation)
+        self.explanation = explanation
+
+
 def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> None:
     docker = FakeDocker()
     adapter = DockerSwarmAdapter("unix:///var/run/docker.sock", docker_client=docker)
@@ -205,6 +211,40 @@ def test_swarm_adapter_rejects_relative_bind_mount_before_side_effects() -> None
     assert docker.services.create_calls == []
 
 
+def test_swarm_adapter_preserves_safe_docker_service_error_context() -> None:
+    docker = FakeDocker()
+
+    def fail_create(_image: str, **_kwargs):
+        raise DockerApiFailure("registry https://user:password@example.invalid/v2: network allocator state missing")
+
+    docker.services.create = fail_create
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError) as error:
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    message = str(error.value)
+    assert "Unable to create Docker service demo-api" in message
+    assert "network allocator state missing" in message
+    assert "password" not in message
+    assert "***:***@" in message
+
+
+def test_swarm_adapter_preserves_safe_docker_network_error_context() -> None:
+    docker = FakeDocker()
+
+    def fail_network(_name: str, **_kwargs):
+        raise DockerApiFailure("could not find network allocator state")
+
+    docker.networks.create = fail_network
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="Unable to create Docker network orchestrator-demo") as error:
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert "network allocator state" in str(error.value)
+
+
 @pytest.mark.parametrize(
     ("compose", "error"),
     [
@@ -275,3 +315,36 @@ def test_swarm_adapter_accepts_standard_external_volume_metadata() -> None:
     docker = FakeDocker()
     DockerSwarmAdapter(docker_client=docker).deploy("demo", compose)
     assert docker.services.create_calls[0][1]["mounts"] == ["shared-data:/data"]
+
+
+def test_swarm_adapter_shortens_long_app_service_names_stably() -> None:
+    docker = FakeDocker()
+    appid = "linkwarden-" + "a" * 32
+    adapter = DockerSwarmAdapter(network_name="livee2e", docker_client=docker)
+
+    deployment = adapter.deploy(
+        appid,
+        {
+            "services": {
+                "linkwarden-meilisearch": {"image": "example/meili:1"},
+                "linkwarden-postgres": {"image": "example/postgres:1"},
+            }
+        },
+    )
+
+    names = [service.service_name for service in deployment.services]
+    assert all(len(name) <= 63 for name in names)
+    assert names[0] != names[1]
+    assert all(name.startswith(appid[:20]) for name in names)
+    assert deployment.network_name == f"livee2e-{appid}"
+
+    second = DockerSwarmAdapter(network_name="livee2e", docker_client=FakeDocker()).deploy(
+        appid,
+        {
+            "services": {
+                "linkwarden-meilisearch": {"image": "example/meili:1"},
+                "linkwarden-postgres": {"image": "example/postgres:1"},
+            }
+        },
+    )
+    assert [service.service_name for service in second.services] == names

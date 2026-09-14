@@ -1,0 +1,82 @@
+# 真实联调交付审计
+
+本报告记录一次经授权、隔离命名空间的真实交付验收。认证信息来自项目根目录的
+`auth.txt`，但没有写入仓库、结果文件或本报告。
+
+## 环境
+
+- Jenkins：`http://10.17.158.156`
+- Harbor Registry/API：`https://10.17.158.118`
+- Jenkins folder：`apps-orchestrator`
+- Harbor project：`apps-orchestrator`
+- Docker Engine：本机单节点 Swarm manager，Docker 28.0.1
+- MongoDB：本机认证连接，每次运行使用唯一临时数据库
+- Redis：本机认证连接，使用 Redis DB 15 和唯一 Celery queue 名称
+- DNS 备注：`jenkins.1oa.com.cn`、`harbor.1oa.com.cn` 在联调主机上不可解析，因此使用已验证的内网地址
+
+Jenkins 临时 job `live-e2e-final-1789363209` 在验收结束后已删除；此前诊断使用的
+`live-e2e-742655080523` 也已删除。
+
+## 三轮正式结果
+
+运行标识：`final3-1789363218`
+
+| 项目 | appid | build_id | Jenkins build | 服务数 | 任务状态 | 事件数 |
+| --- | --- | --- | ---: | ---: | --- | ---: |
+| Umami | `umami-7a02187443af4ba681e8c99796481126` | `835e2444baa442b8abbbb9b27a056cba` | 1 | 2 | `queued -> triggering -> building -> succeeded` | 12 |
+| Planka | `planka-5472cb380b34481a827605cb94b43e5f` | `deae21d5f0d44cb2ae105297dc456f3c` | 2 | 2 | `queued -> validating -> building -> succeeded` | 12 |
+| Linkwarden | `linkwarden-83c25376fefa4750972d3cdd6ef43d10` | `fb83dfa8d42b4b75a3e9a3d506769ff7` | 3 | 3 | `queued -> triggering -> building -> succeeded` | 12 |
+
+每一轮均验证了：
+
+- FastAPI `/api/connect`、JWT Bearer 认证和 `/api/me`；
+- Mongo 中 `user_apps=1`、`build_jobs=1`、`deployment_services=服务数`、`alerts=0`；
+- Celery worker 从 Redis 接收 `start_build`/`poll_build`，Redis MONITOR 观察到本轮独有 queue 的投递和消费；
+- Jenkins build 完成且 `orchestrator-result.json` artifact 存在，artifact 服务拓扑与用户 Compose 一致；
+- Harbor 每个服务都有 tag 和 `sha256` manifest digest；
+- Swarm service 数量、appid label、临时 overlay network 和所有 task 均正确，task 最终为 `running`；
+- 清理后 Mongo 相关集合计数全部为 0，Harbor repository 删除成功，Jenkins build 删除成功，Redis 本轮 key 删除完成。
+
+本轮 Redis 观测共 301 条相关 MONITOR 记录，其中 59 条 enqueue、161 条 consume。
+Redis 仅作为 Celery broker，业务状态仍由 Mongo 持久化。
+
+## 失败定位与修复
+
+此前 Linkwarden 轮次使用完整 UUID appid 时，Jenkins、Harbor 和 Celery 均成功，Swarm
+在创建 `linkwarden-meilisearch` 时返回：
+
+```text
+rpc error: code = InvalidArgument desc = name must be 63 characters or fewer
+```
+
+原因是原始 `appid-compose_service` 名称超过 Docker Swarm 63 字符限制。适配器现在对
+超长 network/service 名称使用稳定的 SHA-256 短哈希，短名称保持原有可读格式；并将 Docker
+API 的安全错误摘要写入构建错误，避免只显示“Unable to deploy Docker service”。修复后的
+单独 Linkwarden 复验和正式三轮均成功。
+
+## 最终清理核验
+
+联调脚本退出后再次直接查询外部系统，结果如下：
+
+- Jenkins 两个临时 job：HTTP 404；
+- Harbor `apps-orchestrator` repository 列表：空；
+- Mongo：无 `orchestrator_live_*` 数据库；
+- Redis DB 15：`dbsize=0`，无 key；
+- Docker Swarm：无本轮 appid service、network 或 task；
+- 本机临时 API、Celery worker、Redis monitor：全部退出。
+
+诊断脚本和结果文件只保留在 `/tmp`，未提交到 Git；其中包含的 appid、build id 和
+基础设施状态不含密码、token 或环境变量值。
+
+## 可复现命令
+
+```text
+/tmp/orchestrator-live-venv/bin/python scripts/live_delivery.py \
+  --job <temporary-job> \
+  --projects umami,planka,linkwarden \
+  --run <unique-run> \
+  --result /tmp/<unique-run>-results.json
+```
+
+脚本在 Redis DB 15 非空时会拒绝启动；每个 appid 在创建后立即登记清理信息，失败轮次
+也会清理已经创建的 Mongo、Jenkins、Harbor、Swarm 和 Redis 资源。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -69,6 +70,7 @@ _REJECTED_SERVICE_FIELDS = {
 _SUPPORTED_DEPLOY_FIELDS = {"mode", "replicas", "restart_policy"}
 _DEPENDENCY_CONDITIONS = {"service_started", "service_healthy"}
 _SUPPORTED_TOP_LEVEL_FIELDS = {"version", "name", "services", "volumes"}
+_MAX_DOCKER_NAME_LENGTH = 63
 
 
 class DockerServiceError(AdapterError):
@@ -266,12 +268,14 @@ class DockerSwarmAdapter:
         return docker.from_env()
 
     def _ensure_network(self, client: Any, appid: str) -> tuple[str, str]:
-        name = f"{self.network_name}-{appid}"
+        name = self._network_name(appid)
         try:
             network = client.networks.get(name)
         except Exception as exc:
             if not self._is_not_found(exc):
-                raise DockerServiceError("Unable to inspect the application Docker network") from exc
+                raise DockerServiceError(
+                    f"Unable to inspect Docker network {name}: {self._safe_error_detail(exc)}"
+                ) from exc
             try:
                 network = client.networks.create(
                     name,
@@ -280,7 +284,9 @@ class DockerSwarmAdapter:
                     labels={"io.docker-jenkins-orchestrator.appid": appid},
                 )
             except Exception as create_exc:
-                raise DockerServiceError("Unable to create the application Docker network") from create_exc
+                raise DockerServiceError(
+                    f"Unable to create Docker network {name}: {self._safe_error_detail(create_exc)}"
+                ) from create_exc
         identifier = self._object_id(network) or name
         return name, identifier
 
@@ -304,7 +310,9 @@ class DockerSwarmAdapter:
                 filters={"label": f"io.docker-jenkins-orchestrator.appid={appid}"}
             )
         except Exception as exc:
-            raise DockerServiceError("Unable to list existing Docker services") from exc
+            raise DockerServiceError(
+                f"Unable to list Docker services for app {appid}: {self._safe_error_detail(exc)}"
+            ) from exc
         for service in existing_services:
             name = self._service_name_from_object(service)
             if not name or name in desired_names:
@@ -315,7 +323,9 @@ class DockerSwarmAdapter:
                     raise RuntimeError("service remove operation is unavailable")
                 remove()
             except Exception as exc:
-                raise DockerServiceError("Unable to remove stale Docker service") from exc
+                raise DockerServiceError(
+                    f"Unable to remove stale Docker service {name}: {self._safe_error_detail(exc)}"
+                ) from exc
 
     @classmethod
     def _service_name_from_object(cls, service: Any) -> str | None:
@@ -421,7 +431,9 @@ class DockerSwarmAdapter:
             existing = client.services.get(name)
         except Exception as exc:
             if not self._is_not_found(exc):
-                raise DockerServiceError("Unable to inspect Docker service") from exc
+                raise DockerServiceError(
+                    f"Unable to inspect Docker service {name}: {self._safe_error_detail(exc)}"
+                ) from exc
             existing = None
 
         try:
@@ -433,7 +445,10 @@ class DockerSwarmAdapter:
                 service = existing
                 action = "updated"
         except Exception as exc:
-            raise DockerServiceError("Unable to deploy Docker service") from exc
+            raise DockerServiceError(
+                f"Unable to {'create' if existing is None else 'update'} Docker service "
+                f"{name}: {self._safe_error_detail(exc)}"
+            ) from exc
 
         service_id = self._object_id(service) or name
         endpoint = self._endpoint(name, ports)
@@ -719,10 +734,28 @@ class DockerSwarmAdapter:
             raise DockerServiceError("Application ID is invalid for Docker service deployment")
         return appid.lower()
 
+    def _network_name(self, appid: str) -> str:
+        raw = f"{self.network_name}-{appid}"
+        if len(raw) <= _MAX_DOCKER_NAME_LENGTH:
+            return raw
+        digest = sha256(appid.encode("utf-8")).hexdigest()[:10]
+        prefix_budget = _MAX_DOCKER_NAME_LENGTH - len(self.network_name) - len(digest) - 2
+        prefix = appid[: max(1, prefix_budget)]
+        return f"{self.network_name}-{prefix}-{digest}"[:_MAX_DOCKER_NAME_LENGTH]
+
     @staticmethod
     def _service_name(appid: str, compose_name: str) -> str:
         prefix = f"{appid}-"
-        return compose_name if compose_name.lower().startswith(prefix) else f"{prefix}{compose_name}"
+        raw = compose_name if compose_name.lower().startswith(prefix.lower()) else f"{prefix}{compose_name}"
+        if len(raw) <= _MAX_DOCKER_NAME_LENGTH:
+            return raw
+        digest = sha256(f"{appid}:{compose_name}".encode("utf-8")).hexdigest()[:10]
+        suffix = f"-{digest}-{compose_name}"
+        prefix_budget = _MAX_DOCKER_NAME_LENGTH - len(suffix)
+        if prefix_budget > 0:
+            return f"{appid[:prefix_budget]}{suffix}"
+        compose_budget = max(1, _MAX_DOCKER_NAME_LENGTH - len(digest) - 2)
+        return f"{digest}-{compose_name[:compose_budget]}"[:_MAX_DOCKER_NAME_LENGTH]
 
     @staticmethod
     def _labels(appid: str, compose_name: str, raw: Any) -> dict[str, str]:
@@ -1049,6 +1082,22 @@ class DockerSwarmAdapter:
     @staticmethod
     def _is_not_found(exc: Exception) -> bool:
         return isinstance(exc, KeyError) or getattr(exc, "status_code", None) == 404 or exc.__class__.__name__ == "NotFound"
+
+    @staticmethod
+    def _safe_error_detail(exc: Exception) -> str:
+        """Return a bounded Docker error explanation without credentials.
+
+        Docker SDK API errors expose a server-provided ``explanation``.  Keep
+        that useful context in the build alert, but strip URL credentials and
+        cap the length so a low-level response cannot become an event-log dump.
+        """
+
+        detail = getattr(exc, "explanation", None) or str(exc) or exc.__class__.__name__
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", "replace")
+        detail = str(detail).replace("\r", " ").replace("\n", " ").strip()
+        detail = re.sub(r"(https?://)([^/@\s]+):([^/@\s]+)@", r"\1***:***@", detail)
+        return detail[:300] or exc.__class__.__name__
 
 
 # A descriptive alias for callers using the existing adapter terminology.

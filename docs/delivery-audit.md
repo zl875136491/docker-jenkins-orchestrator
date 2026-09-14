@@ -1,10 +1,8 @@
 # 复杂应用交付走查报告
 
-> **重要：本报告是离线验收，不是生产执行记录。** 本轮没有读取或使用
-> `auth.txt` 中的真实凭据，没有调用真实 Jenkins、GitLab、Harbor、MongoDB、
-> Redis 或 Docker Engine，也没有创建 Jenkins build、推送 Harbor 镜像或创建
-> Swarm service。报告中的“成功”仅表示 fake adapter 和内存 repository 测试
-> 通过。
+> 本文前半部分记录离线验收；真实 Jenkins、Harbor、MongoDB、Redis/Celery 和
+> Docker Swarm 的隔离联调记录见文末和 [live-delivery-audit.md](live-delivery-audit.md)。
+> 认证信息没有写入 Git。
 
 ## 走查范围
 
@@ -13,7 +11,7 @@
 验证命令：
 
 ```text
-pytest -q                         # 102 passed
+pytest -q                         # 106 passed
 docker compose config -q          # passed with test environment values
 python3 -m compileall -q .        # passed
 ```
@@ -59,3 +57,10 @@ Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上�
 ## 结论
 
 系统已经具备“可测试的端到端编排骨架”和一条可交付的标准路径：GitLab ref -> Jenkins -> artifact -> Docker Swarm -> Mongo 状态。它还不能宣称对 Immich 或任意复杂 Compose 做到无条件的完整交付；实际交付依赖 Jenkins job 展开环境文件、应用自身处理依赖就绪，并避开当前明确拒绝的 Compose 高级能力。上述边界已通过测试和文档固定，后续扩展应先增加对应的 fake/隔离环境验收，再扩大适配器支持范围。
+
+## 真实隔离联调记录
+
+正式三轮运行标识为 `final3-1789363218`，使用 `umami-<uuid>`、`planka-<uuid>` 和
+`linkwarden-<uuid>` appid，三轮均成功并完成清理。完整的 appid、build、Jenkins
+编号、Harbor digest、Mongo/Celery/Swarm 断言、Linkwarden 根因和最终空态核验见
+[live-delivery-audit.md](live-delivery-audit.md)。
