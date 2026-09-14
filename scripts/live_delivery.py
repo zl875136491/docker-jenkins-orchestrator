@@ -4,7 +4,8 @@ The script is intentionally opt-in and is not part of the normal test suite.
 Credentials are read from the operator-provided auth file and never included
 in the result document. Every app, Mongo record, Redis queue, Harbor
 repository, Jenkins build and Swarm object is namespaced by the generated run
-identifier and cleaned after verification.
+identifier. Cleanup is the default; ``--retain-evidence`` keeps the Jenkins
+job/build/artifact and Harbor repository/tag for operator inspection.
 """
 
 from __future__ import annotations
@@ -56,6 +57,11 @@ def args() -> argparse.Namespace:
         "--projects",
         default=os.environ.get("LIVE_E2E_PROJECTS", ",".join(PROJECTS)),
         help="Comma-separated project fixture names to exercise (default: all fixtures)",
+    )
+    parser.add_argument(
+        "--retain-evidence",
+        action="store_true",
+        help="Keep Jenkins job/build/artifact and Harbor repository/tag after a successful audit",
     )
     parser.add_argument("--result", type=Path, default=None)
     parsed = parser.parse_args()
@@ -288,18 +294,24 @@ def main() -> int:
             round_context["swarm_quiescent"] = wait_for_swarm_quiescence(appid)
         except Exception:
             round_context["swarm_quiescent"] = False
-        try:
-            round_context["harbor_deleted"] = delete_harbor(appid)
-        except Exception:
-            pass
+        if options.retain_evidence:
+            round_context["harbor_retained"] = True
+        else:
+            try:
+                round_context["harbor_deleted"] = delete_harbor(appid)
+            except Exception:
+                pass
         try:
             round_context["mongo_deleted"] = delete_mongo(appid, build_id_value)
         except Exception:
             pass
-        try:
-            round_context["jenkins_build_deleted"] = delete_build(number_value)
-        except Exception:
-            pass
+        if options.retain_evidence:
+            round_context["jenkins_build_retained"] = number_value is not None
+        else:
+            try:
+                round_context["jenkins_build_deleted"] = delete_build(number_value)
+            except Exception:
+                pass
 
     def capture_swarm_diagnostics(round_context: dict[str, object]) -> Path | None:
         """Write safe service/task state for a failed round without env values."""
@@ -596,11 +608,25 @@ def main() -> int:
                     "harbor_tags": sorted(tags_list),
                     "harbor_digests": digests,
                     "harbor_deleted": harbor_deleted,
+                    "harbor_retained": bool(round_context.get("harbor_retained")),
+                    "harbor_repository": repository,
+                    "harbor_repository_api": (
+                        f"https://10.17.158.118/api/v2.0/projects/apps-orchestrator/repositories/"
+                        f"{quote(appid, safe='')}"
+                    ),
                     "swarm_services": sorted(deleted_services) if isinstance(deleted_services, list) else [],
                     "swarm_task_states": task_states,
                     "redis_keys_deleted_during_cleanup": residual,
                     "redis_residual_keys_after_cleanup": remaining_redis,
                     "jenkins_build_deleted": jenkins_deleted,
+                    "jenkins_build_retained": bool(round_context.get("jenkins_build_retained")),
+                    "jenkins_build_url": (
+                        f"http://10.17.158.156/job/apps-orchestrator/job/{quote(options.job, safe='')}/{number}/"
+                    ),
+                    "jenkins_artifact_url": (
+                        f"http://10.17.158.156/job/apps-orchestrator/job/{quote(options.job, safe='')}/"
+                        f"{number}/artifact/orchestrator-result.json"
+                    ),
                 }
             )
         streams["redis-monitor"].flush()
@@ -610,6 +636,8 @@ def main() -> int:
         summary = {
             "run": run,
             "jenkins_job": options.job,
+            "jenkins_job_url": f"http://10.17.158.156/job/apps-orchestrator/job/{quote(options.job, safe='')}/",
+            "external_evidence_retained": options.retain_evidence,
             "api": api_url,
             "mongo_database": mongo_db,
             "redis_database": redis_db,
@@ -640,16 +668,17 @@ def main() -> int:
     finally:
         for round_context in rounds:
             cleanup_round(round_context)
-        try:
-            field, value = crumb()
-            jreq(
-                "POST",
-                f"/job/apps-orchestrator/job/{quote(options.job, safe='')}/doDelete",
-                admin=True,
-                headers={field: value},
-            )
-        except Exception:
-            pass
+        if not options.retain_evidence:
+            try:
+                field, value = crumb()
+                jreq(
+                    "POST",
+                    f"/job/apps-orchestrator/job/{quote(options.job, safe='')}/doDelete",
+                    admin=True,
+                    headers={field: value},
+                )
+            except Exception:
+                pass
         try:
             mongo.drop_database(mongo_db)
         except Exception:

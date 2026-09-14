@@ -17,6 +17,34 @@
 Jenkins 临时 job `live-e2e-final-1789363209` 在验收结束后已删除；此前诊断使用的
 `live-e2e-742655080523` 也已删除。
 
+## 保留证据的一轮实机复验
+
+为核对交付链路在 Jenkins 和 Harbor 上确实留下可检查的痕迹，另外执行了一轮
+Linkwarden，并显式使用 `--retain-evidence`。本轮的应用标识符合
+`app-name + UUID` 约定：
+`linkwarden-8f8873660a2444ada4e0906135813e48`。
+
+- 运行标识：`evidence-20260914150228-e4beec90`
+- Jenkins job：[live-e2e-evidence-1789368954](http://10.17.158.156/job/apps-orchestrator/job/live-e2e-evidence-1789368954/)
+- Jenkins build：[#1](http://10.17.158.156/job/apps-orchestrator/job/live-e2e-evidence-1789368954/1/)
+- Jenkins 制品：[orchestrator-result.json](http://10.17.158.156/job/apps-orchestrator/job/live-e2e-evidence-1789368954/1/artifact/orchestrator-result.json)
+- Harbor 仓库详情（管理员 API）：
+  `https://10.17.158.118/api/v2.0/projects/apps-orchestrator/repositories/linkwarden-8f8873660a2444ada4e0906135813e48`
+- Harbor 仓库页面：
+  `https://10.17.158.118/harbor/projects/9/repositories/apps-orchestrator%252Flinkwarden-8f8873660a2444ada4e0906135813e48/artifacts-tab`
+- Harbor registry 标签接口：
+  `https://10.17.158.118/v2/apps-orchestrator/linkwarden-8f8873660a2444ada4e0906135813e48/tags/list`
+
+本轮构建结果为 Jenkins `SUCCESS`，制品包含 `linkwarden`、
+`linkwarden-meilisearch`、`linkwarden-postgres` 三个服务；Harbor 保留了对应的三个
+标签：`1-linkwarden`、`1-linkwarden-meilisearch`、`1-linkwarden-postgres`。三个镜像的
+manifest digest 均为 `sha256:a81e7e3358fc362a16eaabb874be9b382d90dc1c64f4737d3cdef5dec9806f18`。
+
+保留范围仅限上述 Jenkins job/build/artifact 和 Harbor repository/tag。验证结束后已
+删除本轮 Mongo 临时数据库、Redis DB 15 中的运行专属 key、Swarm service/network/image
+以及本机 API、Celery worker 和 Redis monitor；独立复查结果分别为 Mongo 不存在、Redis
+`dbsize=0`、运行专属 key 为 0、Swarm 匹配资源为 0。
+
 ## 三轮正式结果
 
 运行标识：`final3-1789363218`
