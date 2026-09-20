@@ -65,6 +65,21 @@ def can_resolve(host: str) -> bool:
     return True
 
 
+def detect_advertise_host() -> str:
+    """Return the host address peers can use to reach the test service.
+
+    The UDP connect only asks the kernel which interface would route traffic;
+    it does not send a packet. Fall back to loopback when no route is present.
+    """
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("1.1.1.1", 80))
+            return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
 def choose_jenkins_job(base_url: str, user: str, password: str, requested: str | None) -> str:
     if requested:
         return requested.removeprefix("/job/")
@@ -137,6 +152,7 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
         "ORCHESTRATOR_DOCKER_SERVICES_NETWORK": f"{worker_name}-network",
         "ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS": "30",
         "ORCHESTRATOR_API_HOST_PORT": str(args.api_port),
+        "ORCHESTRATOR_API_BIND_ADDRESS": args.api_bind_address,
         "ORCHESTRATOR_REDIS_HOST_PORT": str(args.redis_port),
         "ORCHESTRATOR_TEST_DATA_PATH": str(args.runtime_dir),
         "ORCHESTRATOR_GITLAB_URL": gitlab_url if gitlab_enabled else "",
@@ -154,6 +170,16 @@ def main() -> int:
     parser.add_argument("--harbor-host", default="10.17.158.118")
     parser.add_argument("--jenkins-job", default=os.environ.get("ORCHESTRATOR_JENKINS_JOB_NAME"))
     parser.add_argument("--api-port", type=int, default=18080)
+    parser.add_argument(
+        "--api-bind-address",
+        default=os.environ.get("ORCHESTRATOR_API_BIND_ADDRESS", detect_advertise_host()),
+        help="host address for the test API/UI port mapping (default: detected host address)",
+    )
+    parser.add_argument(
+        "--api-advertise-host",
+        default=os.environ.get("ORCHESTRATOR_API_ADVERTISE_HOST"),
+        help="host/IP to print in the access URL; defaults to the outbound interface",
+    )
     parser.add_argument("--redis-port", type=int, default=16379)
     args = parser.parse_args()
     if not args.auth_file.is_file():
@@ -167,9 +193,17 @@ def main() -> int:
     env_path = args.runtime_dir / ".env"
     env_path.write_text("\n".join(f"{key}={dotenv_value(value)}" for key, value in env.items()) + "\n", encoding="utf-8")
     os.chmod(env_path, 0o600)
+    advertise_host = args.api_advertise_host
+    if not advertise_host:
+        advertise_host = (
+            args.api_bind_address
+            if args.api_bind_address not in {"", "0.0.0.0"}
+            else detect_advertise_host()
+        )
     metadata = {
         "database": database,
-        "api_url": f"http://127.0.0.1:{args.api_port}",
+        "api_bind_address": args.api_bind_address,
+        "api_url": f"http://{advertise_host}:{args.api_port}",
         "compose_file": str(ROOT / "docker-compose.test.yml"),
         "gitlab_validation_enabled": gitlab_enabled,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -177,7 +211,7 @@ def main() -> int:
     (args.runtime_dir / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Prepared test environment at {args.runtime_dir}")
     print(f"Mongo database: {database}")
-    print(f"API URL: http://127.0.0.1:{args.api_port}/ui/")
+    print(f"API URL: {metadata['api_url']}/ui/")
     print(f"GitLab validation: {'enabled' if gitlab_enabled else 'disabled (host is not resolvable)'}")
     return 0
 

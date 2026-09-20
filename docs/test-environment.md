@@ -27,11 +27,20 @@ Check the environment:
 ```bash
 docker compose --env-file /opt/orchestrator-test/.env \
   -f docker-compose.test.yml ps
-curl http://127.0.0.1:18080/healthz
+curl http://<test-host-address>:18080/healthz
 ```
 
-Open `http://127.0.0.1:18080/ui/` and use the generated worker credentials from
-`/opt/orchestrator-test/.env`. Do not paste that file into tickets or commit it.
+The preparation script binds the test API/UI port to the test host's detected
+outbound address, rather than only to loopback. Read the advertised URL from
+`/opt/orchestrator-test/environment.json` (the current test host uses
+`10.32.12.110`):
+
+Open `http://<test-host-address>:18080/ui/` and use the generated worker
+credentials from `/opt/orchestrator-test/.env`. The UI uses same-origin API
+requests, so this URL exercises the frontend served by the test API container.
+Do not paste the dotenv file into tickets or commit it. For a deliberately
+loopback-only test run, pass `--api-bind-address 127.0.0.1` when preparing the
+environment.
 
 Stop the local containers without removing the external Mongo database:
 

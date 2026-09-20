@@ -6,6 +6,7 @@ from orchestrator.config import Settings
 
 
 COMPOSE_PATH = Path("docker-compose.yml")
+TEST_COMPOSE_PATH = Path("docker-compose.test.yml")
 
 
 def test_compose_runs_api_worker_beat_and_durable_dependencies() -> None:
@@ -35,6 +36,18 @@ def test_compose_runtime_environment_enforces_mongo_celery_and_separate_queues()
     assert "ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS" in environment
     assert "ORCHESTRATOR_JENKINS_USER" in worker_environment
     assert "ORCHESTRATOR_HARBOR_PASSWORD" in worker_environment
+
+
+def test_test_compose_exposes_only_api_on_a_configurable_host_address() -> None:
+    document = yaml.safe_load(TEST_COMPOSE_PATH.read_text())
+    services = document["services"]
+
+    assert services["api"]["ports"] == [
+        "${ORCHESTRATOR_API_BIND_ADDRESS:-127.0.0.1}:${ORCHESTRATOR_API_HOST_PORT:-18080}:8000"
+    ]
+    assert services["redis"]["ports"] == [
+        "127.0.0.1:${ORCHESTRATOR_REDIS_HOST_PORT:-16379}:6379"
+    ]
 
 
 def test_production_settings_accept_the_compose_service_endpoints() -> None:

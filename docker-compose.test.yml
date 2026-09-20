@@ -41,7 +41,9 @@ services:
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment: *orchestrator-runtime
     ports:
-      - "127.0.0.1:${ORCHESTRATOR_API_HOST_PORT:-18080}:8000"
+      # The test console must be reachable from the test host network, not only
+      # from the host process that starts Compose.
+      - "${ORCHESTRATOR_API_BIND_ADDRESS:-127.0.0.1}:${ORCHESTRATOR_API_HOST_PORT:-18080}:8000"
     depends_on:
       redis:
         condition: service_healthy
