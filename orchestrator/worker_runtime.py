@@ -262,11 +262,25 @@ class WorkerRuntime:
         """Requeue non-terminal builds after a worker or broker interruption."""
 
         results = {"start_scheduled": 0, "poll_scheduled": 0}
+        # A recovery tick must not add a second polling chain while the normal
+        # chain is still active. Without this lease window, every recovery
+        # tick schedules ``attempt=0`` again; the chains then race during
+        # deployment and Docker Swarm can reject concurrent service updates.
+        stale_after = max(
+            float(self.settings.celery_recovery_interval_seconds) * 2,
+            float(self.settings.deployment_readiness_timeout_seconds)
+            + float(self.settings.celery_poll_interval_seconds) * 2,
+            30.0,
+        )
         for build in self.repository.list_active_builds():
             if build.status in {BuildStatus.QUEUED, BuildStatus.VALIDATING, BuildStatus.TRIGGERING}:
                 self._schedule_start(build.build_id)
                 results["start_scheduled"] += 1
             elif build.status in {BuildStatus.BUILDING, BuildStatus.DEPLOYING}:
+                if build.last_polled_at is not None:
+                    age = (utc_now() - build.last_polled_at).total_seconds()
+                    if age < stale_after:
+                        continue
                 self._schedule_poll(build.build_id, 0)
                 results["poll_scheduled"] += 1
         return results

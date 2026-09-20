@@ -11,6 +11,10 @@ class FakeNetwork:
     def __init__(self, name: str) -> None:
         self.name = name
         self.id = f"network-{name}-id"
+        self.remove_calls = 0
+
+    def remove(self) -> None:
+        self.remove_calls += 1
 
 
 class FakeNetworks:
@@ -144,7 +148,7 @@ def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> 
         "io.docker-jenkins-orchestrator.compose-service": "api",
         "team": "apps",
     }
-    assert kwargs["networks"] == ["network-orchestrator-demo-id"]
+    assert kwargs["networks"] == [{"Target": "network-orchestrator-demo-id", "Aliases": ["api"]}]
     assert kwargs["endpoint_spec"] == {
         "Mode": "vip",
         "Ports": [
@@ -187,7 +191,7 @@ def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> 
                 "io.docker-jenkins-orchestrator.appid": "demo",
                 "io.docker-jenkins-orchestrator.compose-service": "demo-api",
             },
-            "networks": ["network-orchestrator-demo-id"],
+            "networks": [{"Target": "network-orchestrator-demo-id", "Aliases": ["demo-api"]}],
             "endpoint_spec": {
                 "Mode": "vip",
                 "Ports": [
@@ -385,6 +389,52 @@ def test_swarm_adapter_reports_failed_task_after_readiness_timeout() -> None:
 
     with pytest.raises(DockerServiceError, match="failed"):
         adapter._wait_for_service_ready(docker, "demo-api")
+
+
+def test_swarm_adapter_rolls_back_new_service_and_network_after_readiness_failure() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    def fail_readiness(_client: object, _service_name: str) -> None:
+        raise DockerServiceError("readiness failed")
+
+    adapter._wait_for_service_ready = fail_readiness
+
+    with pytest.raises(DockerServiceError, match="readiness failed"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    created = docker.services.items["demo-api"]
+    network = docker.networks.items["orchestrator-demo"]
+    assert created.remove_calls == 1
+    assert network.remove_calls == 1
+
+
+def test_swarm_adapter_rollback_keeps_updated_services_and_network_with_other_service() -> None:
+    docker = FakeDocker()
+    existing = FakeService("demo-existing")
+    docker.services.items[existing.name] = existing
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    def fail_new_service(_client: object, service_name: str) -> None:
+        if service_name == "demo-new":
+            raise DockerServiceError("new service readiness failed")
+
+    adapter._wait_for_service_ready = fail_new_service
+
+    with pytest.raises(DockerServiceError, match="new service readiness failed"):
+        adapter.deploy(
+            "demo",
+            {
+                "services": {
+                    "existing": {"image": "example/existing:2"},
+                    "new": {"image": "example/new:1"},
+                }
+            },
+        )
+
+    assert existing.remove_calls == 0
+    assert docker.services.items["demo-new"].remove_calls == 1
+    assert docker.networks.items["orchestrator-demo"].remove_calls == 0
 
 
 def test_swarm_adapter_ignores_running_tasks_marked_for_shutdown() -> None:

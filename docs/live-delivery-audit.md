@@ -115,6 +115,22 @@ command，Harbor 镜像为
 `GET http://10.32.12.110:18082/` 返回 `200 OK`，控制端
 `/api/apps/test-demo-1/access` 返回 `http://10.32.12.110:18082`。
 
+### 历史服务记录与 Compose 端口诊断（2026-09-21）
+
+控制端中 `test-demo-1` 的源 Compose 和当前 Jenkins 入参均包含
+`ports: ["18082:3000"]`。历史 build `b9d8a21058e24ef1b7fc938bf79542bf` 和
+`4550d148debc4c79ba951619540b8973` 的 `deployment_services` 文档是在端口保真修复前写入
+的快照，因此仍显示 `endpoint: null`；它们不是当前 Swarm service 的端口状态。当前 build
+`dd31c99775544a849ceb0aae0835c601` 的记录包含 `published_port: 18082`，Swarm
+`Endpoint.Ports` 为 `18082->3000`，外部 GET 返回 `200 OK`。
+
+修复后的 Planka WebUI 复验使用 appid
+`planka-1c4a17ed51fb402b9797a19f5eb650aa`、build
+`91294f2c69364556bac9331be451d95d` 和 Jenkins #15。两项 Swarm service/task 均为
+`1/1 Running`，应用入口 `http://10.32.12.110:18086/` 返回 `200 OK`，数据库 service
+使用 Compose 内部 alias `planka-db` 正常连接。部署失败回滚测试同时确认，readiness 失败
+只清理本次新建 service/network，不删除已有应用资源。
+
 此前 Linkwarden 轮次使用完整 UUID appid 时，Jenkins、Harbor 和 Celery 均成功，Swarm
 在创建 `linkwarden-meilisearch` 时返回：
 

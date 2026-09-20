@@ -37,6 +37,27 @@ pipeline {
             export NO_PROXY="${NO_PROXY:-},gitlab.1oa.com.cn"
             export no_proxy="$NO_PROXY"
             export GIT_TERMINAL_PROMPT=0
+            # Image-only Compose services are complete delivery inputs. The
+            # builder still pulls and promotes every image below, but does not
+            # require a source checkout that may be unreachable from the
+            # isolated builder network. Source builds continue through the
+            # authenticated checkout path.
+            if python3 - <<'PY'
+import json
+import os
+
+compose = json.loads(os.environ.get("COMPOSE_JSON", "{}"))
+services = compose.get("services") if isinstance(compose, dict) else None
+image_only = isinstance(services, dict) and bool(services) and all(
+    isinstance(service, dict) and ("build" not in service or service.get("build") is None)
+    for service in services.values()
+)
+raise SystemExit(0 if image_only else 1)
+PY
+            then
+              printf '{"actual_commit":null,"ref":"%s","image_only":true}\n' "$GIT_REF" > checkout.json
+              exit 0
+            fi
             askpass="$WORKSPACE/.git-askpass"
             cat > "$askpass" <<'EOF'
 #!/usr/bin/env sh

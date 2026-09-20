@@ -208,22 +208,32 @@ class DockerSwarmAdapter:
         services = self._compose_services(compose)
         volume_sources = self._volume_sources(compose)
         client = self._client()
-        network_name, network_target = self._ensure_network(client, namespace)
+        network_name, network_target, network_created = self._ensure_network(client, namespace)
 
         deployments: list[ServiceDeployment] = []
-        for compose_name in self._deployment_order(services):
-            definition = services[compose_name]
-            deployment = self._deploy_one(
-                client,
-                namespace,
-                compose_name,
-                definition,
-                network_target,
-                volume_sources,
-            )
-            self._wait_for_service_ready(client, deployment.service_name)
-            deployments.append(deployment)
-        self._cleanup_stale_services(client, namespace, {item.service_name for item in deployments})
+        created_service_names: list[str] = []
+        try:
+            for compose_name in self._deployment_order(services):
+                definition = services[compose_name]
+                deployment = self._deploy_one(
+                    client,
+                    namespace,
+                    compose_name,
+                    definition,
+                    network_target,
+                    volume_sources,
+                )
+                if deployment.action == "created":
+                    created_service_names.append(deployment.service_name)
+                self._wait_for_service_ready(client, deployment.service_name)
+                deployments.append(deployment)
+            self._cleanup_stale_services(client, namespace, {item.service_name for item in deployments})
+        except Exception:
+            # A failed rollout must leave the previous service set intact.  In
+            # particular, updated services belong to the previous revision and
+            # must not be removed as part of this deployment's rollback.
+            self._rollback_deployment(client, network_name, network_created, created_service_names)
+            raise
         return SwarmDeployment(appid=appid, network_name=network_name, services=tuple(deployments))
 
     # Explicit spelling for integrations that describe their input as Compose.
@@ -240,7 +250,7 @@ class DockerSwarmAdapter:
         self._validate_service_name(service_name)
         self._validate_service_image(service_name, service)
         client = self._client()
-        _, network_target = self._ensure_network(client, namespace)
+        _, network_target, _ = self._ensure_network(client, namespace)
         deployment = self._deploy_one(client, namespace, service_name, service, network_target, {})
         self._wait_for_service_ready(client, deployment.service_name)
         return deployment
@@ -366,8 +376,9 @@ class DockerSwarmAdapter:
             return docker.DockerClient(base_url=base_url)
         return docker.from_env()
 
-    def _ensure_network(self, client: Any, appid: str) -> tuple[str, str]:
+    def _ensure_network(self, client: Any, appid: str) -> tuple[str, str, bool]:
         name = self._network_name(appid)
+        created = False
         try:
             network = client.networks.get(name)
         except Exception as exc:
@@ -382,12 +393,113 @@ class DockerSwarmAdapter:
                     attachable=True,
                     labels={"io.docker-jenkins-orchestrator.appid": appid},
                 )
+                created = True
             except Exception as create_exc:
                 raise DockerServiceError(
                     f"Unable to create Docker network {name}: {self._safe_error_detail(create_exc)}"
                 ) from create_exc
         identifier = self._object_id(network) or name
-        return name, identifier
+        return name, identifier, created
+
+    def _rollback_deployment(
+        self,
+        client: Any,
+        network_name: str,
+        network_created: bool,
+        created_service_names: Sequence[str],
+    ) -> None:
+        """Remove only resources created by the failed deployment attempt."""
+
+        services_api = getattr(client, "services", None)
+        get_service = getattr(services_api, "get", None)
+        all_created_removed = True
+        if not callable(get_service):
+            all_created_removed = not created_service_names
+        else:
+            for service_name in reversed(created_service_names):
+                try:
+                    service = get_service(service_name)
+                except Exception as exc:
+                    if self._is_not_found(exc):
+                        continue
+                    all_created_removed = False
+                    continue
+                remove = getattr(service, "remove", None)
+                if not callable(remove):
+                    all_created_removed = False
+                    continue
+                try:
+                    remove()
+                except Exception:
+                    all_created_removed = False
+
+        if not network_created or not all_created_removed:
+            return
+        if self._network_has_other_services(client, network_name, set(created_service_names)):
+            return
+
+        networks_api = getattr(client, "networks", None)
+        get_network = getattr(networks_api, "get", None)
+        if not callable(get_network):
+            return
+        try:
+            network = get_network(network_name)
+            remove = getattr(network, "remove", None)
+            if callable(remove):
+                remove()
+        except Exception:
+            # Preserve the original deployment exception.  A cleanup failure
+            # should not hide the readiness or service operation that failed.
+            return
+
+    def _network_has_other_services(
+        self,
+        client: Any,
+        network_name: str,
+        removed_service_names: set[str],
+    ) -> bool:
+        """Return whether a service other than this rollout still uses a network."""
+
+        services_api = getattr(client, "services", None)
+        list_services = getattr(services_api, "list", None)
+        if callable(list_services):
+            try:
+                existing_services = list_services(filters={"network": network_name})
+            except TypeError:
+                try:
+                    existing_services = list_services()
+                except Exception:
+                    return True
+            except Exception:
+                return True
+            if not isinstance(existing_services, Sequence) or isinstance(existing_services, (str, bytes)):
+                return True
+            return any(
+                (name := self._service_name_from_object(service)) not in removed_service_names
+                for service in existing_services
+            )
+
+        # Older wrappers may not expose service listing.  Inspecting the
+        # network is the conservative fallback: an unknown attachment means
+        # it is unsafe to remove the network.
+        networks_api = getattr(client, "networks", None)
+        get_network = getattr(networks_api, "get", None)
+        if not callable(get_network):
+            return True
+        try:
+            network = get_network(network_name)
+        except Exception:
+            return True
+        attrs = getattr(network, "attrs", None)
+        if not isinstance(attrs, Mapping):
+            return True
+        for key in ("Services", "Containers"):
+            attachments = attrs.get(key)
+            if isinstance(attachments, Mapping) and attachments:
+                return True
+            if isinstance(attachments, Sequence) and not isinstance(attachments, (str, bytes)) and attachments:
+                return True
+        return False
 
     def _cleanup_stale_services(self, client: Any, appid: str, desired_names: set[str]) -> None:
         """Remove services from an earlier Compose revision that disappeared.
@@ -573,7 +685,11 @@ class DockerSwarmAdapter:
         kwargs: dict[str, Any] = {
             "env": self._environment(definition.get("environment")),
             "labels": labels,
-            "networks": [network_target],
+            # Keep Compose service discovery names inside the app-scoped
+            # network. Docker Swarm uses the namespaced service name as its
+            # object name, so without this alias values such as
+            # ``postgres://planka-db/...`` cannot resolve at runtime.
+            "networks": [{"Target": network_target, "Aliases": [compose_name]}],
         }
         command = definition.get("command")
         if command is not None:

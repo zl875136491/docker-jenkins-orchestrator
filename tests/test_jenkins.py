@@ -48,7 +48,12 @@ def test_trigger_poll_build_and_fetch_result_artifact() -> None:
             HttpResponse(status_code=201, headers={"Location": "/queue/item/21/"}),
             json_response({"id": 21, "cancelled": False, "executable": {"number": 18}}),
             json_response({"building": False, "result": "SUCCESS", "url": "https://jenkins.example/job/folder/job/apps/18/"}),
-            json_response({"images": ["harbor.example/apps/orders:18"], "compose": {"services": {"api": {}}}}),
+            json_response(
+                {
+                    "images": ["harbor.example/apps/orders:18"],
+                    "compose": {"services": {"api": {"ports": ["18080:8080"]}}},
+                }
+            ),
         ]
     )
     adapter = JenkinsHttpAdapter(
@@ -71,9 +76,12 @@ def test_trigger_poll_build_and_fetch_result_artifact() -> None:
     assert build.state is JenkinsBuildState.SUCCEEDED
     assert build.terminal
     assert artifact.images == ("harbor.example/apps/orders:18",)
-    assert artifact["compose"] == {"services": {"api": {}}}
+    assert artifact["compose"] == {"services": {"api": {"ports": ["18080:8080"]}}}
     assert artifact.as_dict()["images"] == ["harbor.example/apps/orders:18"]
-    assert artifact == {"images": ["harbor.example/apps/orders:18"], "compose": {"services": {"api": {}}}}
+    assert artifact == {
+        "images": ["harbor.example/apps/orders:18"],
+        "compose": {"services": {"api": {"ports": ["18080:8080"]}}},
+    }
 
     assert [call["url"] for call in transport.calls] == [
         "https://jenkins.example/crumbIssuer/api/json",

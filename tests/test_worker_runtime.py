@@ -16,7 +16,7 @@ from orchestrator.jenkins import (
     JenkinsQueueItem,
     JenkinsResultArtifact,
 )
-from orchestrator.models import BaseImage, BuildCreate, BuildStatus, UserAppCreate, UserImage
+from orchestrator.models import BaseImage, BuildCreate, BuildStatus, UserAppCreate, UserImage, utc_now
 from orchestrator.worker_runtime import WorkerRuntime
 
 
@@ -193,8 +193,8 @@ def successful_deployment() -> SwarmDeployment:
                 service_name="demo-api",
                 image="harbor.example/apps/demo:build-42",
                 action="created",
-                endpoint="demo-api:8080",
-                ports=(),
+                endpoint="demo-api:18080",
+                ports=(DockerPublishedPort(target_port=8080, published_port=18080),),
             ),
         ),
     )
@@ -261,6 +261,10 @@ def test_pending_queue_then_success_persists_artifact_images_and_swarm_services(
         "harbor.example/apps/demo:build-42"
     ]
     assert [service.service_id for service in harness.container.repository.list_services("demo")] == ["service-demo-api"]
+    stored_service = harness.container.repository.list_services("demo")[0]
+    assert [port.model_dump() for port in stored_service.published_ports] == [
+        {"target_port": 8080, "published_port": 18080, "protocol": "tcp", "mode": "ingress"}
+    ]
     assert docker_services.calls == [("demo", artifact.compose)]
 
 
@@ -432,3 +436,16 @@ def test_recovery_requeues_queued_builds_and_restarts_polling_active_builds() ->
     assert result == {"start_scheduled": 1, "poll_scheduled": 1}
     assert harness.scheduled_starts == [queued.build_id]
     assert harness.scheduled_polls == [(active.build_id, 0, 7)]
+
+
+def test_recovery_does_not_add_a_second_poll_chain_while_active_build_is_fresh() -> None:
+    harness = make_harness()
+    active = queue_build(harness, "active-fresh")
+    for status in (BuildStatus.VALIDATING, BuildStatus.TRIGGERING, BuildStatus.BUILDING):
+        harness.container.builds.transition(active.build_id, status)
+    harness.container.repository.update_build(active.build_id, {"last_polled_at": utc_now()})
+
+    result = harness.runtime.recover_builds(task_id="recovery-task")
+
+    assert result == {"start_scheduled": 0, "poll_scheduled": 0}
+    assert harness.scheduled_polls == []
