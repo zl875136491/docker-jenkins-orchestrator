@@ -277,7 +277,8 @@ class WorkerRuntime:
 
     def _complete_deployment(self, build: BuildJob, build_number: int) -> dict[str, str]:
         artifact = self._jenkins_adapter().get_result_artifact(build_number)
-        self._validate_deployment_compose(artifact.compose)
+        app = self._application(build)
+        self._validate_deployment_compose(artifact.compose, source_compose=app.compose)
         for reference in artifact.images:
             self.repository.save_user_image(
                 UserImage(
@@ -386,15 +387,42 @@ class WorkerRuntime:
             raise BuildInputError("Build compose services must be named mappings")
 
     @staticmethod
-    def _validate_deployment_compose(compose: Any) -> None:
+    def _validate_deployment_compose(compose: Any, *, source_compose: Any | None = None) -> None:
         WorkerRuntime._validate_source_compose(compose)
         services = compose["services"]
         if not all(isinstance(service.get("image"), str) and service["image"].strip() for service in services.values()):
             raise BuildInputError("Jenkins deployment compose services must define images")
         try:
             DockerSwarmAdapter.validate_compose(compose)
+            if source_compose is not None:
+                WorkerRuntime._validate_artifact_topology(source_compose, compose)
         except DockerServiceError as exc:
             raise BuildInputError(str(exc)) from exc
+
+    @staticmethod
+    def _validate_artifact_topology(source_compose: Any, artifact_compose: Any) -> None:
+        """Ensure Jenkins cannot silently remove a service or published port.
+
+        Jenkins is allowed to replace images and normalize other build-time
+        fields, but the final deployment contract must retain the user-facing
+        service topology and every declared port mapping. A missing mapping
+        otherwise looks like a successful deployment while making the app
+        unreachable from outside Swarm.
+        """
+
+        WorkerRuntime._validate_source_compose(source_compose)
+        source_services = source_compose["services"]
+        artifact_services = artifact_compose["services"]
+        if set(source_services) != set(artifact_services):
+            raise BuildInputError("Jenkins deployment artifact changed the Compose service topology")
+        for name, source_service in source_services.items():
+            source_ports = DockerSwarmAdapter._ports(source_service.get("ports"))
+            artifact_ports = DockerSwarmAdapter._ports(artifact_services[name].get("ports"))
+            if source_ports != artifact_ports:
+                raise BuildInputError(
+                    f"Jenkins deployment artifact changed ports for service {name}; "
+                    "the final artifact must preserve the source Compose port mappings"
+                )
 
     def _fail(self, build: BuildJob, exc: Exception, fallback: str) -> BuildJob:
         return self.builds.fail(build.build_id, _safe_error(exc, fallback))

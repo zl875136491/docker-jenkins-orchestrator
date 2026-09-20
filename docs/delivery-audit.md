@@ -34,9 +34,9 @@ python3 -m compileall -q .        # passed
 
 ## 仍然存在的产品边界
 
-### 高优先级：Jenkins job 本身不在本仓库
+### 高优先级：Jenkins job 仍需在目标环境部署
 
-本项目只实现 Jenkins HTTP 适配器和 `orchestrator-result.json` 合同，没有 Jenkinsfile、流水线脚本、镜像构建安全策略或真实 Jenkins 验收环境。因此当前测试能证明“请求参数、轮询和产物处理”正确，不能证明任意 GitLab 仓库能在真实 Jenkins 中成功构建。交付前仍需要部署并验收对应 Jenkins job。
+仓库现在提供了 [jenkins/orchestrator-build.groovy](../jenkins/orchestrator-build.groovy) 作为标准流水线模板：它校验 Compose、构建或提升镜像、推送 Harbor，并归档保留完整 service 拓扑的 `orchestrator-result.json`。模板不能替代目标 Jenkins 的凭据、builder 节点、Docker daemon 和 Harbor/GitLab 网络配置；任意 GitLab 仓库仍需在隔离环境中用实际 job 验收。
 
 ### 高优先级：Compose 依赖不是健康就绪闸门
 

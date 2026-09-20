@@ -25,6 +25,7 @@ APP_COMPOSE = {
     "services": {
         "api": {
             "image": "harbor.example/apps/demo:source",
+            "ports": ["18080:8080"],
         }
     },
 }
@@ -171,6 +172,7 @@ def successful_artifact() -> JenkinsResultArtifact:
         "services": {
             "api": {
                 "image": "harbor.example/apps/demo:build-42",
+                "ports": ["18080:8080"],
             }
         }
     }
@@ -260,6 +262,35 @@ def test_pending_queue_then_success_persists_artifact_images_and_swarm_services(
     ]
     assert [service.service_id for service in harness.container.repository.list_services("demo")] == ["service-demo-api"]
     assert docker_services.calls == [("demo", artifact.compose)]
+
+
+def test_artifact_cannot_drop_source_published_ports() -> None:
+    source = APP_COMPOSE
+    artifact_compose = {"services": {"api": {"image": "harbor.example/apps/demo:build-43"}}}
+    artifact = JenkinsResultArtifact(
+        images=("harbor.example/apps/demo:build-43",),
+        compose=artifact_compose,
+        _payload={"images": ["harbor.example/apps/demo:build-43"], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=92)],
+        build=JenkinsBuild(number=92, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness)
+
+    harness.runtime.start_build(build.build_id, task_id="start-task")
+    result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    stored = harness.container.repository.get_build(build.build_id)
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert stored is not None
+    assert stored.error is not None
+    assert "changed ports" in stored.error
+    assert docker_services.calls == []
+    assert harness.container.repository.list_services("demo") == []
 
 
 def test_failed_jenkins_result_marks_the_build_failed_without_deployment() -> None:

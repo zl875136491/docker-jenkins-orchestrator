@@ -77,6 +77,25 @@ Redis 仅作为 Celery broker，业务状态仍由 Mongo 持久化。
 
 ## 失败定位与修复
 
+### Compose 端口丢失定位（2026-09-20）
+
+`test-demo-1` 的控制端记录和 Jenkins 入参均包含 `ports: ["18082:3000"]`，但旧的
+`live-e2e-evidence-1789368954` job 在生成 `orchestrator-result.json` 时重建 service，
+只保留 image、长驻 command 和禁用 healthcheck，主动丢弃了 ports、environment、restart
+等字段。因此 Swarm service 的 `Endpoint.Ports` 为 `null`；源 `compose.yaml` 没有问题。
+
+修复包含两层保护：标准流水线模板直接复制源 service 定义并仅替换最终 image，Verify 阶段
+校验 service 集合和每个端口映射；worker 在部署前再次比较源 Compose 与 Jenkins artifact，
+拓扑或端口被改动时构建失败且不创建 Swarm service。无 build context 的 image-only 服务
+采用一次真实 pull 后 tag/push，避免受限 builder 网络中 `docker build --pull` 的二次拉取。
+
+保留证据的一次实机复验使用 appid
+`test-real-nginx-0cc696b9d3f3`、build id `ee778e50e1184fe89cdf0dff2f35dd16` 和
+Jenkins job `orchestrator-real-delivery-20260920` #5。Jenkins artifact、Harbor tag
+`5-web`、Swarm endpoint `18083:80` 均存在，`GET http://10.32.12.110:18083/` 返回
+Nginx `200 OK`；控制端 `/api/apps/{appid}/access` 返回
+`http://10.32.12.110:18083`。
+
 此前 Linkwarden 轮次使用完整 UUID appid 时，Jenkins、Harbor 和 Celery 均成功，Swarm
 在创建 `linkwarden-meilisearch` 时返回：
 
