@@ -3,11 +3,14 @@
 
   const TOKEN_KEY = "orchestrator.control.token";
   const APP_KEY = "orchestrator.control.appid";
+  const APP_NAME_KEY = "orchestrator.control.appname";
   const TOAST_TIMEOUT_MS = 5000;
   const notifiedErrors = new WeakSet();
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     appid: localStorage.getItem(APP_KEY) || "",
+    appName: localStorage.getItem(APP_NAME_KEY) || "",
+    activeSection: "appSection",
     buildId: "",
     latestBuild: null,
     historyPage: 1,
@@ -105,6 +108,92 @@
     $("sessionDetail").textContent = detail || (online ? "JWT 已保存到当前浏览器。" : "请输入 worker 凭据获取 JWT。");
   }
 
+  function setCurrentApp(name = "") {
+    state.appName = String(name || "").trim();
+    if (state.appName) {
+      localStorage.setItem(APP_NAME_KEY, state.appName);
+    } else {
+      localStorage.removeItem(APP_NAME_KEY);
+    }
+    const target = $("metricApp");
+    if (target) target.textContent = state.appName || "未设置";
+  }
+
+  function sectionFromHash() {
+    const candidate = window.location.hash.slice(1);
+    return $(candidate)?.classList.contains("workspace-section") ? candidate : "";
+  }
+
+  function rememberSection() {
+    const section = sectionFromHash();
+    if (section) state.activeSection = section;
+  }
+
+  function closeModal(modalId) {
+    const modal = $(modalId);
+    if (!modal) return;
+    if (window.location.hash === `#${modalId}`) {
+      window.location.hash = state.activeSection || "appSection";
+    }
+    modal.removeAttribute("data-open");
+  }
+
+  function bindModals() {
+    document.querySelectorAll(".modal-shell").forEach((modal) => {
+      const modalId = modal.id;
+      modal.querySelectorAll(".modal-backdrop, .modal-close").forEach((control) => {
+        control.addEventListener("click", (event) => {
+          event.preventDefault();
+          closeModal(modalId);
+        });
+      });
+    });
+    document.querySelectorAll(".modal-trigger").forEach((trigger) => {
+      trigger.addEventListener("click", () => rememberSection());
+    });
+    window.addEventListener("hashchange", () => {
+      const modal = document.querySelector(".modal-shell:target");
+      if (modal) modal.setAttribute("data-open", "true");
+      rememberSection();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const modal = document.querySelector(".modal-shell:target");
+      if (modal) closeModal(modal.id);
+    });
+  }
+
+  function syncNavigation() {
+    const section = sectionFromHash();
+    if (section) state.activeSection = section;
+    const activeSection = section || state.activeSection || "appSection";
+    document.querySelectorAll(".workspace-section").forEach((item) => {
+      const active = item.id === activeSection;
+      item.classList.toggle("active", active);
+      item.toggleAttribute("aria-hidden", !active);
+    });
+    document.querySelectorAll(".side-nav a[href^='#']").forEach((link) => {
+      const active = link.getAttribute("href") === `#${activeSection}`;
+      link.classList.toggle("active", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+  }
+
+  function bindNavigation() {
+    document.querySelectorAll(".side-nav a[href^='#']").forEach((link) => {
+      link.addEventListener("click", () => {
+        const sectionId = link.getAttribute("href").slice(1);
+        if ($(sectionId)?.classList.contains("workspace-section")) {
+          state.activeSection = sectionId;
+          syncNavigation();
+        }
+      });
+    });
+    window.addEventListener("hashchange", syncNavigation);
+    syncNavigation();
+  }
+
   function pretty(targetId, value) {
     $(targetId).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   }
@@ -139,17 +228,18 @@
   function appidFromInput() {
     const value = $("appId").value.trim() || $("contextAppId").value.trim() || state.appid;
     if (!value) throw new Error("请先填写 App ID");
+    if (value !== state.appid) setCurrentApp("");
     state.appid = value;
     localStorage.setItem(APP_KEY, value);
     $("appId").value = value;
     $("contextAppId").value = value;
-    $("metricApp").textContent = value;
     return value;
   }
 
   function applyApp(app) {
     state.appid = app.appid || "";
     localStorage.setItem(APP_KEY, state.appid);
+    setCurrentApp(app.name || "");
     $("appId").value = app.appid || "";
     $("contextAppId").value = app.appid || "";
     $("appName").value = app.name || "";
@@ -157,7 +247,6 @@
     $("gitRef").value = app.git_ref || "main";
     $("components").value = (app.components || []).join(",");
     $("compose").value = app.compose ? JSON.stringify(app.compose, null, 2) : "";
-    $("metricApp").textContent = app.appid || "未选择";
   }
 
   function applyBuild(build) {
@@ -223,6 +312,7 @@
     state.token = payload.access_token;
     localStorage.setItem(TOKEN_KEY, state.token);
     setSession(true, `令牌有效至 ${payload.expires_at || "未知时间"}`);
+    closeModal("connectionModal");
     await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ resetPage: true, silent: true })]);
     updateHistoryPolling();
     return payload;
@@ -528,12 +618,17 @@
       $("metricHealth").textContent = value.status || "ok";
       return value;
     }, null));
-    $("loadContextButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
+    $("loadContextButton").addEventListener("click", () => {
+      withFeedback(getApp, "appOutput").then((value) => {
+        if (value) closeModal("appContextModal");
+      });
+    });
     $("appId").addEventListener("input", (event) => {
+      const previous = state.appid;
       $("contextAppId").value = event.target.value;
       state.appid = event.target.value.trim();
       if (state.appid) localStorage.setItem(APP_KEY, state.appid);
-      $("metricApp").textContent = state.appid || "未选择";
+      if (state.appid !== previous) setCurrentApp("");
     });
     $("contextAppId").addEventListener("input", (event) => { $("appId").value = event.target.value; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
@@ -575,8 +670,8 @@
     if (state.appid) {
       $("appId").value = state.appid;
       $("contextAppId").value = state.appid;
-      $("metricApp").textContent = state.appid;
     }
+    setCurrentApp(state.appid ? state.appName : "");
     if (!state.token) return;
     try {
       const me = await request("/api/me");
@@ -590,6 +685,10 @@
   }
 
   bindEvents();
+  bindModals();
+  bindNavigation();
+  rememberSection();
   setSession(Boolean(state.token));
+  setCurrentApp(state.appid ? state.appName : "");
   restoreSession();
 })();

@@ -1,3 +1,5 @@
+import re
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -30,3 +32,75 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "/api/connect" in script.text
     assert "/api/builds?" in script.text
     assert "notifyError" in script.text
+
+
+def test_control_console_sidebar_navigation_targets_each_workspace_section() -> None:
+    page = client.get("/ui/")
+    assert page.status_code == 200
+
+    navigation = re.search(r'<nav class="side-nav"[^>]*>(.*?)</nav>', page.text, flags=re.DOTALL)
+    assert navigation is not None
+    navigation_markup = navigation.group(1)
+    section_ids = (
+        "appSection",
+        "buildSection",
+        "historySection",
+        "resourcesSection",
+        "templatesSection",
+        "baseImagesSection",
+    )
+    for section_id in section_ids:
+        assert f'href="#{section_id}"' in navigation_markup
+        assert f'id="{section_id}"' in page.text
+
+
+def test_control_console_has_connection_and_app_context_modals() -> None:
+    page = client.get("/ui/")
+    assert page.status_code == 200
+
+    for modal_id, title_id in (
+        ("connectionModal", "connectionModalTitle"),
+        ("appContextModal", "appContextModalTitle"),
+    ):
+        modal = re.search(fr'<section id="{modal_id}"[^>]*>', page.text)
+        assert modal is not None
+        modal_markup = modal.group(0)
+        assert 'class="modal-shell"' in modal_markup
+        assert 'role="dialog"' in modal_markup
+        assert 'aria-modal="true"' in modal_markup
+        assert f'aria-labelledby="{title_id}"' in modal_markup
+        assert f'id="{title_id}"' in page.text
+    for marker in (
+        'id="openConnectionModal"',
+        'href="#connectionModal"',
+        'id="closeConnectionModal"',
+        'id="openAppContextModal"',
+        'href="#appContextModal"',
+        'id="closeAppContextModal"',
+    ):
+        assert marker in page.text
+    assert 'id="connectForm"' in page.text
+    assert 'id="contextAppId"' in page.text
+
+
+def test_control_console_exposes_topbar_session_and_app_status_markers() -> None:
+    page = client.get("/ui/")
+    stylesheet = client.get("/ui/styles.css")
+    script = client.get("/ui/app.js")
+    assert page.status_code == 200
+    assert stylesheet.status_code == 200
+    assert script.status_code == 200
+
+    for marker in (
+        'class="topbar-context"',
+        'id="currentAppStatus"',
+        'id="metricApp"',
+        'id="sessionStatus"',
+    ):
+        assert marker in page.text
+    assert 'class="status-dot offline"' in page.text
+    assert 'id="metricApp">未设置</strong>' in page.text
+    assert ".status-dot.offline::before" in stylesheet.text
+    assert "function setSession" in script.text
+    assert '$("sessionStatus")' in script.text
+    assert '$("metricApp")' in script.text

@@ -18,51 +18,71 @@
             <h1>Orchestrator</h1>
           </div>
         </div>
-        <div class="topbar-actions">
+        <div class="topbar-context" aria-label="当前控制台上下文">
+          <div id="currentAppStatus" class="topbar-context-item">
+            <span class="topbar-context-label">当前应用</span>
+            <strong id="metricApp">未设置</strong>
+          </div>
           <span id="sessionStatus" class="status-dot offline">未连接</span>
+        </div>
+        <div class="topbar-actions">
+          <a id="openConnectionModal" class="button button-quiet modal-trigger" href="#connectionModal">连接设置</a>
+          <a id="openAppContextModal" class="button button-quiet modal-trigger" href="#appContextModal">当前应用</a>
           <button id="healthButton" class="button button-quiet" type="button">健康检查</button>
           <button id="disconnectButton" class="button button-quiet" type="button">退出</button>
         </div>
       </header>
 
+      <section id="connectionModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="connectionModalTitle">
+        <a id="connectionModalBackdrop" class="modal-backdrop" href="#" aria-label="关闭连接设置"></a>
+        <div class="modal-card">
+          <div class="modal-header">
+            <div>
+              <p class="eyebrow">SESSION</p>
+              <h2 id="connectionModalTitle">连接控制端</h2>
+            </div>
+            <a id="closeConnectionModal" class="modal-close" href="#" aria-label="关闭连接设置">关闭</a>
+          </div>
+          <form id="connectForm" class="stack-form">
+            <label>
+              Worker 名称
+              <input id="workerName" name="workerName" value="local-worker" autocomplete="username" required />
+            </label>
+            <label>
+              Worker 密钥
+              <input id="workerSecret" name="workerSecret" type="password" value="local-worker-secret" autocomplete="current-password" required />
+            </label>
+            <button class="button button-primary" type="submit">获取访问令牌</button>
+          </form>
+          <p id="sessionDetail" class="muted small">本地开发默认凭据已填入。</p>
+        </div>
+      </section>
+
+      <section id="appContextModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="appContextModalTitle">
+        <a class="modal-backdrop" href="#" aria-label="关闭当前应用设置"></a>
+        <div class="modal-card">
+          <div class="modal-header">
+            <div>
+              <p class="eyebrow">WORKSPACE</p>
+              <h2 id="appContextModalTitle">当前应用</h2>
+            </div>
+            <a id="closeAppContextModal" class="modal-close" href="#" aria-label="关闭当前应用设置">关闭</a>
+          </div>
+          <label>
+            App ID
+            <input id="contextAppId" placeholder="例如 demo-app" autocomplete="off" />
+          </label>
+          <button id="loadContextButton" class="button button-secondary full-width" type="button">载入应用</button>
+          <p class="muted small">查询资源、提交构建时会使用此 App ID。</p>
+        </div>
+      </section>
+
       <div class="page-grid">
         <aside class="sidebar">
-          <section class="side-block connection-block">
-            <div class="section-heading compact">
-              <div>
-                <p class="eyebrow">SESSION</p>
-                <h2>连接控制端</h2>
-              </div>
-            </div>
-            <form id="connectForm" class="stack-form">
-              <label>
-                Worker 名称
-                <input id="workerName" name="workerName" value="local-worker" autocomplete="username" required />
-              </label>
-              <label>
-                Worker 密钥
-                <input id="workerSecret" name="workerSecret" type="password" value="local-worker-secret" autocomplete="current-password" required />
-              </label>
-              <button class="button button-primary" type="submit">获取访问令牌</button>
-            </form>
-            <p id="sessionDetail" class="muted small">本地开发默认凭据已填入。</p>
-          </section>
-
-          <section class="side-block app-context-block">
-            <div class="section-heading compact">
-              <div>
-                <p class="eyebrow">WORKSPACE</p>
-                <h2>当前应用</h2>
-              </div>
-            </div>
-            <label>
-              App ID
-              <input id="contextAppId" placeholder="例如 demo-app" autocomplete="off" />
-            </label>
-            <button id="loadContextButton" class="button button-secondary full-width" type="button">载入应用</button>
-            <p class="muted small">查询资源、提交构建时会使用此 App ID。</p>
-          </section>
-
+          <div class="sidebar-intro">
+            <p class="eyebrow">CONTROL AREAS</p>
+            <p class="muted small">选择一个区域开始管理交付流程。</p>
+          </div>
           <nav class="side-nav" aria-label="控制台区域">
             <a href="#appSection">应用</a>
             <a href="#buildSection">构建</a>
@@ -88,10 +108,6 @@
 
           <section class="metric-strip" aria-label="当前状态摘要">
             <div class="metric-cell">
-              <span class="metric-label">应用</span>
-              <strong id="metricApp">未选择</strong>
-            </div>
-            <div class="metric-cell">
               <span class="metric-label">最近构建</span>
               <strong id="metricBuild">--</strong>
             </div>
@@ -105,7 +121,7 @@
             </div>
           </section>
 
-          <section id="appSection" class="workspace-section">
+          <section id="appSection" class="workspace-section default-section">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">01 / APPLICATION</p>
