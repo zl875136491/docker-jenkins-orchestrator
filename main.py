@@ -3,9 +3,12 @@ from __future__ import annotations
 import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 
@@ -182,6 +185,18 @@ def create_app(
     def sync_base_images(_: dict = Depends(require_token)) -> dict[str, str]:
         submission = container.dispatcher.dispatch_base_image_sync()
         return {"task_id": submission.task_id, "task_name": submission.task_name}
+
+    # Keep the control surface dependency-free: the API container serves the
+    # small static console alongside the JSON API.
+    @api.get("/", include_in_schema=False)
+    def control_console_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/ui/")
+
+    api.mount(
+        "/ui",
+        StaticFiles(directory=Path(__file__).parent / "webui", html=True),
+        name="webui",
+    )
 
     return api
 

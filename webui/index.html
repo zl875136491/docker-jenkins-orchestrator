@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#18252c" />
+    <title>Orchestrator Control</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">O</span>
+          <div>
+            <p class="eyebrow">CONTROL PLANE</p>
+            <h1>Orchestrator</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span id="sessionStatus" class="status-dot offline">未连接</span>
+          <button id="healthButton" class="button button-quiet" type="button">健康检查</button>
+          <button id="disconnectButton" class="button button-quiet" type="button">退出</button>
+        </div>
+      </header>
+
+      <div class="page-grid">
+        <aside class="sidebar">
+          <section class="side-block connection-block">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">SESSION</p>
+                <h2>连接控制端</h2>
+              </div>
+            </div>
+            <form id="connectForm" class="stack-form">
+              <label>
+                Worker 名称
+                <input id="workerName" name="workerName" value="local-worker" autocomplete="username" required />
+              </label>
+              <label>
+                Worker 密钥
+                <input id="workerSecret" name="workerSecret" type="password" value="local-worker-secret" autocomplete="current-password" required />
+              </label>
+              <button class="button button-primary" type="submit">获取访问令牌</button>
+            </form>
+            <p id="sessionDetail" class="muted small">本地开发默认凭据已填入。</p>
+          </section>
+
+          <section class="side-block app-context-block">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">WORKSPACE</p>
+                <h2>当前应用</h2>
+              </div>
+            </div>
+            <label>
+              App ID
+              <input id="contextAppId" placeholder="例如 demo-app" autocomplete="off" />
+            </label>
+            <button id="loadContextButton" class="button button-secondary full-width" type="button">载入应用</button>
+            <p class="muted small">查询资源、提交构建时会使用此 App ID。</p>
+          </section>
+
+          <nav class="side-nav" aria-label="控制台区域">
+            <a href="#appSection">应用</a>
+            <a href="#buildSection">构建</a>
+            <a href="#resourcesSection">运行资源</a>
+            <a href="#templatesSection">模板</a>
+            <a href="#baseImagesSection">基础镜像</a>
+          </nav>
+        </aside>
+
+        <main class="workspace">
+          <section class="intro-band">
+            <div>
+              <p class="eyebrow">DELIVERY WORKSPACE</p>
+              <h2>应用交付控制台</h2>
+              <p class="intro-copy">连接后管理应用配置、构建任务和 Docker Services 状态。</p>
+            </div>
+            <div class="intro-meta">
+              <span class="meta-label">API</span>
+              <code id="apiOrigin"></code>
+            </div>
+          </section>
+
+          <section class="metric-strip" aria-label="当前状态摘要">
+            <div class="metric-cell">
+              <span class="metric-label">应用</span>
+              <strong id="metricApp">未选择</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">最近构建</span>
+              <strong id="metricBuild">--</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">服务</span>
+              <strong id="metricServices">--</strong>
+            </div>
+            <div class="metric-cell metric-health">
+              <span class="metric-label">API 状态</span>
+              <strong id="metricHealth">未检查</strong>
+            </div>
+          </section>
+
+          <section id="appSection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">01 / APPLICATION</p>
+                <h2>应用配置</h2>
+              </div>
+              <span class="section-note">保存仓库、变量和 Compose 输入</span>
+            </div>
+            <form id="appForm" class="form-grid">
+              <label>
+                App ID
+                <input id="appId" name="appid" placeholder="demo-app" required />
+              </label>
+              <label>
+                应用名称
+                <input id="appName" name="name" placeholder="Demo" required />
+              </label>
+              <label class="span-2">
+                GitLab 仓库地址
+                <input id="repositoryUrl" name="repository_url" placeholder="https://git.example/team/app.git" required />
+              </label>
+              <label>
+                Git 引用
+                <input id="gitRef" name="git_ref" value="main" />
+              </label>
+              <label>
+                技术栈组件（逗号分隔）
+                <input id="components" name="components" placeholder="python,mongodb,react" />
+              </label>
+              <label class="span-2">
+                环境变量 JSON
+                <textarea id="environment" name="environment" rows="5" spellcheck="false">{}</textarea>
+              </label>
+              <label class="span-2">
+                Docker Compose JSON
+                <textarea id="compose" name="compose" rows="10" spellcheck="false" placeholder='{"services":{"api":{"image":"example/api:latest"}}}'></textarea>
+              </label>
+              <div class="form-actions span-2">
+                <button class="button button-primary" type="submit">创建应用</button>
+                <button id="getAppButton" class="button button-secondary" type="button">读取应用</button>
+                <button id="patchAppButton" class="button button-quiet" type="button">更新应用</button>
+              </div>
+            </form>
+            <pre id="appOutput" class="json-output" aria-live="polite">等待应用操作</pre>
+          </section>
+
+          <section id="buildSection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">02 / PIPELINE</p>
+                <h2>构建任务</h2>
+              </div>
+              <span class="section-note">提交任务并轮询 Jenkins 状态</span>
+            </div>
+            <div class="split-panel">
+              <form id="buildForm" class="stack-form">
+                <label>
+                  构建引用（可覆盖应用配置）
+                  <input id="buildGitRef" placeholder="main" />
+                </label>
+                <button class="button button-primary" type="submit">提交构建</button>
+              </form>
+              <form id="buildQueryForm" class="stack-form">
+                <label>
+                  Build ID
+                  <input id="buildId" placeholder="粘贴 build_id" required />
+                </label>
+                <button class="button button-secondary" type="submit">查询构建</button>
+              </form>
+            </div>
+            <div class="build-summary">
+              <div>
+                <span class="metric-label">状态</span>
+                <strong id="buildStatus" class="status-pill neutral">--</strong>
+              </div>
+              <div>
+                <span class="metric-label">Jenkins build</span>
+                <strong id="jenkinsBuild">--</strong>
+              </div>
+              <div>
+                <span class="metric-label">Celery task</span>
+                <strong id="celeryTask">--</strong>
+              </div>
+              <button id="pollBuildButton" class="button button-quiet" type="button">再次查询</button>
+            </div>
+            <pre id="buildOutput" class="json-output" aria-live="polite">等待构建操作</pre>
+          </section>
+
+          <section id="resourcesSection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">03 / OBSERVABILITY</p>
+                <h2>运行资源</h2>
+              </div>
+              <span class="section-note">查看事件、镜像、服务和告警</span>
+            </div>
+            <div class="resource-actions">
+              <button class="button button-secondary resource-button" data-resource="events" type="button">事件</button>
+              <button class="button button-secondary resource-button" data-resource="images" type="button">用户镜像</button>
+              <button class="button button-secondary resource-button" data-resource="services" type="button">Docker Services</button>
+              <button class="button button-secondary resource-button" data-resource="alerts" type="button">告警</button>
+            </div>
+            <div class="resource-viewer">
+              <div class="viewer-heading">
+                <span id="resourceTitle">请选择资源</span>
+                <span id="resourceTimestamp" class="muted small"></span>
+              </div>
+              <pre id="resourceOutput" class="json-output tall" aria-live="polite">需要先连接并选择 App ID</pre>
+            </div>
+          </section>
+
+          <section id="templatesSection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">04 / COMPOSE</p>
+                <h2>模板组合</h2>
+              </div>
+              <span class="section-note">从静态技术栈目录生成 Compose</span>
+            </div>
+            <div class="split-panel template-panel">
+              <div>
+                <div class="inline-heading">
+                  <h3>可用组件</h3>
+                  <button id="loadTemplatesButton" class="button button-quiet" type="button">刷新目录</button>
+                </div>
+                <div id="templateComponents" class="component-list">
+                  <span class="muted small">连接后加载模板目录</span>
+                </div>
+              </div>
+              <form id="templateForm" class="stack-form">
+                <label>
+                  依赖关系 JSON
+                  <textarea id="templateDependencies" rows="6" spellcheck="false">{}</textarea>
+                </label>
+                <button class="button button-primary" type="submit">生成 Compose</button>
+              </form>
+            </div>
+            <pre id="templateOutput" class="json-output tall">等待模板组合</pre>
+          </section>
+
+          <section id="baseImagesSection" class="workspace-section last-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">05 / REGISTRY</p>
+                <h2>基础镜像</h2>
+              </div>
+              <span class="section-note">查看同步记录或投递同步任务</span>
+            </div>
+            <div class="resource-actions">
+              <button id="loadBaseImagesButton" class="button button-secondary" type="button">刷新基础镜像</button>
+              <button id="syncBaseImagesButton" class="button button-primary" type="button">同步基础镜像</button>
+            </div>
+            <pre id="baseImagesOutput" class="json-output tall">等待基础镜像操作</pre>
+          </section>
+
+          <footer class="workspace-footer">
+            <span>Docker-Jenkins Orchestrator</span>
+            <span id="activityMessage">就绪</span>
+          </footer>
+        </main>
+      </div>
+    </div>
+    <script src="/ui/app.js" defer></script>
+  </body>
+</html>
