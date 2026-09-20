@@ -2,7 +2,10 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from main import create_app
 from main import app
+from orchestrator.config import Settings
+from orchestrator.models import DeploymentService, PublishedPort
 
 
 client = TestClient(app)
@@ -140,6 +143,114 @@ def test_build_history_requires_authentication_and_supports_filters_pagination_a
 
     for invalid_params in ({"status": "unknown"}, {"page": 0}, {"page_size": 101}):
         assert client.get("/api/builds", headers=headers, params=invalid_params).status_code == 422
+
+
+def test_app_access_returns_published_ports_and_configured_urls() -> None:
+    settings = Settings(public_host="control.example.test", public_scheme="https")
+    access_app = create_app(settings=settings)
+    access_client = TestClient(access_app)
+    headers = {
+        "Authorization": "Bearer "
+        + access_client.post(
+            "/api/connect",
+            json={"worker_name": "local-worker", "worker_secret": "local-worker-secret"},
+        ).json()["access_token"]
+    }
+    appid = f"access-{uuid4().hex}"
+    create_response = access_client.post(
+        "/api/apps",
+        headers=headers,
+        json={
+            "appid": appid,
+            "name": "Access",
+            "repository_url": "https://git.example/access.git",
+            "compose": {"services": {"api": {"image": "example/access:latest"}}},
+        },
+    )
+    assert create_response.status_code == 201
+    access_app.state.container.repository.save_service(
+        DeploymentService(
+            service_id="service-access-api",
+            appid=appid,
+            build_id="build-access",
+            service_name="access-api",
+            image="example/access:latest",
+            status="deployed",
+            endpoint="access-api:8080",
+            published_ports=[
+                PublishedPort(target_port=80, published_port=8080),
+                PublishedPort(target_port=8443, published_port=8443, protocol="udp"),
+            ],
+        )
+    )
+
+    response = access_client.get(f"/api/apps/{appid}/access", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["appid"] == appid
+    assert payload["access_available"] is True
+    assert payload["access_urls"] == ["https://control.example.test:8080"]
+    assert payload["services"][0]["published_ports"][0]["published_port"] == 8080
+    assert payload["services"][0]["access_urls"] == ["https://control.example.test:8080"]
+    assert payload["services"][0]["access_available"] is True
+    assert payload["services"][0]["access_reason"] is None
+    legacy_services = access_client.get(f"/api/apps/{appid}/services", headers=headers)
+    assert legacy_services.status_code == 200
+    assert legacy_services.json()[0]["published_ports"][0]["published_port"] == 8080
+
+
+def test_app_access_requires_authentication_and_reports_missing_app() -> None:
+    assert client.get("/api/apps/no-such-app/access").status_code == 401
+    headers = auth_headers()
+    assert client.get("/api/apps/no-such-app/access", headers=headers).status_code == 404
+
+
+def test_app_access_supports_legacy_endpoint_and_reports_unavailable_access() -> None:
+    settings = Settings(public_host=None)
+    access_app = create_app(settings=settings)
+    access_client = TestClient(access_app)
+    headers = auth_headers_for(access_client)
+    appid = f"legacy-access-{uuid4().hex}"
+    assert access_client.post(
+        "/api/apps",
+        headers=headers,
+        json={
+            "appid": appid,
+            "name": "Legacy access",
+            "repository_url": "https://git.example/legacy-access.git",
+            "compose": {"services": {"api": {"image": "example/legacy:latest"}}},
+        },
+    ).status_code == 201
+    access_app.state.container.repository.save_service(
+        DeploymentService(
+            service_id="service-legacy-api",
+            appid=appid,
+            build_id="build-legacy",
+            service_name="legacy-api",
+            image="example/legacy:latest",
+            status="deployed",
+            endpoint="legacy-api:9090",
+        )
+    )
+
+    response = access_client.get(f"/api/apps/{appid}/access", headers=headers)
+    assert response.status_code == 200
+    service = response.json()["services"][0]
+    assert service["published_ports"] == [
+        {"target_port": 9090, "published_port": 9090, "protocol": "tcp", "mode": "ingress"}
+    ]
+    assert service["access_available"] is False
+    assert service["access_urls"] == []
+    assert service["access_reason"] == "Public host is not configured"
+    assert response.json()["access_available"] is False
+
+
+def auth_headers_for(test_client: TestClient) -> dict[str, str]:
+    token = test_client.post(
+        "/api/connect",
+        json={"worker_name": "local-worker", "worker_secret": "local-worker-secret"},
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_duplicate_app_and_missing_app_are_reported() -> None:

@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Literal
 
 from orchestrator.adapters import AdapterError
-from orchestrator.models import DeploymentService
+from orchestrator.models import DeploymentService, PublishedPort as PublishedPortModel
 
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -119,6 +119,15 @@ class ServiceDeployment:
             image=self.image,
             status=status,
             endpoint=self.endpoint,
+            published_ports=[
+                PublishedPortModel(
+                    target_port=port.target_port,
+                    published_port=port.published_port,
+                    protocol=port.protocol,
+                    mode=port.mode,
+                )
+                for port in self.ports
+            ],
         )
 
 

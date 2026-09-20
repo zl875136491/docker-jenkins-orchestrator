@@ -361,6 +361,20 @@ code { background: #e7efed; border: 1px solid var(--line); border-radius: 3px; c
 .sr-only { height: 1px; margin: -1px; overflow: hidden; position: absolute; width: 1px; clip: rect(0, 0, 0, 0); }
 
 .resource-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
+.service-access { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 18px; }
+.service-access h3 { font-size: 16px; margin: 0; }
+.service-access .inline-heading { align-items: flex-start; }
+.service-access .inline-heading p { margin: 5px 0 0; }
+.access-table-wrap { border: 1px solid var(--line); margin-top: 12px; overflow-x: auto; }
+.access-table { border-collapse: collapse; min-width: 760px; width: 100%; }
+.access-table th, .access-table td { border-bottom: 1px solid var(--line); padding: 10px 11px; text-align: left; vertical-align: top; }
+.access-table th { background: var(--surface-alt); color: #53666a; font-size: 11px; font-weight: 800; white-space: nowrap; }
+.access-table td { color: #334b50; font-size: 12px; }
+.access-table tbody tr:last-child td { border-bottom: 0; }
+.access-table tbody tr:hover { background: #f3f8f6; }
+.access-table a { color: var(--teal-dark); font-weight: 800; overflow-wrap: anywhere; }
+.access-reason { max-width: 330px; }
+.access-empty { margin: 0; padding: 22px 13px; text-align: center; }
 .resource-viewer { margin-top: 18px; }
 .viewer-heading { color: #41555a; font-size: 12px; font-weight: 800; justify-content: space-between; }
 

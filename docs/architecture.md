@@ -33,7 +33,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | `app_events` | `appid+created_at`，`build_id+created_at` | 不可变审计事件、任务日志和外部调用摘要 |
 | `user_images` | `appid+build_id+reference` | Jenkins 产出的应用镜像，与基础镜像隔离 |
 | `base_images` | 唯一 `source_image` | `boot-images` 项目的同步状态、摘要和错误 |
-| `deployment_services` | `appid+build_id+service_name` | Docker Swarm Service ID、镜像、状态和端点 |
+| `deployment_services` | `appid+build_id+service_name` | Docker Swarm Service ID、镜像、状态、内部端点和已发布端口 |
 | `alerts` | `appid+created_at` | 构建/部署失败及需要人工处理的告警 |
 
 环境变量不会在读 API 或事件中回显；生产 MongoDB 数据使用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存。Jenkins 只在任务执行时获得解密后的变量。
@@ -53,6 +53,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | GET | `/api/apps/{appid}/events` | 查询按时间排序的审计事件/日志 |
 | GET | `/api/apps/{appid}/images` | 查询用户镜像 |
 | GET | `/api/apps/{appid}/services` | 查询 Docker Services 部署结果 |
+| GET | `/api/apps/{appid}/access` | 查询服务发布端口、公共访问 URL 和不可访问原因 |
 | GET | `/api/apps/{appid}/alerts` | 查询告警 |
 | GET / POST | `/api/templates`, `/api/templates/compose` | 查询/组合静态技术栈模板 |
 | GET / POST | `/api/base-images`, `/api/base-images/sync` | 查询或投递基础镜像同步任务 |
@@ -60,6 +61,33 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
 
 `GET /api/builds` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `appid` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
+
+`GET /api/apps/{appid}/access` 是交付结果的访问入口查询接口。它不会把 Swarm overlay 网络中的内部服务名误当成公网地址，而是只为 Compose/Swarm 中明确声明的 `published` 端口生成 URL。公共主机和协议由 `ORCHESTRATOR_PUBLIC_HOST`、`ORCHESTRATOR_PUBLIC_SCHEME` 配置；未配置公共主机时不会生成外部 URL，避免在反向代理、多节点或内部请求场景下返回错误地址。服务没有已发布端口时，响应中的 `access_urls` 为空，并在 `access_reason` 中说明需要在最终 Compose 中配置例如 `18082:3000` 后重新构建部署。
+
+典型响应如下：
+
+```json
+{
+  "appid": "test-demo-1",
+  "access_available": false,
+  "access_urls": [],
+  "services": [
+    {
+      "build_id": "4550d148debc4c79ba951619540b8973",
+      "service_name": "test-demo-1-react",
+      "status": "deployed",
+      "image": "10.17.158.118/apps-orchestrator/test-demo-1:3-react",
+      "endpoint": null,
+      "published_ports": [],
+      "access_urls": [],
+      "access_available": false,
+      "access_reason": "No published ports"
+    }
+  ]
+}
+```
+
+控制台的“运行资源”页面提供“访问入口”查询按钮，会将每个服务的端口和 URL 渲染为表格；没有入口时直接显示原因和 Compose 修复示例，原始 JSON 仍保留在下方供排障。
 
 创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
 
@@ -123,6 +151,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 - `ORCHESTRATOR_MONGODB_URL`、`ORCHESTRATOR_MONGODB_DATABASE`
 - `ORCHESTRATOR_CELERY_BROKER_URL=redis://redis:6379/0`
 - `ORCHESTRATOR_DATA_ENCRYPTION_KEY`
+- `ORCHESTRATOR_PUBLIC_HOST`、`ORCHESTRATOR_PUBLIC_SCHEME`（生成服务访问 URL；反向代理或多节点部署时应显式配置）
 - Jenkins、GitLab、Harbor、Docker Engine 的 URL 和认证项
 
 `docker-compose.yml` 运行 API、worker、beat、MongoDB 和 Redis。MongoDB、Redis 与 beat 调度文件均使用持久卷；API、worker、beat 仅在 MongoDB 和 Redis 健康后启动。worker 在本地 Docker Engine 模式下才挂载 `/var/run/docker.sock`，远程 Engine 部署必须通过 override 移除该挂载并配置 TLS 端点。`.env.example` 仅保留占位符，真实凭据和 Fernet 密钥由部署环境或 secret manager 注入。

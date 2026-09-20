@@ -117,6 +117,9 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
     redis_password = secrets.token_urlsafe(32)
     worker_name = f"orchestrator-test-{run_id}"
     database = f"orchestrator_test_{run_id}"
+    public_host = args.api_advertise_host or (
+        args.api_bind_address if args.api_bind_address not in {"", "0.0.0.0"} else detect_advertise_host()
+    )
     env = {
         "ORCHESTRATOR_ENVIRONMENT": "production",
         "ORCHESTRATOR_WORKER_NAME": worker_name,
@@ -151,6 +154,8 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
         "ORCHESTRATOR_DOCKER_SOCKET_PATH": "/var/run/docker.sock",
         "ORCHESTRATOR_DOCKER_SERVICES_NETWORK": f"{worker_name}-network",
         "ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS": "30",
+        "ORCHESTRATOR_PUBLIC_HOST": public_host,
+        "ORCHESTRATOR_PUBLIC_SCHEME": "http",
         "ORCHESTRATOR_API_HOST_PORT": str(args.api_port),
         "ORCHESTRATOR_API_BIND_ADDRESS": args.api_bind_address,
         "ORCHESTRATOR_REDIS_HOST_PORT": str(args.redis_port),

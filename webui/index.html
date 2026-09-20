@@ -327,8 +327,35 @@
               <button class="button button-secondary resource-button" data-resource="events" type="button">事件</button>
               <button class="button button-secondary resource-button" data-resource="images" type="button">用户镜像</button>
               <button class="button button-secondary resource-button" data-resource="services" type="button">Docker Services</button>
+              <button class="button button-secondary resource-button" data-resource="access" type="button">访问入口</button>
               <button class="button button-secondary resource-button" data-resource="alerts" type="button">告警</button>
             </div>
+            <section class="service-access" aria-labelledby="serviceAccessTitle">
+              <div class="inline-heading">
+                <div>
+                  <h3 id="serviceAccessTitle">服务访问入口</h3>
+                  <p id="serviceAccessSummary" class="muted small">查询后显示已发布端口和可访问 URL。</p>
+                </div>
+                <button id="refreshAccessButton" class="button button-quiet" type="button">刷新入口</button>
+              </div>
+              <div class="access-table-wrap">
+                <table id="serviceAccessTable" class="access-table" hidden>
+                  <thead>
+                    <tr>
+                      <th scope="col">Build ID</th>
+                      <th scope="col">服务</th>
+                      <th scope="col">镜像</th>
+                      <th scope="col">状态</th>
+                      <th scope="col">已发布端口</th>
+                      <th scope="col">访问 URL</th>
+                      <th scope="col">说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="serviceAccessTableBody"></tbody>
+                </table>
+                <p id="serviceAccessEmpty" class="access-empty muted">请先连接并选择 App ID，再查询访问入口。</p>
+              </div>
+            </section>
             <div class="resource-viewer">
               <div class="viewer-heading">
                 <span id="resourceTitle">请选择资源</span>

@@ -148,6 +148,10 @@ def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> 
     record = deployment.to_models("build-42")[0]
     assert record.build_id == "build-42"
     assert record.status == "deployed"
+    assert [port.model_dump() for port in record.published_ports] == [
+        {"target_port": 80, "published_port": 8080, "protocol": "tcp", "mode": "ingress"},
+        {"target_port": 443, "published_port": 8443, "protocol": "tcp", "mode": "ingress"},
+    ]
 
 
 def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> None:

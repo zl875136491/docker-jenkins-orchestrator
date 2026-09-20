@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
@@ -186,6 +186,15 @@ class BaseImage(DomainModel):
         return self.harbor_reference
 
 
+class PublishedPort(DomainModel):
+    """Persisted Docker port metadata used to construct external access URLs."""
+
+    target_port: int = Field(ge=1, le=65535)
+    published_port: int | None = Field(default=None, ge=1, le=65535)
+    protocol: Literal["tcp", "udp", "sctp"] = "tcp"
+    mode: Literal["ingress", "host"] = "ingress"
+
+
 class DeploymentService(DomainModel):
     service_id: str
     appid: str
@@ -194,8 +203,33 @@ class DeploymentService(DomainModel):
     image: str
     status: str
     endpoint: str | None = None
+    published_ports: list[PublishedPort] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ServiceAccess(DomainModel):
+    """External access information for one deployed service."""
+
+    build_id: str
+    service_name: str
+    status: str
+    image: str
+    endpoint: str | None = None
+    published_ports: list[PublishedPort] = Field(default_factory=list)
+    access_urls: list[str] = Field(default_factory=list)
+    access_available: bool = False
+    access_reason: str | None = None
+
+
+class AppAccess(DomainModel):
+    """Aggregated external access information for an application."""
+
+    appid: str
+    services: list[ServiceAccess] = Field(default_factory=list)
+    access_available: bool = False
+    access_urls: list[str] = Field(default_factory=list)
+    access_reason: str | None = None
 
 
 class Alert(DomainModel):

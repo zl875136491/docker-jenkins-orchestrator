@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,10 +16,13 @@ from pydantic import BaseModel, Field
 from orchestrator.config import Settings, get_settings
 from orchestrator.container import ApplicationContainer, create_container
 from orchestrator.models import (
+    AppAccess,
     BuildCreate,
     BuildHistoryPage,
     BuildJob,
     BuildStatus,
+    PublishedPort,
+    ServiceAccess,
     UserApp,
     UserAppCreate,
     UserAppUpdate,
@@ -44,6 +48,58 @@ class TokenResponse(BaseModel):
 class ComposeRequest(BaseModel):
     components: list[str]
     dependencies: dict[str, list[str]] = Field(default_factory=dict)
+
+
+_LEGACY_ENDPOINT_PORT = re.compile(r":(?P<port>[1-9]\d{0,4})$")
+
+
+def _legacy_published_ports(endpoint: str | None) -> list[PublishedPort]:
+    """Recover the old single-port endpoint representation when available."""
+
+    if not endpoint:
+        return []
+    match = _LEGACY_ENDPOINT_PORT.search(endpoint.strip())
+    if match is None:
+        return []
+    port = int(match.group("port"))
+    if port > 65535:
+        return []
+    return [PublishedPort(target_port=port, published_port=port)]
+
+
+def _public_host(host: str | None) -> str | None:
+    if not isinstance(host, str):
+        return None
+    value = host.strip().rstrip("/")
+    if not value or "://" in value:
+        return None
+    if value.count(":") > 1 and not value.startswith("["):
+        return f"[{value}]"
+    return value
+
+
+def _access_urls(settings: Settings, ports: list[PublishedPort]) -> list[str]:
+    host = _public_host(settings.public_host)
+    if host is None:
+        return []
+    urls: list[str] = []
+    for port in ports:
+        if port.published_port is None or port.protocol != "tcp":
+            continue
+        url = f"{settings.public_scheme}://{host}:{port.published_port}"
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _access_reason(settings: Settings, ports: list[PublishedPort], urls: list[str]) -> str | None:
+    if _public_host(settings.public_host) is None:
+        return "Public host is not configured"
+    if not ports or not any(port.published_port is not None for port in ports):
+        return "No published ports"
+    if not urls:
+        return "No TCP published ports"
+    return None
 
 
 def get_container(request: Request) -> ApplicationContainer:
@@ -183,6 +239,49 @@ def create_app(
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         return container.repository.list_services(appid)
+
+    @api.get("/api/apps/{appid}/access", response_model=AppAccess)
+    def get_app_access(appid: str, _: dict = Depends(require_token)) -> AppAccess:
+        try:
+            container.applications.get_record(appid)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
+
+        service_access: list[ServiceAccess] = []
+        for service in container.repository.list_services(appid):
+            ports = list(service.published_ports) or _legacy_published_ports(service.endpoint)
+            urls = _access_urls(container.settings, ports)
+            service_access.append(
+                ServiceAccess(
+                    build_id=service.build_id,
+                    service_name=service.service_name,
+                    status=service.status,
+                    image=service.image,
+                    endpoint=service.endpoint,
+                    published_ports=ports,
+                    access_urls=urls,
+                    access_available=bool(urls),
+                    access_reason=_access_reason(container.settings, ports, urls),
+                )
+            )
+
+        access_urls: list[str] = []
+        for service in service_access:
+            for url in service.access_urls:
+                if url not in access_urls:
+                    access_urls.append(url)
+        app_reason = None
+        if not service_access:
+            app_reason = "当前应用没有已部署服务"
+        elif not access_urls:
+            app_reason = "服务没有配置可从外部访问的 TCP published 端口"
+        return AppAccess(
+            appid=appid,
+            services=service_access,
+            access_available=bool(access_urls),
+            access_urls=access_urls,
+            access_reason=app_reason,
+        )
 
     @api.get("/api/apps/{appid}/alerts")
     def list_alerts(appid: str, _: dict = Depends(require_token)) -> list:

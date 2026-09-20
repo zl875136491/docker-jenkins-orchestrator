@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     docker_base_url: str | None = None
     docker_services_network: str = "orchestrator"
     external_request_timeout_seconds: int = 30
+    public_host: str | None = None
+    public_scheme: Literal["http", "https"] = "http"
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")
 

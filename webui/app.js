@@ -475,6 +475,97 @@
     return { error: reason instanceof Error ? reason.message : String(reason) };
   }
 
+  function accessServices(value) {
+    if (Array.isArray(value)) return value;
+    return Array.isArray(value?.services) ? value.services : [];
+  }
+
+  function accessUrls(service) {
+    if (!Array.isArray(service?.access_urls)) return [];
+    return service.access_urls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url));
+  }
+
+  function accessReason(service, urls) {
+    const knownReasons = {
+      "No published ports": "未发布端口，无法从外部访问。请在 Compose 中配置 ports，例如 18082:3000，然后重新构建部署。",
+      "No TCP published ports": "没有可用于 HTTP 访问的 TCP published 端口。",
+      "Public host is not configured": "未配置公共主机，无法生成外部访问 URL。",
+    };
+    const reason = String(service?.access_reason || "").trim();
+    return knownReasons[reason] || reason || (urls.length
+      ? "可从配置的公共地址访问。"
+      : "未发布端口，无法从外部访问。请在 Compose 中配置 ports，例如 18082:3000，然后重新构建部署。");
+  }
+
+  function renderServiceAccess(value) {
+    const services = accessServices(value);
+    const body = $("serviceAccessTableBody");
+    const table = $("serviceAccessTable");
+    const empty = $("serviceAccessEmpty");
+    const summary = $("serviceAccessSummary");
+    body.replaceChildren();
+    table.hidden = services.length === 0;
+    empty.hidden = services.length !== 0;
+
+    let available = 0;
+    services.forEach((service) => {
+      const row = document.createElement("tr");
+      textCell(row, service.build_id || "--");
+      textCell(row, service.service_name || "--");
+      textCell(row, service.image || "--");
+
+      const statusCell = document.createElement("td");
+      const status = document.createElement("span");
+      status.className = `status-pill ${statusClass(service.status)}`;
+      status.textContent = service.status || "--";
+      statusCell.appendChild(status);
+      row.appendChild(statusCell);
+
+      const ports = Array.isArray(service.published_ports)
+        ? service.published_ports.map((port) => {
+          if (port && typeof port === "object") return port.published_port ?? port.published ?? "--";
+          return port;
+        }).filter((port) => port !== null && port !== undefined && port !== "")
+        : [];
+      textCell(row, ports.length ? ports.join(", ") : "--");
+
+      const urls = accessUrls(service);
+      if (urls.length) available += 1;
+      const urlCell = document.createElement("td");
+      if (urls.length) {
+        urls.forEach((url, index) => {
+          if (index) urlCell.appendChild(document.createElement("br"));
+          const link = document.createElement("a");
+          link.href = url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = url;
+          urlCell.appendChild(link);
+        });
+      } else {
+        urlCell.textContent = "--";
+        urlCell.className = "muted";
+      }
+      row.appendChild(urlCell);
+
+      const reasonCell = document.createElement("td");
+      reasonCell.className = "access-reason";
+      reasonCell.textContent = accessReason(service, urls);
+      row.appendChild(reasonCell);
+      body.appendChild(row);
+    });
+
+    if (!services.length) {
+      empty.textContent = value?.access_reason || "当前应用没有已部署服务，或尚未查询访问入口。";
+      summary.textContent = "尚未获得服务访问信息。";
+      return value;
+    }
+    const total = services.length;
+    summary.textContent = `${available}/${total} 个服务有可访问入口。`;
+    if (value?.access_reason && available === 0) summary.textContent += ` ${value.access_reason}`;
+    return value;
+  }
+
   function renderDetailResult(targetId, result) {
     const target = $(targetId);
     prettyNode(target, result.status === "fulfilled" ? result.value : detailError(result.reason));
@@ -546,12 +637,13 @@
 
   async function loadResource(resource) {
     const appid = appidFromInput();
-    const labels = { events: "事件", images: "用户镜像", services: "Docker Services", alerts: "告警" };
+    const labels = { events: "事件", images: "用户镜像", services: "Docker Services", access: "访问入口", alerts: "告警" };
     const value = await request(`/api/apps/${encodeURIComponent(appid)}/${resource}`);
     $("resourceTitle").textContent = labels[resource] || resource;
     $("resourceTimestamp").textContent = new Date().toLocaleTimeString();
     pretty("resourceOutput", value);
     if (resource === "services" && Array.isArray(value)) $("metricServices").textContent = String(value.length);
+    if (resource === "access") renderServiceAccess(value);
     return value;
   }
 
@@ -660,6 +752,7 @@
     document.querySelectorAll(".resource-button").forEach((button) => {
       button.addEventListener("click", () => withFeedback(() => loadResource(button.dataset.resource), "resourceOutput"));
     });
+    $("refreshAccessButton").addEventListener("click", () => withFeedback(() => loadResource("access"), "resourceOutput"));
     $("loadTemplatesButton").addEventListener("click", () => withFeedback(loadTemplates, null));
     $("templateForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(composeTemplate, "templateOutput"); });
     $("loadBaseImagesButton").addEventListener("click", () => withFeedback(loadBaseImages, "baseImagesOutput"));

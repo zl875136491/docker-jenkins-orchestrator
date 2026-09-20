@@ -31,6 +31,10 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert script.status_code == 200
     assert "/api/connect" in script.text
     assert "/api/builds?" in script.text
+    assert 'data-resource="access"' in page.text
+    assert 'resource === "access"' in script.text
+    assert "serviceAccessTable" in page.text
+    assert "未发布端口" in script.text
     assert "notifyError" in script.text
 
 

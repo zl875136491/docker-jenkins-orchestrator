@@ -38,6 +38,22 @@ outbound address, rather than only to loopback. Read the advertised URL from
 Open `http://<test-host-address>:18080/ui/` and use the generated worker
 credentials from `/opt/orchestrator-test/.env`. The UI uses same-origin API
 requests, so this URL exercises the frontend served by the test API container.
+The preparation script also writes the advertised host to
+`ORCHESTRATOR_PUBLIC_HOST`, so the UI's **访问入口** view can turn published
+Swarm ports into links such as `http://10.32.12.110:18082`. A service record
+with `endpoint: null` and no published port is deployed but has no external
+URL; its final Jenkins Compose artifact must declare a mapping such as
+`18082:3000` before rebuilding.
+
+The machine-readable access query is:
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  http://<test-host-address>:18080/api/apps/<appid>/access
+```
+
+It returns one entry per deployed service, including `build_id`, `published_ports`,
+`access_urls`, `access_available`, and `access_reason`.
 Do not paste the dotenv file into tickets or commit it. For a deliberately
 loopback-only test run, pass `--api-bind-address 127.0.0.1` when preparing the
 environment.
