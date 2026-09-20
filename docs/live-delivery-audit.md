@@ -145,6 +145,19 @@ API 的安全错误摘要写入构建错误，避免只显示“Unable to deploy
 
 ## 最终清理核验
 
+## WebUI 五项目复验（2026-09-21）
+
+本轮严格从测试 WebUI 创建应用和提交构建，使用唯一 `app-name-UUID` 标识。Umami 完整通过，另外三项完成了 Jenkins/Harbor/Swarm 尝试但未达到可交付终态：
+
+| 项目 | appid | build/Jenkins | 结果 | 原因 |
+| --- | --- | --- | --- | --- |
+| Umami | `umami-c90e11f298b64605a18250f8547d502d` | `5d3de1c3db674a7b823a278e50e02501` / #27 | succeeded | `http://10.32.12.110:18088` 返回成功，WebUI 访问页显示 1/2 服务可访问 |
+| Linkwarden | `linkwarden-f897e6a9763f4c379a1bf9532f9c85c8` | `40922816f61747849875303683cc0b01` / #28 | failed | 官方 Linkwarden 容器在 300 秒内未就绪，依赖服务随后反复退出 |
+| Open WebUI | `open-webui-1f809b43a1244869a35fb3d4f6a4e2ad` | `e1a0cedd78a84678a6952ed922147574` / #29 | failed | 官方 WebUI 镜像任务持续 `preparing`，300 秒内未进入 running |
+| SearXNG | `searxng-1e005e849986491a9f160a288c4a606f` | `86347a0744a54a82aed5926abe8b442c` / #30 | failed | 官方镜像启动时网络引擎初始化超时并退出，公开端口不可达 |
+
+本轮同时验证了 WebUI 历史任务、详情、运行资源和访问入口查询。Open WebUI 测试 Compose 已改为官方 `ghcr.io/open-webui/open-webui:main` 单服务并关闭可选 Ollama API，避免将 Ollama 大模型运行时作为必需依赖；这仍未解决官方 WebUI 镜像在当前测试节点的拉取/准备问题。Linkwarden 和 SearXNG 的失败日志已保留在对应构建事件中，不能据此宣称项目交付成功。
+
 联调脚本退出后再次直接查询外部系统，结果如下：
 
 - Jenkins 两个临时 job：HTTP 404；

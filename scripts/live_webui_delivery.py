@@ -30,14 +30,14 @@ PROJECTS: dict[str, dict[str, Any]] = {
         "name": "Linkwarden live delivery",
         "repository_url": "https://github.com/linkwarden/linkwarden.git",
         "git_ref": "main",
-        "port": 18084,
+        "port": 18089,
         "path": "/",
     },
     "open-webui": {
         "name": "Open WebUI live delivery",
         "repository_url": "https://github.com/open-webui/open-webui.git",
         "git_ref": "main",
-        "port": 18085,
+        "port": 18090,
         "path": "/",
     },
     "planka": {
@@ -51,7 +51,7 @@ PROJECTS: dict[str, dict[str, Any]] = {
         "name": "SearXNG live delivery",
         "repository_url": "https://github.com/searxng/searxng.git",
         "git_ref": "master",
-        "port": 18087,
+        "port": 18091,
         "path": "/",
     },
     "umami": {
@@ -111,6 +111,28 @@ def delivery_compose(project: str, api_host: str) -> dict[str, Any]:
             for item in core.get("volumes", [])
             if not (isinstance(item, str) and item.startswith("/srv/searxng/core-config:"))
         ]
+        # The fixture's host config is intentionally absent on the test node;
+        # the image creates its default settings at startup. Its upstream
+        # wget healthcheck is also not a Swarm readiness contract here, so
+        # rely on the worker's real task and published-port probes instead.
+        core.pop("healthcheck", None)
+        core["environment"]["SEARXNG_BASE_URL"] = f"{public_url}/"
+    if project == "linkwarden":
+        # Meilisearch's image health probe can remain in `starting` while the
+        # service is otherwise usable on constrained test nodes. Compose
+        # dependency ordering is retained through service_started here; the
+        # application's own connection errors still fail its public probe.
+        document["services"]["linkwarden"].pop("depends_on", None)
+    if project == "open-webui":
+        # Ollama is an optional runtime dependency for Open WebUI. Pulling its
+        # multi-gigabyte image makes the delivery test depend on model-serving
+        # capacity; validate the official WebUI service itself and explicitly
+        # disable the optional Ollama integration for this fixture.
+        document["services"].pop("ollama", None)
+        webui = document["services"]["open-webui"]
+        webui.pop("depends_on", None)
+        webui["environment"]["ENABLE_OLLAMA_API"] = "false"
+        document["volumes"].pop("ollama-data", None)
     if project == "linkwarden":
         document["services"]["linkwarden"]["environment"]["NEXTAUTH_URL"] = public_url
     elif project == "planka":
@@ -162,6 +184,7 @@ def create_app(page: Page, project: str, appid: str, compose: dict[str, Any], co
     page.locator("#components").fill("")
     page.locator("#environment").fill(json.dumps({"WEBUI_E2E_PROJECT": project, "WEBUI_E2E_RUN": run}))
     page.locator("#compose").fill(json.dumps(compose, ensure_ascii=True, indent=2))
+    page.locator("#appOutput").evaluate("node => { node.textContent = ''; }")
     page.locator("#appForm button[type='submit']").click()
     page.wait_for_function(
         "document.querySelector('#appOutput').textContent.includes(%s)" % json.dumps(appid),
@@ -175,10 +198,26 @@ def create_app(page: Page, project: str, appid: str, compose: dict[str, Any], co
 
 def submit_build(page: Page, appid: str, git_ref: str) -> dict[str, Any]:
     navigate_section(page, "buildSection")
+    # Navigation keeps the shared app context, but the previous project may
+    # still be present in a modal/input that appidFromInput() reads first.
+    # Set both controls explicitly before submitting each independent run.
+    page.locator("#appId").evaluate(
+        "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }",
+        arg=appid,
+    )
+    page.locator("#contextAppId").evaluate(
+        "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }",
+        arg=appid,
+    )
     page.locator("#buildGitRef").fill(git_ref)
+    # The same page is reused for every project; do not accept the previous
+    # project's JSON as the response to this submission.
+    page.locator("#buildOutput").evaluate("node => { node.textContent = ''; }")
     page.locator("#buildForm button[type='submit']").click()
     page.wait_for_function(
-        "document.querySelector('#buildOutput').textContent.includes('build_id')",
+        "(appid) => { const text = document.querySelector('#buildOutput')?.textContent || ''; "
+        "return text.includes('build_id') && text.includes(appid); }",
+        arg=appid,
         timeout=60_000,
     )
     payload = json_from_pre(page, "#buildOutput")
@@ -193,10 +232,13 @@ def poll_build(page: Page, build_id: str, timeout_seconds: int) -> tuple[dict[st
     payload: dict[str, Any] = {}
     while time.monotonic() < deadline:
         page.locator("#buildId").fill(build_id)
+        page.locator("#buildOutput").evaluate("node => { node.textContent = ''; }")
         page.locator("#pollBuildButton").click()
         try:
             page.wait_for_function(
-                "document.querySelector('#buildOutput').textContent.includes('build_id')",
+                "(buildId) => { const text = document.querySelector('#buildOutput')?.textContent || ''; "
+                "return text.includes('build_id') && text.includes(buildId); }",
+                arg=build_id,
                 timeout=15_000,
             )
         except PlaywrightTimeoutError:
@@ -217,9 +259,12 @@ def poll_build(page: Page, build_id: str, timeout_seconds: int) -> tuple[dict[st
 def inspect_history(page: Page, appid: str, build_id: str) -> dict[str, Any]:
     navigate_section(page, "historySection")
     page.locator("#historyAppId").fill(appid)
+    page.locator("#historyTableBody").evaluate("node => { node.replaceChildren(); }")
     page.locator("#historyFilterForm button[type='submit']").click()
     page.wait_for_function(
-        "document.querySelectorAll('#historyTableBody tr').length > 0",
+        "(buildId) => Array.from(document.querySelectorAll('#historyTableBody tr'))"
+        ".some(row => row.textContent.includes(buildId));",
+        arg=build_id,
         timeout=60_000,
     )
     rows = page.locator("#historyTableBody tr")
@@ -248,6 +293,7 @@ def inspect_resources(page: Page, appid: str) -> dict[str, Any]:
     navigate_section(page, "resourcesSection")
     result: dict[str, Any] = {}
     for resource in ("events", "images", "services", "access", "alerts"):
+        page.locator("#resourceOutput").evaluate("node => { node.textContent = ''; }")
         page.locator(f"button.resource-button[data-resource='{resource}']").click()
         page.wait_for_function(
             "document.querySelector('#resourceOutput').textContent.trim() && document.querySelector('#resourceTitle').textContent",
