@@ -1,0 +1,128 @@
+name: orchestrator-test
+
+x-orchestrator-runtime: &orchestrator-runtime
+  ORCHESTRATOR_ENVIRONMENT: "production"
+  ORCHESTRATOR_WORKER_NAME: "${ORCHESTRATOR_WORKER_NAME:?Run scripts/prepare_test_environment.py first}"
+  ORCHESTRATOR_WORKER_SECRET: "${ORCHESTRATOR_WORKER_SECRET:?Run scripts/prepare_test_environment.py first}"
+  ORCHESTRATOR_JWT_SECRET: "${ORCHESTRATOR_JWT_SECRET:?Run scripts/prepare_test_environment.py first}"
+  ORCHESTRATOR_JWT_EXPIRE_MINUTES: "${ORCHESTRATOR_JWT_EXPIRE_MINUTES:-60}"
+  ORCHESTRATOR_STORAGE_BACKEND: "mongo"
+  ORCHESTRATOR_MONGODB_URL: "${ORCHESTRATOR_MONGODB_URL:?MongoDB URL is required}"
+  ORCHESTRATOR_MONGODB_DATABASE: "${ORCHESTRATOR_MONGODB_DATABASE:?MongoDB database is required}"
+  ORCHESTRATOR_MONGODB_TIMEOUT_MS: "${ORCHESTRATOR_MONGODB_TIMEOUT_MS:-5000}"
+  ORCHESTRATOR_DATA_ENCRYPTION_KEY: "${ORCHESTRATOR_DATA_ENCRYPTION_KEY:?Fernet key is required}"
+  ORCHESTRATOR_TASK_DISPATCHER: "celery"
+  ORCHESTRATOR_CELERY_BROKER_URL: "redis://:${ORCHESTRATOR_REDIS_PASSWORD:?Redis password is required}@redis:6379/0"
+  ORCHESTRATOR_CELERY_BUILD_QUEUE: "${ORCHESTRATOR_CELERY_BUILD_QUEUE:-orchestrator-test.builds}"
+  ORCHESTRATOR_CELERY_IMAGES_QUEUE: "${ORCHESTRATOR_CELERY_IMAGES_QUEUE:-orchestrator-test.images}"
+  ORCHESTRATOR_CELERY_POLL_INTERVAL_SECONDS: "${ORCHESTRATOR_CELERY_POLL_INTERVAL_SECONDS:-5}"
+  ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS: "${ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS:-120}"
+  ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS: "${ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS:-60}"
+  ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS: "${ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS:-24}"
+  ORCHESTRATOR_GITLAB_URL: "${ORCHESTRATOR_GITLAB_URL:-}"
+  ORCHESTRATOR_GITLAB_TOKEN: "${ORCHESTRATOR_GITLAB_TOKEN:-}"
+  ORCHESTRATOR_JENKINS_URL: "${ORCHESTRATOR_JENKINS_URL:?Jenkins URL is required}"
+  ORCHESTRATOR_JENKINS_USER: "${ORCHESTRATOR_JENKINS_USER:?Jenkins user is required}"
+  ORCHESTRATOR_JENKINS_PASSWORD: "${ORCHESTRATOR_JENKINS_PASSWORD:?Jenkins password is required}"
+  ORCHESTRATOR_JENKINS_JOB_NAME: "${ORCHESTRATOR_JENKINS_JOB_NAME:?Jenkins job is required}"
+  ORCHESTRATOR_HARBOR_URL: "${ORCHESTRATOR_HARBOR_URL:?Harbor URL is required}"
+  ORCHESTRATOR_HARBOR_USER: "${ORCHESTRATOR_HARBOR_USER:?Harbor user is required}"
+  ORCHESTRATOR_HARBOR_PASSWORD: "${ORCHESTRATOR_HARBOR_PASSWORD:?Harbor password is required}"
+  ORCHESTRATOR_HARBOR_PROJECT: "${ORCHESTRATOR_HARBOR_PROJECT:-apps-orchestrator}"
+  ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT: "${ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT:-boot-images}"
+  ORCHESTRATOR_DOCKER_BASE_URL: "${ORCHESTRATOR_DOCKER_BASE_URL:-unix:///var/run/docker.sock}"
+  ORCHESTRATOR_DOCKER_SERVICES_NETWORK: "${ORCHESTRATOR_DOCKER_SERVICES_NETWORK:-orchestrator-test}"
+  ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS: "${ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS:-30}"
+
+services:
+  api:
+    build: .
+    image: orchestrator-test:local
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *orchestrator-runtime
+    ports:
+      - "127.0.0.1:${ORCHESTRATOR_API_HOST_PORT:-18080}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  worker:
+    build: .
+    image: orchestrator-test:local
+    command:
+      [
+        "celery",
+        "-A",
+        "orchestrator.celery_runtime:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--hostname=orchestrator-test-worker@%h",
+        "--queues=${ORCHESTRATOR_CELERY_BUILD_QUEUE:-orchestrator-test.builds},${ORCHESTRATOR_CELERY_IMAGES_QUEUE:-orchestrator-test.images}",
+      ]
+    environment: *orchestrator-runtime
+    volumes:
+      - type: bind
+        source: "${ORCHESTRATOR_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
+        target: /var/run/docker.sock
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A orchestrator.celery_runtime:celery_app inspect ping --timeout=5 2>/dev/null | grep -q pong"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 25s
+
+  beat:
+    build: .
+    image: orchestrator-test:local
+    command:
+      [
+        "celery",
+        "-A",
+        "orchestrator.celery_runtime:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/var/lib/orchestrator/celerybeat-schedule",
+      ]
+    environment: *orchestrator-runtime
+    volumes:
+      - "${ORCHESTRATOR_TEST_DATA_PATH:-/opt/orchestrator-test}/beat:/var/lib/orchestrator"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('redis', 6379), 5).close()\""]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 25s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--dir", "/data", "--requirepass", "${ORCHESTRATOR_REDIS_PASSWORD:?Redis password is required}"]
+    environment:
+      REDIS_PASSWORD: "${ORCHESTRATOR_REDIS_PASSWORD:?Redis password is required}"
+    ports:
+      - "127.0.0.1:${ORCHESTRATOR_REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - "${ORCHESTRATOR_TEST_DATA_PATH:-/opt/orchestrator-test}/redis:/data"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
