@@ -3,6 +3,8 @@
 
   const TOKEN_KEY = "orchestrator.control.token";
   const APP_KEY = "orchestrator.control.appid";
+  const TOAST_TIMEOUT_MS = 5000;
+  const notifiedErrors = new WeakSet();
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     appid: localStorage.getItem(APP_KEY) || "",
@@ -22,13 +24,72 @@
   class ApiError extends Error {
     constructor(status, payload) {
       const detail = payload && payload.detail;
-      const message = Array.isArray(detail)
+      const detailMessage = Array.isArray(detail)
         ? detail.map((item) => item.msg || JSON.stringify(item)).join("; ")
-        : detail || payload?.message || `请求失败（HTTP ${status}）`;
+        : typeof detail === "string"
+          ? detail
+          : detail
+            ? JSON.stringify(detail)
+            : "";
+      const message = detailMessage || payload?.message || `请求失败（HTTP ${status}）`;
       super(message);
       this.status = status;
       this.payload = payload;
     }
+  }
+
+  function errorMessage(error) {
+    if (error instanceof TypeError && error.message === "Failed to fetch") {
+      return "无法连接控制端，请检查网络或服务状态";
+    }
+    return error instanceof Error && error.message ? error.message : String(error || "请求失败");
+  }
+
+  function dismissToast(toast) {
+    if (!toast || toast.dataset.dismissed === "true") return;
+    toast.dataset.dismissed = "true";
+    window.clearTimeout(toast.dismissTimer);
+    toast.classList.remove("toast-visible");
+    window.setTimeout(() => toast.remove(), 180);
+  }
+
+  function showToast(message, tone = "error") {
+    const region = $("toastRegion");
+    if (!region) return;
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${tone}`;
+    toast.setAttribute("role", tone === "error" ? "alert" : "status");
+
+    const content = document.createElement("div");
+    content.className = "toast-content";
+    const title = document.createElement("strong");
+    title.className = "toast-title";
+    title.textContent = tone === "error" ? "请求失败" : "提示";
+    const detail = document.createElement("span");
+    detail.className = "toast-message";
+    detail.textContent = String(message || "请求失败");
+    content.append(title, detail);
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast-close";
+    close.setAttribute("aria-label", "关闭提示");
+    close.textContent = "×";
+    close.addEventListener("click", () => dismissToast(toast));
+    toast.append(content, close);
+    region.appendChild(toast);
+    toast.dismissTimer = window.setTimeout(() => dismissToast(toast), TOAST_TIMEOUT_MS);
+    window.requestAnimationFrame(() => toast.classList.add("toast-visible"));
+  }
+
+  function notifyError(error) {
+    const message = errorMessage(error);
+    if (error && typeof error === "object") {
+      if (notifiedErrors.has(error)) return message;
+      notifiedErrors.add(error);
+    }
+    showToast(message);
+    return message;
   }
 
   function setActivity(message, tone = "") {
@@ -111,28 +172,33 @@
   }
 
   async function request(path, options = {}) {
-    const headers = new Headers(options.headers || {});
-    if (options.body !== undefined && !(options.body instanceof FormData)) {
-      headers.set("Content-Type", "application/json");
-      options.body = JSON.stringify(options.body);
-    }
-    if (state.token && !path.endsWith("/connect")) headers.set("Authorization", `Bearer ${state.token}`);
-    const response = await fetch(path, { ...options, headers });
-    const text = await response.text();
-    let payload = null;
-    if (text) {
-      try { payload = JSON.parse(text); } catch { payload = text; }
-    }
-    if (!response.ok) {
-      if (response.status === 401 && !path.endsWith("/connect")) {
-        state.token = "";
-        localStorage.removeItem(TOKEN_KEY);
-        stopHistoryPolling();
-        setSession(false, "访问令牌已失效，请重新连接。");
+    try {
+      const headers = new Headers(options.headers || {});
+      if (options.body !== undefined && !(options.body instanceof FormData)) {
+        headers.set("Content-Type", "application/json");
+        options.body = JSON.stringify(options.body);
       }
-      throw new ApiError(response.status, payload);
+      if (state.token && !path.endsWith("/connect")) headers.set("Authorization", `Bearer ${state.token}`);
+      const response = await fetch(path, { ...options, headers });
+      const text = await response.text();
+      let payload = null;
+      if (text) {
+        try { payload = JSON.parse(text); } catch { payload = text; }
+      }
+      if (!response.ok) {
+        if (response.status === 401 && !path.endsWith("/connect")) {
+          state.token = "";
+          localStorage.removeItem(TOKEN_KEY);
+          stopHistoryPolling();
+          setSession(false, "访问令牌已失效，请重新连接。");
+        }
+        throw new ApiError(response.status, payload);
+      }
+      return payload;
+    } catch (error) {
+      notifyError(error);
+      throw error;
     }
-    return payload;
   }
 
   async function withFeedback(action, outputId) {
@@ -142,7 +208,7 @@
       setActivity("请求完成", "success");
       return value;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = notifyError(error);
       if (outputId) pretty(outputId, { error: message });
       setActivity(message, "error");
       return null;
@@ -383,7 +449,7 @@
     state.historyTimer = setInterval(() => {
       if (state.historyLoading) return;
       loadHistory({ silent: true }).catch((error) => {
-        if (state.token) setActivity(error instanceof Error ? error.message : String(error), "error");
+        if (state.token) setActivity(notifyError(error), "error");
       });
     }, 10000);
   }
