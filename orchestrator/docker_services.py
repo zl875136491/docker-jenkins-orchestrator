@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -158,11 +159,19 @@ class DockerSwarmAdapter:
         *,
         docker_client: Any | None = None,
         client_factory: Callable[[str | None], Any] | None = None,
+        readiness_timeout_seconds: float = 60.0,
+        readiness_poll_interval_seconds: float = 1.0,
     ) -> None:
         if not isinstance(network_name, str) or not _NAME_PATTERN.fullmatch(network_name):
             raise ValueError("Docker services network name is invalid")
+        if isinstance(readiness_timeout_seconds, bool) or readiness_timeout_seconds < 0:
+            raise ValueError("Docker service readiness timeout is invalid")
+        if isinstance(readiness_poll_interval_seconds, bool) or readiness_poll_interval_seconds <= 0:
+            raise ValueError("Docker service readiness poll interval is invalid")
         self.base_url = base_url
         self.network_name = network_name
+        self.readiness_timeout_seconds = float(readiness_timeout_seconds)
+        self.readiness_poll_interval_seconds = float(readiness_poll_interval_seconds)
         self._docker_client = docker_client
         self._client_factory = client_factory or self._create_client
 
@@ -172,6 +181,8 @@ class DockerSwarmAdapter:
             settings.docker_base_url,
             settings.docker_services_network,
             docker_client=docker_client,
+            readiness_timeout_seconds=getattr(settings, "deployment_readiness_timeout_seconds", 60),
+            readiness_poll_interval_seconds=getattr(settings, "deployment_readiness_poll_interval_seconds", 1.0),
         )
 
     def __repr__(self) -> str:
@@ -202,16 +213,16 @@ class DockerSwarmAdapter:
         deployments: list[ServiceDeployment] = []
         for compose_name in self._deployment_order(services):
             definition = services[compose_name]
-            deployments.append(
-                self._deploy_one(
-                    client,
-                    namespace,
-                    compose_name,
-                    definition,
-                    network_target,
-                    volume_sources,
-                )
+            deployment = self._deploy_one(
+                client,
+                namespace,
+                compose_name,
+                definition,
+                network_target,
+                volume_sources,
             )
+            self._wait_for_service_ready(client, deployment.service_name)
+            deployments.append(deployment)
         self._cleanup_stale_services(client, namespace, {item.service_name for item in deployments})
         return SwarmDeployment(appid=appid, network_name=network_name, services=tuple(deployments))
 
@@ -230,7 +241,86 @@ class DockerSwarmAdapter:
         self._validate_service_image(service_name, service)
         client = self._client()
         _, network_target = self._ensure_network(client, namespace)
-        return self._deploy_one(client, namespace, service_name, service, network_target, {})
+        deployment = self._deploy_one(client, namespace, service_name, service, network_target, {})
+        self._wait_for_service_ready(client, deployment.service_name)
+        return deployment
+
+    def _wait_for_service_ready(self, client: Any, service_name: str) -> None:
+        """Wait for real Docker services to have their desired running tasks.
+
+        Small test doubles used by the unit suite do not expose ``tasks`` and
+        are left untouched. The production Docker SDK does, so a successful
+        deployment cannot be reported while an image pull, scheduling error,
+        or immediate container exit is still pending.
+        """
+
+        services_api = getattr(client, "services", None)
+        get_service = getattr(services_api, "get", None)
+        if not callable(get_service):
+            return
+        try:
+            service = get_service(service_name)
+        except Exception as exc:
+            if self._is_not_found(exc):
+                raise DockerServiceError(f"Unable to inspect Docker service {service_name}: service was not found") from exc
+            raise DockerServiceError(
+                f"Unable to inspect Docker service {service_name}: {self._safe_error_detail(exc)}"
+            ) from exc
+        tasks_method = getattr(service, "tasks", None)
+        if not callable(tasks_method):
+            return
+
+        desired = self._desired_task_count(service)
+        if desired == 0:
+            return
+        deadline = time.monotonic() + self.readiness_timeout_seconds
+        last_states: list[str] = []
+        while True:
+            try:
+                tasks = tasks_method()
+            except Exception as exc:
+                raise DockerServiceError(
+                    f"Unable to inspect Docker tasks for service {service_name}: {self._safe_error_detail(exc)}"
+                ) from exc
+            if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)):
+                raise DockerServiceError(f"Docker returned invalid tasks for service {service_name}")
+            last_states = []
+            running = 0
+            for task in tasks:
+                if not isinstance(task, Mapping):
+                    continue
+                status = task.get("Status")
+                status = status if isinstance(status, Mapping) else {}
+                state = str(status.get("State", "unknown"))
+                desired_state = str(task.get("DesiredState", "running"))
+                last_states.append(f"{desired_state}:{state}")
+                # During an update Docker can report an old task as running
+                # while its DesiredState is shutdown. It must not satisfy the
+                # readiness check for the new revision.
+                if desired_state in {"running", "ready"} and state == "running":
+                    running += 1
+            if running >= desired:
+                return
+            if time.monotonic() >= deadline:
+                detail = ", ".join(last_states) if last_states else "no tasks"
+                raise DockerServiceError(
+                    f"Docker service {service_name} did not reach running state within "
+                    f"{self.readiness_timeout_seconds:g}s ({detail})"
+                )
+            time.sleep(min(self.readiness_poll_interval_seconds, max(0.01, deadline - time.monotonic())))
+
+    @staticmethod
+    def _desired_task_count(service: Any) -> int:
+        attrs = getattr(service, "attrs", None)
+        spec = attrs.get("Spec") if isinstance(attrs, Mapping) else None
+        mode = spec.get("Mode") if isinstance(spec, Mapping) else None
+        if isinstance(mode, Mapping):
+            replicated = mode.get("Replicated")
+            if isinstance(replicated, Mapping):
+                replicas = replicated.get("Replicas", 1)
+                if isinstance(replicas, int) and not isinstance(replicas, bool) and replicas >= 0:
+                    return replicas
+        return 1
 
     def deployment_models(self, appid: str, build_id: str, compose: Mapping[str, Any]) -> list[DeploymentService]:
         """Deploy Compose services and return repository-ready domain records."""

@@ -83,7 +83,7 @@ def detect_advertise_host() -> str:
 def choose_jenkins_job(base_url: str, user: str, password: str, requested: str | None) -> str:
     if requested:
         return requested.removeprefix("/job/")
-    candidates = ("live-e2e-evidence-1789368954", "codeserver-20260918-prclonglive")
+    candidates = ("orchestrator-real-delivery-20260920",)
     try:
         response = requests.get(
             f"{base_url.rstrip('/')}/job/apps-orchestrator/api/json",
@@ -98,7 +98,10 @@ def choose_jenkins_job(base_url: str, user: str, password: str, requested: str |
     for candidate in candidates:
         if candidate in names:
             return f"apps-orchestrator/{candidate}"
-    raise SystemExit("No known test Jenkins job exists under apps-orchestrator; pass --jenkins-job explicitly")
+    raise SystemExit(
+        "The real orchestrator delivery Jenkins job is not available under apps-orchestrator; "
+        "provision jenkins/orchestrator-build.groovy and pass --jenkins-job explicitly"
+    )
 
 
 def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace) -> tuple[dict[str, str], str, bool]:
@@ -153,6 +156,8 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
         "ORCHESTRATOR_DOCKER_BASE_URL": "unix:///var/run/docker.sock",
         "ORCHESTRATOR_DOCKER_SOCKET_PATH": "/var/run/docker.sock",
         "ORCHESTRATOR_DOCKER_SERVICES_NETWORK": f"{worker_name}-network",
+        "ORCHESTRATOR_DEPLOYMENT_READINESS_TIMEOUT_SECONDS": "60",
+        "ORCHESTRATOR_DEPLOYMENT_READINESS_POLL_INTERVAL_SECONDS": "1",
         "ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS": "30",
         "ORCHESTRATOR_PUBLIC_HOST": public_host,
         "ORCHESTRATOR_PUBLIC_SCHEME": "http",

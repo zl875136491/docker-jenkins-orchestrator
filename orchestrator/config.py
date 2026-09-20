@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     harbor_boot_images_project: str = "boot-images"
     docker_base_url: str | None = None
     docker_services_network: str = "orchestrator"
+    deployment_readiness_timeout_seconds: int = 60
+    deployment_readiness_poll_interval_seconds: float = 1.0
     external_request_timeout_seconds: int = 30
     public_host: str | None = None
     public_scheme: Literal["http", "https"] = "http"

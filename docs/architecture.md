@@ -108,8 +108,8 @@ Celery 执行步骤：
 3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose、环境变量和目标 Harbor 镜像仓库；
 4. 定时 Celery 任务轮询 Jenkins queue/build 状态；
 5. 成功后读取 Jenkins `orchestrator-result.json` 产物，登记应用镜像；
-6. 调用 Docker Engine/Swarm 创建或更新 Services，登记 service ID 和端点；
-7. 成功写入 `succeeded`，任意失败写入 `failed` 并创建告警；beat 重新发现非终态构建时，从已存储的状态继续，不依赖 Celery result backend。
+6. 调用 Docker Engine/Swarm 创建或更新 Services；真实 Docker SDK 下等待期望 task 进入 `running`，配置 `ORCHESTRATOR_PUBLIC_HOST` 时再探测每个 published TCP 端口；
+7. 只有运行态和公开端口检查通过才登记 service 并写入 `succeeded`，任意失败写入 `failed` 并创建告警；beat 重新发现非终态构建时，从已存储的状态继续，不依赖 Celery result backend。
 
 Jenkins job 必须输出 `orchestrator-result.json`：
 
@@ -139,7 +139,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 - **GitLab**：使用项目 API 验证仓库和分支；仓库检出仍由 Jenkins job 完成。
 - **Jenkins**：获取 crumb、触发参数化 build、解析 queue item、轮询 build、读取 JSON artifact。
 - **Harbor/Docker Registry**：通过 Docker SDK 的 pull/tag/push 同步基础镜像；应用镜像由 Jenkins 生成后登记。
-- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。适配器映射镜像、环境、挂载、端口、健康检查、`shm_size`、资源、重启策略和副本数；`depends_on` 只用于依赖校验与依赖优先创建，不提供 Compose 的健康就绪闸门。`env_file`、secrets/configs、GPU/devices、自定义网络等无法安全映射的字段必须在创建 Docker 对象前显式拒绝。
+- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。适配器映射镜像、环境、挂载、端口、健康检查、`shm_size`、资源、重启策略和副本数；真实 SDK 下会等待期望 task 进入 `running`，worker 在配置公开 host 时会探测 published TCP 端口。`depends_on` 仍只用于依赖校验与依赖优先创建，Compose healthcheck 会随 task spec 下发，但应用级健康语义仍需后续协议检查或自身重试。`env_file`、secrets/configs、GPU/devices、自定义网络等无法安全映射的字段必须在创建 Docker 对象前显式拒绝。
 
 适配器不得记录密码、token 或完整环境变量。网络错误转换为包含安全上下文的领域错误，并写入事件及告警。
 
@@ -152,6 +152,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 - `ORCHESTRATOR_CELERY_BROKER_URL=redis://redis:6379/0`
 - `ORCHESTRATOR_DATA_ENCRYPTION_KEY`
 - `ORCHESTRATOR_PUBLIC_HOST`、`ORCHESTRATOR_PUBLIC_SCHEME`（生成服务访问 URL；反向代理或多节点部署时应显式配置）
+- `ORCHESTRATOR_DEPLOYMENT_READINESS_TIMEOUT_SECONDS`、`ORCHESTRATOR_DEPLOYMENT_READINESS_POLL_INTERVAL_SECONDS`（Swarm task 和 published TCP 端口运行态检查）
 - Jenkins、GitLab、Harbor、Docker Engine 的 URL 和认证项
 
 `docker-compose.yml` 运行 API、worker、beat、MongoDB 和 Redis。MongoDB、Redis 与 beat 调度文件均使用持久卷；API、worker、beat 仅在 MongoDB 和 Redis 健康后启动。worker 在本地 Docker Engine 模式下才挂载 `/var/run/docker.sock`，远程 Engine 部署必须通过 override 移除该挂载并配置 TLS 端点。`.env.example` 仅保留占位符，真实凭据和 Fernet 密钥由部署环境或 secret manager 注入。

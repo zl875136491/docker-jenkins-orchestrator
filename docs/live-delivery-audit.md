@@ -96,6 +96,25 @@ Jenkins job `orchestrator-real-delivery-20260920` #5。Jenkins artifact、Harbor
 Nginx `200 OK`；控制端 `/api/apps/{appid}/access` 返回
 `http://10.32.12.110:18083`。
 
+随后用同一 app 触发 Jenkins #6（build id
+`2d1c2b307f9144c6b16f9ebbc7b74f97`）复验新的运行态闸门：worker 等待 Swarm task
+进入 `running` 并从 worker 网络探测 `10.32.12.110:18083` 后才写入 `succeeded`；
+Jenkins #6、Harbor `6-web`、Swarm task 和外部 Nginx `200 OK` 均通过。
+
+### 原 `test-demo-1` 应用复验
+
+原 app 的 Compose 虽然声明了 `18082:3000`，但只有裸 `node` 基础镜像，没有任何监听
+3000 的 command。使用实际分支 `master` 触发的 Jenkins #9 成功生成并推送了镜像，但
+worker 的公开端口探测返回 `ConnectionRefusedError`，构建被标记为 `failed`，没有伪造
+部署成功。随后通过控制端更新 app 的 git ref 为 `master`，并补充最小 Node HTTP server
+command，再触发 Jenkins #10（build id `dd31c99775544a849ceb0aae0835c601`）。
+
+本轮验证结果：Jenkins #10 `SUCCESS`，artifact 保留 `ports: ["18082:3000"]` 和
+command，Harbor 镜像为
+`10.17.158.118/apps-orchestrator/test-demo-1:10-react`，Swarm task 为 `Running`，
+`GET http://10.32.12.110:18082/` 返回 `200 OK`，控制端
+`/api/apps/test-demo-1/access` 返回 `http://10.32.12.110:18082`。
+
 此前 Linkwarden 轮次使用完整 UUID appid 时，Jenkins、Harbor 和 Celery 均成功，Swarm
 在创建 `linkwarden-meilisearch` 时返回：
 

@@ -7,7 +7,7 @@ import pytest
 
 from orchestrator.config import Settings
 from orchestrator.container import ApplicationContainer, create_container
-from orchestrator.docker_services import DockerServiceError, ServiceDeployment, SwarmDeployment
+from orchestrator.docker_services import DockerServiceError, PublishedPort as DockerPublishedPort, ServiceDeployment, SwarmDeployment
 from orchestrator.gitlab import GitLabProject, GitLabRepositoryRef
 from orchestrator.jenkins import (
     JenkinsArtifactError,
@@ -291,6 +291,47 @@ def test_artifact_cannot_drop_source_published_ports() -> None:
     assert "changed ports" in stored.error
     assert docker_services.calls == []
     assert harness.container.repository.list_services("demo") == []
+
+
+class OpenConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def public_port_deployment() -> SwarmDeployment:
+    return SwarmDeployment(
+        appid="demo",
+        network_name="orchestrator-demo",
+        services=(
+            ServiceDeployment(
+                service_id="service-demo-web",
+                service_name="demo-web",
+                image="harbor.example/apps/demo:build-44",
+                action="created",
+                endpoint="demo-web:18080",
+                ports=(DockerPublishedPort(target_port=8080, published_port=18080),),
+            ),
+        ),
+    )
+
+
+def test_public_port_probe_requires_reachable_published_tcp_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = make_harness()
+    harness.runtime.settings.public_host = "127.0.0.1"
+    harness.runtime.settings.deployment_readiness_timeout_seconds = 0
+    monkeypatch.setattr("orchestrator.worker_runtime.socket.create_connection", lambda *_args, **_kwargs: OpenConnection())
+
+    harness.runtime._probe_public_ports(public_port_deployment())
+
+    def refused(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("orchestrator.worker_runtime.socket.create_connection", refused)
+    with pytest.raises(DockerServiceError, match="demo-web:18080 is not reachable"):
+        harness.runtime._probe_public_ports(public_port_deployment())
 
 
 def test_failed_jenkins_result_marks_the_build_failed_without_deployment() -> None:

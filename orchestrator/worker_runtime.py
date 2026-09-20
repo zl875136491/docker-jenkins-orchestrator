@@ -9,6 +9,8 @@ through the configured repository.
 from __future__ import annotations
 
 import hashlib
+import socket
+import time
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 from typing import Any
@@ -301,6 +303,7 @@ class WorkerRuntime:
             return _result(self.builds.get_build(build.build_id))
 
         deployment = self._docker_services_adapter().deploy(build.appid, artifact.compose)
+        self._probe_public_ports(deployment)
         records = deployment.to_models(build.build_id)
         for record in records:
             self.repository.save_service(record)
@@ -317,6 +320,50 @@ class WorkerRuntime:
             service_count=len(records),
         )
         return _result(succeeded)
+
+    def _probe_public_ports(self, deployment: Any) -> None:
+        """Confirm configured published TCP ports accept connections.
+
+        This is deliberately enabled only when the test/production settings
+        advertise a public host. Internal-only Compose services remain valid,
+        while a service that claims an external port cannot be marked
+        successful before that port is reachable from the worker network.
+        """
+
+        raw_host = self.settings.public_host
+        if not isinstance(raw_host, str) or not raw_host.strip():
+            return
+        host = raw_host.strip().rstrip("/")
+        if "://" in host:
+            parsed = urlsplit(host)
+            host = parsed.hostname or ""
+        else:
+            host = host.strip("[]")
+        if not host:
+            raise DockerServiceError("Public host is invalid for deployment readiness checks")
+
+        timeout = float(getattr(self.settings, "deployment_readiness_timeout_seconds", 60))
+        interval = float(getattr(self.settings, "deployment_readiness_poll_interval_seconds", 1.0))
+        for service in getattr(deployment, "services", ()):
+            for port in getattr(service, "ports", ()):
+                published = getattr(port, "published_port", None)
+                protocol = getattr(port, "protocol", None)
+                if published is None or protocol != "tcp":
+                    continue
+                deadline = time.monotonic() + timeout
+                last_error: OSError | None = None
+                while True:
+                    try:
+                        with socket.create_connection((host, int(published)), timeout=min(5.0, max(0.1, timeout))):
+                            break
+                    except OSError as exc:
+                        last_error = exc
+                    if time.monotonic() >= deadline:
+                        detail = type(last_error).__name__ if last_error is not None else "connection failed"
+                        raise DockerServiceError(
+                            f"Published port {service.service_name}:{published} is not reachable ({detail})"
+                        )
+                    time.sleep(min(interval, max(0.01, deadline - time.monotonic())))
 
     def _resume_deployment(self, build: BuildJob) -> dict[str, str]:
         if build.jenkins_build_number is None:

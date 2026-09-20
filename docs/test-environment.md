@@ -45,6 +45,12 @@ with `endpoint: null` and no published port is deployed but has no external
 URL; its final Jenkins Compose artifact must declare a mapping such as
 `18082:3000` before rebuilding.
 
+The worker also waits for real Swarm tasks to reach `running`. When
+`ORCHESTRATOR_PUBLIC_HOST` is set (as it is in this test environment), every
+published TCP port is probed from the worker network before the build is marked
+`succeeded`; a service that is created but not runnable or reachable is marked
+failed instead.
+
 The machine-readable access query is:
 
 ```bash
@@ -66,7 +72,7 @@ docker compose --env-file /opt/orchestrator-test/.env \
 ```
 
 The test Jenkins job can be overridden with `--jenkins-job`; otherwise the
-pre-existing `apps-orchestrator/live-e2e-evidence-1789368954` job is selected
+real `apps-orchestrator/orchestrator-real-delivery-20260920` job is selected
 when available. GitLab ref validation is enabled only when its hostname is
 resolvable from the test host; otherwise Jenkins remains responsible for the
 repository checkout and the test environment starts with GitLab validation

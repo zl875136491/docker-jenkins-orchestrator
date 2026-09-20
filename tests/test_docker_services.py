@@ -47,6 +47,16 @@ class FakeService:
         self.remove_calls += 1
 
 
+class TaskService(FakeService):
+    def __init__(self, name: str, states: list[str], replicas: int = 1) -> None:
+        super().__init__(name)
+        self.attrs["Spec"] = {"Mode": {"Replicated": {"Replicas": replicas}}}
+        self.states = states
+
+    def tasks(self) -> list[dict]:
+        return [{"DesiredState": "running", "Status": {"State": state}} for state in self.states]
+
+
 class FakeServices:
     def __init__(self) -> None:
         self.items: dict[str, FakeService] = {}
@@ -352,3 +362,40 @@ def test_swarm_adapter_shortens_long_app_service_names_stably() -> None:
         },
     )
     assert [service.service_name for service in second.services] == names
+
+
+def test_swarm_adapter_waits_for_real_service_tasks_to_run() -> None:
+    docker = FakeDocker()
+    service = TaskService("demo-api", ["running"], replicas=2)
+    docker.services.items[service.name] = service
+    adapter = DockerSwarmAdapter(docker_client=docker, readiness_timeout_seconds=0, readiness_poll_interval_seconds=0.01)
+
+    with pytest.raises(DockerServiceError, match="did not reach running state"):
+        adapter._wait_for_service_ready(docker, "demo-api")
+
+    service.states = ["running", "running"]
+    adapter._wait_for_service_ready(docker, "demo-api")
+
+
+def test_swarm_adapter_reports_failed_task_after_readiness_timeout() -> None:
+    docker = FakeDocker()
+    service = TaskService("demo-api", ["failed"])
+    docker.services.items[service.name] = service
+    adapter = DockerSwarmAdapter(docker_client=docker, readiness_timeout_seconds=0, readiness_poll_interval_seconds=0.01)
+
+    with pytest.raises(DockerServiceError, match="failed"):
+        adapter._wait_for_service_ready(docker, "demo-api")
+
+
+def test_swarm_adapter_ignores_running_tasks_marked_for_shutdown() -> None:
+    docker = FakeDocker()
+    service = TaskService("demo-api", ["running"])
+    docker.services.items[service.name] = service
+    service.tasks = lambda: [
+        {"DesiredState": "shutdown", "Status": {"State": "running"}},
+        {"DesiredState": "running", "Status": {"State": "pending"}},
+    ]
+    adapter = DockerSwarmAdapter(docker_client=docker, readiness_timeout_seconds=0, readiness_poll_interval_seconds=0.01)
+
+    with pytest.raises(DockerServiceError, match="shutdown:running"):
+        adapter._wait_for_service_ready(docker, "demo-api")

@@ -65,3 +65,10 @@ def test_production_settings_accept_the_compose_service_endpoints() -> None:
 
     assert settings.storage_backend == "mongo"
     assert settings.task_dispatcher == "celery"
+
+
+def test_production_settings_enable_deployment_readiness_defaults() -> None:
+    settings = Settings()
+
+    assert settings.deployment_readiness_timeout_seconds == 60
+    assert settings.deployment_readiness_poll_interval_seconds == 1.0

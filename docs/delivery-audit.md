@@ -38,9 +38,9 @@ python3 -m compileall -q .        # passed
 
 仓库现在提供了 [jenkins/orchestrator-build.groovy](../jenkins/orchestrator-build.groovy) 作为标准流水线模板：它校验 Compose、构建或提升镜像、推送 Harbor，并归档保留完整 service 拓扑的 `orchestrator-result.json`。模板不能替代目标 Jenkins 的凭据、builder 节点、Docker daemon 和 Harbor/GitLab 网络配置；任意 GitLab 仓库仍需在隔离环境中用实际 job 验收。
 
-### 高优先级：Compose 依赖不是健康就绪闸门
+### 高优先级：Compose 依赖健康状态仍不是完整就绪闸门
 
-`depends_on` 会被验证并用于依赖优先创建，但 Docker Swarm Service API 没有 Compose 的 `service_healthy` 启动闸门。healthcheck 会进入 service task spec，worker 不会等待数据库/Redis 健康后才标记部署成功。像 Immich 这样的应用必须自身具备连接重试，或后续增加部署后健康检查/回滚流程。
+`depends_on` 会被验证并用于依赖优先创建；worker 现在会等待 Docker task 进入 `running`，并在配置公开 host 时探测 published TCP 端口，但 Docker Swarm Service API 仍没有 Compose 的 `service_healthy` 依赖启动闸门。应用必须自身具备连接重试，或后续增加按应用协议执行的健康检查/回滚流程。
 
 ### 中优先级：`env_file` 必须在用户角色/Jenkins 侧展开
 
@@ -52,7 +52,7 @@ Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上�
 
 ### 中优先级：真实基础设施和供应链验证仍需环境验收
 
-测试没有连接真实 GitLab、Jenkins、Harbor、MongoDB、Redis 或 Swarm，也没有验证 TLS、凭据轮换、镜像签名/准入策略、跨节点卷驱动和备份恢复。生产上线前至少应执行一次隔离环境的完整构建、失败重试、worker 重启恢复、service 更新/删除和 Mongo 恢复演练。
+离线测试不连接真实 GitLab、Jenkins、Harbor、MongoDB、Redis 或 Swarm；独立的外部测试环境已经完成真实 MongoDB、Redis/Celery、Jenkins、Harbor、Swarm 和 HTTP 访问验收，但仍没有覆盖 TLS、凭据轮换、镜像签名/准入策略、跨节点卷驱动和备份恢复。生产上线前至少应执行一次隔离环境的完整构建、失败重试、worker 重启恢复、service 更新/删除和 Mongo 恢复演练。
 
 ## 结论
 
