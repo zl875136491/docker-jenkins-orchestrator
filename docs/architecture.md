@@ -48,6 +48,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | POST | `/api/connect` | conductor-app 获取 JWT |
 | POST / GET / PATCH | `/api/apps`, `/api/apps/{appid}` | 创建、读取、更新 user-app |
 | POST | `/api/apps/{appid}/builds` | 创建并投递构建任务 |
+| GET | `/api/builds` | 分页查询构建历史，可按 `appid`、`status` 筛选 |
 | GET | `/api/builds/{build_id}` | 查询任务和当前状态 |
 | GET | `/api/apps/{appid}/events` | 查询按时间排序的审计事件/日志 |
 | GET | `/api/apps/{appid}/images` | 查询用户镜像 |
@@ -57,6 +58,8 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | GET / POST | `/api/base-images`, `/api/base-images/sync` | 查询或投递基础镜像同步任务 |
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
+
+`GET /api/builds` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `appid` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
 
 创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
 

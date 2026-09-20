@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +14,15 @@ from pydantic import BaseModel, Field
 
 from orchestrator.config import Settings, get_settings
 from orchestrator.container import ApplicationContainer, create_container
-from orchestrator.models import BuildCreate, BuildJob, UserApp, UserAppCreate, UserAppUpdate
+from orchestrator.models import (
+    BuildCreate,
+    BuildHistoryPage,
+    BuildJob,
+    BuildStatus,
+    UserApp,
+    UserAppCreate,
+    UserAppUpdate,
+)
 from orchestrator.repository import DuplicateAppError
 from orchestrator.services import BuildInputError, NotFoundError
 from orchestrator.templates import TemplateError
@@ -133,6 +141,24 @@ def create_app(
             return container.builds.get_build(build_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found") from exc
+
+    @api.get("/api/builds", response_model=BuildHistoryPage)
+    def list_builds(
+        appid: str | None = Query(default=None, min_length=1, max_length=64),
+        build_status: BuildStatus | None = Query(default=None, alias="status"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        _: dict = Depends(require_token),
+    ) -> BuildHistoryPage:
+        """List persisted build history for the control console and conductor."""
+
+        items, total = container.repository.list_builds(
+            appid=appid,
+            status=build_status,
+            skip=(page - 1) * page_size,
+            limit=page_size,
+        )
+        return BuildHistoryPage(items=items, total=total, page=page, page_size=page_size)
 
     @api.get("/api/apps/{appid}/events")
     def list_events(appid: str, _: dict = Depends(require_token)) -> list:

@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -55,6 +57,89 @@ def test_app_build_lifecycle_smoke() -> None:
     app_document = client.get("/api/apps/demo-app", headers=headers).json()
     assert app_document["environment_keys"] == ["DATABASE_URL"]
     assert "mongodb://mongodb/demo" not in str(app_document)
+
+
+def test_build_history_requires_authentication_and_supports_filters_pagination_and_detail() -> None:
+    assert client.get("/api/builds").status_code == 401
+
+    headers = auth_headers()
+    appid = f"history-{uuid4().hex}"
+    app_response = client.post(
+        "/api/apps",
+        headers=headers,
+        json={
+            "appid": appid,
+            "name": "History",
+            "repository_url": "https://git.example/history.git",
+            "compose": {"services": {"api": {"image": "example/history:latest"}}},
+        },
+    )
+    assert app_response.status_code == 201
+
+    builds = []
+    for git_ref in ("first", "second", "third"):
+        response = client.post(
+            f"/api/apps/{appid}/builds",
+            headers=headers,
+            json={"git_ref": git_ref},
+        )
+        assert response.status_code == 202
+        builds.append(response.json())
+
+    failed = app.state.container.builds.fail(builds[0]["build_id"], "history test failure")
+    assert failed.status.value == "failed"
+
+    page_one = client.get(
+        "/api/builds",
+        headers=headers,
+        params={"appid": appid, "page": 1, "page_size": 2},
+    )
+    assert page_one.status_code == 200
+    page_one_payload = page_one.json()
+    assert page_one_payload["total"] == 3
+    assert page_one_payload["page"] == 1
+    assert page_one_payload["page_size"] == 2
+    assert len(page_one_payload["items"]) == 2
+
+    page_two = client.get(
+        "/api/builds",
+        headers=headers,
+        params={"appid": appid, "page": 2, "page_size": 2},
+    )
+    assert page_two.status_code == 200
+    page_two_payload = page_two.json()
+    assert page_two_payload["total"] == 3
+    assert len(page_two_payload["items"]) == 1
+    page_one_ids = {item["build_id"] for item in page_one_payload["items"]}
+    page_two_ids = {item["build_id"] for item in page_two_payload["items"]}
+    assert page_one_ids.isdisjoint(page_two_ids)
+
+    failed_page = client.get(
+        "/api/builds",
+        headers=headers,
+        params={"appid": appid, "status": "failed"},
+    )
+    assert failed_page.status_code == 200
+    assert failed_page.json()["total"] == 1
+    assert failed_page.json()["items"][0]["build_id"] == builds[0]["build_id"]
+
+    queued_page = client.get(
+        "/api/builds",
+        headers=headers,
+        params={"appid": appid, "status": "queued"},
+    )
+    assert queued_page.status_code == 200
+    assert queued_page.json()["total"] == 2
+    assert {item["status"] for item in queued_page.json()["items"]} == {"queued"}
+
+    detail = client.get(f"/api/builds/{builds[0]['build_id']}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["build_id"] == builds[0]["build_id"]
+    assert detail.json()["appid"] == appid
+    assert detail.json()["status"] == "failed"
+
+    for invalid_params in ({"status": "unknown"}, {"page": 0}, {"page_size": 101}):
+        assert client.get("/api/builds", headers=headers, params=invalid_params).status_code == 422
 
 
 def test_duplicate_app_and_missing_app_are_reported() -> None:

@@ -19,8 +19,11 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
 
     assert page.status_code == 200
     assert "Orchestrator" in page.text
+    assert "历史任务" in page.text
+    assert "historySection" in page.text
     assert "/ui/app.js" in page.text
     assert stylesheet.status_code == 200
     assert "page-grid" in stylesheet.text
     assert script.status_code == 200
     assert "/api/connect" in script.text
+    assert "/api/builds?" in script.text

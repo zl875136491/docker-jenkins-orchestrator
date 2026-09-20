@@ -139,6 +139,15 @@ class BuildJob(DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class BuildHistoryPage(DomainModel):
+    """Paginated build history returned by the control plane."""
+
+    items: list[BuildJob] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+
+
 class AppEvent(DomainModel):
     event_id: str
     appid: str

@@ -8,6 +8,11 @@
     appid: localStorage.getItem(APP_KEY) || "",
     buildId: "",
     latestBuild: null,
+    historyPage: 1,
+    historyPageSize: 20,
+    historyTotal: 0,
+    historyLoading: false,
+    historyTimer: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -41,6 +46,24 @@
 
   function pretty(targetId, value) {
     $(targetId).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function prettyNode(target, value) {
+    target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function statusClass(status) {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized === "succeeded") return "success";
+    if (normalized === "failed" || normalized === "cancelled") return "failed";
+    if (normalized) return "active";
+    return "neutral";
+  }
+
+  function formatDate(value) {
+    if (!value) return "--";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
   }
 
   function parsedJson(text, label, allowEmpty = false) {
@@ -82,8 +105,7 @@
     $("buildId").value = state.buildId;
     $("metricBuild").textContent = build.status || "--";
     $("buildStatus").textContent = build.status || "--";
-    const status = String(build.status || "").toLowerCase();
-    $("buildStatus").className = `status-pill ${status === "succeeded" ? "success" : status === "failed" || status === "cancelled" ? "failed" : status ? "active" : "neutral"}`;
+    $("buildStatus").className = `status-pill ${statusClass(build.status)}`;
     $("jenkinsBuild").textContent = build.jenkins_build_number ?? "--";
     $("celeryTask").textContent = build.celery_task_id || "--";
   }
@@ -105,6 +127,7 @@
       if (response.status === 401 && !path.endsWith("/connect")) {
         state.token = "";
         localStorage.removeItem(TOKEN_KEY);
+        stopHistoryPolling();
         setSession(false, "访问令牌已失效，请重新连接。");
       }
       throw new ApiError(response.status, payload);
@@ -134,7 +157,8 @@
     state.token = payload.access_token;
     localStorage.setItem(TOKEN_KEY, state.token);
     setSession(true, `令牌有效至 ${payload.expires_at || "未知时间"}`);
-    await Promise.all([loadTemplates(), loadBaseImages()]);
+    await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ resetPage: true, silent: true })]);
+    updateHistoryPolling();
     return payload;
   }
 
@@ -184,6 +208,7 @@
     const value = await request(`/api/apps/${encodeURIComponent(appid)}/builds`, { method: "POST", body });
     applyBuild(value);
     pretty("buildOutput", value);
+    loadHistory({ resetPage: true, silent: true }).catch(() => {});
     return value;
   }
 
@@ -195,6 +220,172 @@
     applyBuild(value);
     pretty("buildOutput", value);
     return value;
+  }
+
+  function historyPageCount() {
+    return Math.max(1, Math.ceil(state.historyTotal / state.historyPageSize));
+  }
+
+  function renderHistoryPagination() {
+    const pageCount = historyPageCount();
+    $("historyPageInfo").textContent = `第 ${state.historyPage} / ${pageCount} 页`;
+    $("historyPreviousButton").disabled = state.historyPage <= 1;
+    $("historyNextButton").disabled = state.historyPage >= pageCount;
+  }
+
+  function textCell(row, value, className = "") {
+    const cell = document.createElement("td");
+    if (className) cell.className = className;
+    cell.textContent = value == null || value === "" ? "--" : String(value);
+    row.appendChild(cell);
+    return cell;
+  }
+
+  function renderHistoryRows(items) {
+    const body = $("historyTableBody");
+    body.replaceChildren();
+    $("historyTable").hidden = items.length === 0;
+    $("historyEmpty").hidden = items.length !== 0;
+
+    items.forEach((build) => {
+      const row = document.createElement("tr");
+      textCell(row, build.build_id);
+      textCell(row, build.appid);
+      const statusCell = document.createElement("td");
+      const status = document.createElement("span");
+      status.className = `status-pill ${statusClass(build.status)}`;
+      status.textContent = build.status || "--";
+      statusCell.appendChild(status);
+      row.appendChild(statusCell);
+      textCell(row, build.git_ref);
+      textCell(row, build.jenkins_build_number ?? "--");
+      textCell(row, formatDate(build.created_at));
+
+      const actions = document.createElement("td");
+      const detailButton = document.createElement("button");
+      detailButton.type = "button";
+      detailButton.className = "button button-quiet history-detail-button";
+      detailButton.textContent = "查看详情";
+      detailButton.addEventListener("click", () => {
+        withFeedback(() => inspectBuild(build.build_id, build.appid), null);
+      });
+      actions.appendChild(detailButton);
+      row.appendChild(actions);
+      body.appendChild(row);
+    });
+  }
+
+  function historyFilterQuery() {
+    const params = new URLSearchParams();
+    const appid = $("historyAppId").value.trim();
+    const status = $("historyStatus").value;
+    state.historyPageSize = Number($("historyPageSize").value) || 20;
+    if (appid) params.set("appid", appid);
+    if (status) params.set("status", status);
+    params.set("page", String(state.historyPage));
+    params.set("page_size", String(state.historyPageSize));
+    return params;
+  }
+
+  async function loadHistory({ resetPage = false, silent = false } = {}) {
+    if (!state.token) throw new Error("请先连接控制端");
+    if (resetPage) state.historyPage = 1;
+    state.historyLoading = true;
+    $("historyLoading").textContent = "加载中...";
+    try {
+      const params = historyFilterQuery();
+      const value = await request(`/api/builds?${params.toString()}`);
+      const items = Array.isArray(value?.items) ? value.items : [];
+      state.historyPage = Math.max(1, Number(value?.page) || state.historyPage);
+      state.historyPageSize = Math.max(1, Number(value?.page_size) || state.historyPageSize);
+      state.historyTotal = Math.max(0, Number(value?.total) || 0);
+      renderHistoryRows(items);
+      renderHistoryPagination();
+      const appid = $("historyAppId").value.trim();
+      const status = $("historyStatus").value;
+      const filterText = [appid && `App ID ${appid}`, status && `状态 ${status}`].filter(Boolean).join("，");
+      $("historySummary").textContent = filterText
+        ? `${filterText}，共 ${state.historyTotal} 个任务`
+        : `共 ${state.historyTotal} 个任务`;
+      if (!silent) setActivity(`已加载 ${items.length} 个历史任务`, "success");
+      return value;
+    } finally {
+      state.historyLoading = false;
+      $("historyLoading").textContent = "";
+    }
+  }
+
+  function detailError(reason) {
+    return { error: reason instanceof Error ? reason.message : String(reason) };
+  }
+
+  function renderDetailResult(targetId, result) {
+    const target = $(targetId);
+    prettyNode(target, result.status === "fulfilled" ? result.value : detailError(result.reason));
+  }
+
+  function resourcesForBuild(value, buildId) {
+    if (!Array.isArray(value)) return value;
+    return value.filter((item) => !item?.build_id || item.build_id === buildId);
+  }
+
+  async function inspectBuild(buildId, appid) {
+    if (!buildId) throw new Error("缺少 Build ID");
+    const selectedAppid = appid || state.appid || $("historyAppId").value.trim();
+    if (!selectedAppid) throw new Error("该任务没有可用的 App ID");
+    $("historyDetailPanel").hidden = false;
+    $("historyDetailTitle").textContent = `任务详情：${buildId}`;
+    $("historyDetailMeta").textContent = `App ID：${selectedAppid}`;
+    $("historyDetailStatus").textContent = "正在并行加载任务及关联资源...";
+    ["historyDetailBuild", "historyDetailEvents", "historyDetailImages", "historyDetailServices", "historyDetailAlerts"].forEach((id) => {
+      $(id).textContent = "加载中...";
+    });
+
+    const results = await Promise.allSettled([
+      request(`/api/builds/${encodeURIComponent(buildId)}`),
+      request(`/api/apps/${encodeURIComponent(selectedAppid)}/events`),
+      request(`/api/apps/${encodeURIComponent(selectedAppid)}/images`),
+      request(`/api/apps/${encodeURIComponent(selectedAppid)}/services`),
+      request(`/api/apps/${encodeURIComponent(selectedAppid)}/alerts`),
+    ]);
+    const [buildResult, eventsResult, imagesResult, servicesResult, alertsResult] = results;
+    renderDetailResult("historyDetailBuild", buildResult);
+    renderDetailResult("historyDetailEvents", eventsResult.status === "fulfilled"
+      ? { ...eventsResult, value: resourcesForBuild(eventsResult.value, buildId) }
+      : eventsResult);
+    renderDetailResult("historyDetailImages", imagesResult.status === "fulfilled"
+      ? { ...imagesResult, value: resourcesForBuild(imagesResult.value, buildId) }
+      : imagesResult);
+    renderDetailResult("historyDetailServices", servicesResult.status === "fulfilled"
+      ? { ...servicesResult, value: resourcesForBuild(servicesResult.value, buildId) }
+      : servicesResult);
+    renderDetailResult("historyDetailAlerts", alertsResult.status === "fulfilled"
+      ? { ...alertsResult, value: resourcesForBuild(alertsResult.value, buildId) }
+      : alertsResult);
+    if (buildResult.status === "fulfilled") applyBuild(buildResult.value);
+    const failed = results.filter((result) => result.status === "rejected").length;
+    $("historyDetailStatus").textContent = failed
+      ? `详情已加载，${failed} 个关联接口返回失败。`
+      : `详情已更新：${new Date().toLocaleTimeString()}`;
+    return buildResult.status === "fulfilled" ? buildResult.value : null;
+  }
+
+  function stopHistoryPolling() {
+    if (state.historyTimer) {
+      clearInterval(state.historyTimer);
+      state.historyTimer = null;
+    }
+  }
+
+  function updateHistoryPolling() {
+    stopHistoryPolling();
+    if (!state.token || !$("historyAutoRefresh").checked) return;
+    state.historyTimer = setInterval(() => {
+      if (state.historyLoading) return;
+      loadHistory({ silent: true }).catch((error) => {
+        if (state.token) setActivity(error instanceof Error ? error.message : String(error), "error");
+      });
+    }, 10000);
   }
 
   async function loadResource(resource) {
@@ -223,7 +414,12 @@
       label.append(input, name);
       root.appendChild(label);
     });
-    if (!value.components?.length) root.innerHTML = '<span class="muted small">暂无组件</span>';
+    if (!value.components?.length) {
+      const empty = document.createElement("span");
+      empty.className = "muted small";
+      empty.textContent = "暂无组件";
+      root.appendChild(empty);
+    }
     setActivity(`已加载 ${value.components?.length || 0} 个模板组件`, "success");
     return value;
   }
@@ -257,6 +453,7 @@
     $("disconnectButton").addEventListener("click", () => {
       state.token = "";
       localStorage.removeItem(TOKEN_KEY);
+      stopHistoryPolling();
       setSession(false, "已清除当前浏览器中的访问令牌。");
       setActivity("已退出", "success");
     });
@@ -279,6 +476,26 @@
     $("buildForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createBuild, "buildOutput"); });
     $("buildQueryForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(getBuild, "buildOutput"); });
     $("pollBuildButton").addEventListener("click", () => withFeedback(getBuild, "buildOutput"));
+    $("historyFilterForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      withFeedback(() => loadHistory({ resetPage: true }), null);
+    });
+    $("historyRefreshButton").addEventListener("click", () => withFeedback(() => loadHistory(), null));
+    $("historyPageSize").addEventListener("change", () => withFeedback(() => loadHistory({ resetPage: true }), null));
+    $("historyPreviousButton").addEventListener("click", () => {
+      if (state.historyPage <= 1) return;
+      state.historyPage -= 1;
+      withFeedback(() => loadHistory(), null);
+    });
+    $("historyNextButton").addEventListener("click", () => {
+      if (state.historyPage >= historyPageCount()) return;
+      state.historyPage += 1;
+      withFeedback(() => loadHistory(), null);
+    });
+    $("historyAutoRefresh").addEventListener("change", updateHistoryPolling);
+    $("historyDetailCloseButton").addEventListener("click", () => {
+      $("historyDetailPanel").hidden = true;
+    });
     document.querySelectorAll(".resource-button").forEach((button) => {
       button.addEventListener("click", () => withFeedback(() => loadResource(button.dataset.resource), "resourceOutput"));
     });
@@ -298,9 +515,11 @@
     try {
       const me = await request("/api/me");
       setSession(true, `当前身份：${me.worker_name || "conductor"}`);
-      await Promise.all([loadTemplates(), loadBaseImages()]);
+      await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ silent: true })]);
+      updateHistoryPolling();
     } catch {
       setSession(false);
+      stopHistoryPolling();
     }
   }
 

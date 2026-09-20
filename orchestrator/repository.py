@@ -33,6 +33,13 @@ class Repository(Protocol):
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None: ...
     def create_build(self, build: BuildJob) -> BuildJob: ...
     def get_build(self, build_id: str) -> BuildJob | None: ...
+    def list_builds(
+        self,
+        appid: str | None = None,
+        status: BuildStatus | None = None,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> tuple[list[BuildJob], int]: ...
     def list_active_builds(self) -> list[BuildJob]: ...
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None: ...
     def transition_build(
@@ -103,6 +110,27 @@ class InMemoryRepository:
         with self._lock:
             build = self.builds.get(build_id)
             return self._copy(build) if build else None
+
+    def list_builds(
+        self,
+        appid: str | None = None,
+        status: BuildStatus | None = None,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> tuple[list[BuildJob], int]:
+        if skip < 0 or limit < 1:
+            raise ValueError("skip must be non-negative and limit must be positive")
+        with self._lock:
+            values = [
+                build
+                for build in self.builds.values()
+                if (appid is None or build.appid == appid)
+                and (status is None or build.status == status)
+            ]
+            values.sort(key=lambda build: (build.created_at, build.build_id), reverse=True)
+            total = len(values)
+            page = values[skip : skip + limit]
+            return [self._copy(build) for build in page], total
 
     def list_active_builds(self) -> list[BuildJob]:
         with self._lock:
@@ -255,6 +283,25 @@ class MongoRepository:
 
     def get_build(self, build_id: str) -> BuildJob | None:
         return self._model(BuildJob, self.builds.find_one({"build_id": build_id}))
+
+    def list_builds(
+        self,
+        appid: str | None = None,
+        status: BuildStatus | None = None,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> tuple[list[BuildJob], int]:
+        if skip < 0 or limit < 1:
+            raise ValueError("skip must be non-negative and limit must be positive")
+        query: dict[str, Any] = {}
+        if appid is not None:
+            query["appid"] = appid
+        if status is not None:
+            query["status"] = status.value
+        cursor = self.builds.find(query).sort([("created_at", -1), ("build_id", -1)])
+        total = self.builds.count_documents(query)
+        documents = cursor.skip(skip).limit(limit)
+        return [self._model(BuildJob, document) for document in documents], total
 
     def list_active_builds(self) -> list[BuildJob]:
         statuses = [status.value for status in ACTIVE_BUILD_STATUSES]

@@ -65,6 +65,7 @@
           <nav class="side-nav" aria-label="控制台区域">
             <a href="#appSection">应用</a>
             <a href="#buildSection">构建</a>
+            <a href="#historySection">历史任务</a>
             <a href="#resourcesSection">运行资源</a>
             <a href="#templatesSection">模板</a>
             <a href="#baseImagesSection">基础镜像</a>
@@ -191,10 +192,116 @@
             <pre id="buildOutput" class="json-output" aria-live="polite">等待构建操作</pre>
           </section>
 
+          <section id="historySection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">03 / HISTORY</p>
+                <h2>历史任务</h2>
+              </div>
+              <span class="section-note">按应用和状态查询已持久化构建</span>
+            </div>
+            <form id="historyFilterForm" class="history-controls">
+              <label>
+                App ID
+                <input id="historyAppId" placeholder="留空查询全部应用" autocomplete="off" />
+              </label>
+              <label>
+                状态
+                <select id="historyStatus">
+                  <option value="">全部状态</option>
+                  <option value="queued">queued</option>
+                  <option value="validating">validating</option>
+                  <option value="triggering">triggering</option>
+                  <option value="building">building</option>
+                  <option value="deploying">deploying</option>
+                  <option value="succeeded">succeeded</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                </select>
+              </label>
+              <label>
+                每页数量
+                <select id="historyPageSize">
+                  <option value="10">10</option>
+                  <option value="20" selected>20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+              <div class="history-filter-actions">
+                <button class="button button-secondary" type="submit">查询</button>
+                <button id="historyRefreshButton" class="button button-quiet" type="button">刷新</button>
+                <label class="history-auto-refresh">
+                  <input id="historyAutoRefresh" type="checkbox" checked />
+                  <span>自动刷新（10 秒）</span>
+                </label>
+              </div>
+            </form>
+            <div class="history-list-meta">
+              <span id="historySummary" class="muted small">尚未查询</span>
+              <span id="historyLoading" class="muted small" aria-live="polite"></span>
+            </div>
+            <div class="history-table-wrap">
+              <table id="historyTable" class="history-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Build ID</th>
+                    <th scope="col">App ID</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">Git 引用</th>
+                    <th scope="col">Jenkins build</th>
+                    <th scope="col">创建时间</th>
+                    <th scope="col"><span class="sr-only">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody id="historyTableBody"></tbody>
+              </table>
+              <p id="historyEmpty" class="history-empty muted" hidden>没有符合条件的历史任务。</p>
+            </div>
+            <div class="history-pagination">
+              <button id="historyPreviousButton" class="button button-quiet" type="button">上一页</button>
+              <span id="historyPageInfo" class="muted small">第 1 / 1 页</span>
+              <button id="historyNextButton" class="button button-quiet" type="button">下一页</button>
+            </div>
+            <section id="historyDetailPanel" class="history-detail-panel" hidden aria-labelledby="historyDetailTitle">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">TASK INSPECTION</p>
+                  <h3 id="historyDetailTitle">任务详情</h3>
+                </div>
+                <button id="historyDetailCloseButton" class="button button-quiet" type="button">关闭详情</button>
+              </div>
+              <p id="historyDetailMeta" class="muted small"></p>
+              <p id="historyDetailStatus" class="history-detail-status muted small" aria-live="polite"></p>
+              <div class="history-detail-grid">
+                <div class="history-detail-block">
+                  <h4>BuildJob</h4>
+                  <pre id="historyDetailBuild" class="json-output tall">等待查询</pre>
+                </div>
+                <div class="history-detail-block">
+                  <h4>事件</h4>
+                  <pre id="historyDetailEvents" class="json-output tall">等待查询</pre>
+                </div>
+                <div class="history-detail-block">
+                  <h4>用户镜像</h4>
+                  <pre id="historyDetailImages" class="json-output tall">等待查询</pre>
+                </div>
+                <div class="history-detail-block">
+                  <h4>Docker Services</h4>
+                  <pre id="historyDetailServices" class="json-output tall">等待查询</pre>
+                </div>
+                <div class="history-detail-block">
+                  <h4>告警</h4>
+                  <pre id="historyDetailAlerts" class="json-output tall">等待查询</pre>
+                </div>
+              </div>
+            </section>
+          </section>
+
           <section id="resourcesSection" class="workspace-section">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">03 / OBSERVABILITY</p>
+                <p class="eyebrow">04 / OBSERVABILITY</p>
                 <h2>运行资源</h2>
               </div>
               <span class="section-note">查看事件、镜像、服务和告警</span>
@@ -217,7 +324,7 @@
           <section id="templatesSection" class="workspace-section">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">04 / COMPOSE</p>
+                <p class="eyebrow">05 / COMPOSE</p>
                 <h2>模板组合</h2>
               </div>
               <span class="section-note">从静态技术栈目录生成 Compose</span>
@@ -246,7 +353,7 @@
           <section id="baseImagesSection" class="workspace-section last-section">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">05 / REGISTRY</p>
+                <p class="eyebrow">06 / REGISTRY</p>
                 <h2>基础镜像</h2>
               </div>
               <span class="section-note">查看同步记录或投递同步任务</span>
