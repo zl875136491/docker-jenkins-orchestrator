@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     worker_secret: str = "local-worker-secret"
     jwt_secret: str = "local-development-jwt-secret-change-me"
     jwt_expire_minutes: int = 60
+    jwt_refresh_expire_days: int = 30
 
     storage_backend: Literal["memory", "mongo"] = "memory"
     mongodb_url: str = "mongodb://localhost:27017"

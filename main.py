@@ -35,15 +35,20 @@ from orchestrator.templates import TemplateError
 bearer = HTTPBearer(auto_error=False)
 
 
-class ConnectRequest(BaseModel):
-    worker_name: str
-    worker_secret: str
+class TokenRequest(BaseModel):
+    client_id: str
+    client_secret: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: str = "bearer"
-    expires_at: datetime
+    refresh_token: str
+    token_type: str = "Bearer"
+    expires_in: int
 
 
 class ComposeRequest(BaseModel):
@@ -107,12 +112,19 @@ def get_container(request: Request) -> ApplicationContainer:
     return request.app.state.container
 
 
-def issue_token(settings: Settings) -> TokenResponse:
+def issue_tokens(settings: Settings, subject: str | None = None) -> TokenResponse:
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(minutes=settings.jwt_expire_minutes)
-    payload = {"sub": settings.worker_name, "scope": "conductor", "iat": now, "exp": expires}
-    token = jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
-    return TokenResponse(access_token=token, expires_at=expires)
+    access_expires = now + timedelta(minutes=settings.jwt_expire_minutes)
+    refresh_expires = now + timedelta(days=settings.jwt_refresh_expire_days)
+    principal = subject or settings.worker_name
+    common = {"sub": principal, "scope": "conductor", "iat": now}
+    access_payload = {**common, "token_type": "access", "exp": access_expires}
+    refresh_payload = {**common, "token_type": "refresh", "exp": refresh_expires}
+    return TokenResponse(
+        access_token=jwt.encode(access_payload, settings.jwt_secret, algorithm="HS256"),
+        refresh_token=jwt.encode(refresh_payload, settings.jwt_secret, algorithm="HS256"),
+        expires_in=max(1, int((access_expires - now).total_seconds())),
+    )
 
 
 def require_token(
@@ -125,8 +137,18 @@ def require_token(
         claims = jwt.decode(credentials.credentials, container.settings.jwt_secret, algorithms=["HS256"])
     except JWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
-    if claims.get("scope") != "conductor":
+    if claims.get("scope") != "conductor" or claims.get("token_type") != "access":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token scope")
+    return claims
+
+
+def decode_refresh_token(token: str, settings: Settings) -> dict:
+    try:
+        claims = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token") from exc
+    if claims.get("scope") != "conductor" or claims.get("token_type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
     return claims
 
 
@@ -156,32 +178,33 @@ def create_app(
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @api.post("/api/connect", response_model=TokenResponse)
-    def connect(request: ConnectRequest) -> TokenResponse:
+    @api.post("/oauth2/token", response_model=TokenResponse)
+    def token(request: TokenRequest) -> TokenResponse:
         settings = container.settings
-        name_matches = hmac.compare_digest(request.worker_name, settings.worker_name)
-        secret_matches = hmac.compare_digest(request.worker_secret, settings.worker_secret)
+        name_matches = hmac.compare_digest(request.client_id, settings.worker_name)
+        secret_matches = hmac.compare_digest(request.client_secret, settings.worker_secret)
         if not name_matches or not secret_matches:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid worker credentials")
-        return issue_token(settings)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid client credentials")
+        return issue_tokens(settings, request.client_id)
 
-    @api.get("/api/me")
-    def me(claims: dict = Depends(require_token)) -> dict[str, str]:
-        return {"worker_name": str(claims["sub"]), "scope": str(claims["scope"])}
+    @api.post("/oauth2/refresh", response_model=TokenResponse)
+    def refresh(request: RefreshRequest) -> TokenResponse:
+        claims = decode_refresh_token(request.refresh_token, container.settings)
+        return issue_tokens(container.settings, str(claims["sub"]))
 
-    @api.get("/api/system-guide")
+    @api.get("/api/v1/system-guide")
     def system_guide(_: dict = Depends(require_token)) -> dict:
         """Return the machine-readable control-plane workflow and conventions."""
         return {
             "name": "Docker-Jenkins Orchestrator",
             "version": "0.2.0",
-            "authentication": {"connect": "POST /api/connect", "scheme": "Bearer JWT"},
+            "authentication": {"token": "POST /oauth2/token", "refresh": "POST /oauth2/refresh", "scheme": "Bearer JWT"},
             "roles": ["webui", "control_api", "mongodb", "redis_celery", "worker", "jenkins", "harbor", "docker_swarm"],
             "call_sequence": [
-                "POST /api/connect", "GET /api/apps", "POST /api/apps or PATCH /api/apps/{appid}",
-                "POST /api/apps/{appid}/builds", "GET /api/builds/{build_id}",
-                "GET /api/apps/{appid}/events", "GET /api/apps/{appid}/images",
-                "GET /api/apps/{appid}/services", "GET /api/apps/{appid}/access", "GET /api/apps/{appid}/alerts",
+                "POST /oauth2/token", "GET /api/v1/jenkins/app_list", "POST /api/v1/jenkins/app_create or PATCH /api/v1/jenkins/app_info/{app_id}",
+                "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
+                "GET /api/v1/jenkins/app_events/{app_id}", "GET /api/v1/jenkins/app_images/{app_id}",
+                "GET /api/v1/jenkins/app_services/{app_id}", "GET /api/v1/jenkins/app_access/{app_id}", "GET /api/v1/jenkins/app_alerts/{app_id}",
             ],
             "build_statuses": [status.value for status in BuildStatus],
             "compose_rules": {
@@ -191,63 +214,63 @@ def create_app(
                 "expose_is_external": False,
             },
             "polling": {
-                "endpoint": "GET /api/builds/{build_id}",
+                "endpoint": "GET /api/v1/jenkins/build_info/{build_id}",
                 "terminal_statuses": [BuildStatus.SUCCEEDED.value, BuildStatus.FAILED.value, BuildStatus.CANCELLED.value],
             },
             "troubleshooting_order": ["webui_request", "control_api", "mongo", "celery_redis", "jenkins", "harbor", "docker_swarm", "external_http"],
         }
 
-    @api.get("/api/readme", response_class=PlainTextResponse)
+    @api.get("/api/v1/readme", response_class=PlainTextResponse)
     def readme(_: dict = Depends(require_token)) -> str:
         """Return the complete Markdown API usage guide."""
         guide_path = Path(__file__).parent / "docs" / "api-reference.md"
         flow_path = Path(__file__).parent / "docs" / "api-call-flow.md"
         return f"{guide_path.read_text(encoding='utf-8').rstrip()}\n\n---\n\n{flow_path.read_text(encoding='utf-8').rstrip()}\n"
 
-    @api.post("/api/apps", response_model=UserApp, status_code=status.HTTP_201_CREATED)
+    @api.post("/api/v1/jenkins/app_create", response_model=UserApp, status_code=status.HTTP_201_CREATED)
     def create_user_app(request: UserAppCreate, _: dict = Depends(require_token)) -> UserApp:
         try:
             return container.applications.create_app(request)
         except DuplicateAppError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="appid already exists") from exc
 
-    @api.get("/api/apps", response_model=list[UserApp])
+    @api.get("/api/v1/jenkins/app_list", response_model=list[UserApp])
     def list_user_apps(_: dict = Depends(require_token)) -> list[UserApp]:
         return container.applications.list_apps()
 
-    @api.get("/api/apps/{appid}", response_model=UserApp)
-    def get_user_app(appid: str, _: dict = Depends(require_token)) -> UserApp:
+    @api.get("/api/v1/jenkins/app_info/{app_id}", response_model=UserApp)
+    def get_user_app(app_id: str, _: dict = Depends(require_token)) -> UserApp:
         try:
-            return container.applications.get_app(appid)
+            return container.applications.get_app(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
 
-    @api.patch("/api/apps/{appid}", response_model=UserApp)
-    def update_user_app(appid: str, request: UserAppUpdate, _: dict = Depends(require_token)) -> UserApp:
+    @api.patch("/api/v1/jenkins/app_info/{app_id}", response_model=UserApp)
+    def update_user_app(app_id: str, request: UserAppUpdate, _: dict = Depends(require_token)) -> UserApp:
         try:
-            return container.applications.update_app(appid, request)
+            return container.applications.update_app(app_id, request)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
 
-    @api.post("/api/apps/{appid}/builds", response_model=BuildJob, status_code=status.HTTP_202_ACCEPTED)
-    def create_build(appid: str, request: BuildCreate, _: dict = Depends(require_token)) -> BuildJob:
+    @api.post("/api/v1/jenkins/build_create/{app_id}", response_model=BuildJob, status_code=status.HTTP_202_ACCEPTED)
+    def create_build(app_id: str, request: BuildCreate, _: dict = Depends(require_token)) -> BuildJob:
         try:
-            return container.builds.queue_build(appid, request)
+            return container.builds.queue_build(app_id, request)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         except BuildInputError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    @api.get("/api/builds/{build_id}", response_model=BuildJob)
+    @api.get("/api/v1/jenkins/build_info/{build_id}", response_model=BuildJob)
     def get_build(build_id: str, _: dict = Depends(require_token)) -> BuildJob:
         try:
             return container.builds.get_build(build_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found") from exc
 
-    @api.get("/api/builds", response_model=BuildHistoryPage)
+    @api.get("/api/v1/jenkins/build_list", response_model=BuildHistoryPage)
     def list_builds(
-        appid: str | None = Query(default=None, min_length=1, max_length=64),
+        app_id: str | None = Query(default=None, min_length=1, max_length=64),
         build_status: BuildStatus | None = Query(default=None, alias="status"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
@@ -256,46 +279,46 @@ def create_app(
         """List persisted build history for the control console and conductor."""
 
         items, total = container.repository.list_builds(
-            appid=appid,
+            appid=app_id,
             status=build_status,
             skip=(page - 1) * page_size,
             limit=page_size,
         )
         return BuildHistoryPage(items=items, total=total, page=page, page_size=page_size)
 
-    @api.get("/api/apps/{appid}/events")
-    def list_events(appid: str, _: dict = Depends(require_token)) -> list:
+    @api.get("/api/v1/jenkins/app_events/{app_id}")
+    def list_events(app_id: str, _: dict = Depends(require_token)) -> list:
         try:
-            container.applications.get_record(appid)
+            container.applications.get_record(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
-        return container.repository.list_events(appid)
+        return container.repository.list_events(app_id)
 
-    @api.get("/api/apps/{appid}/images")
-    def list_images(appid: str, _: dict = Depends(require_token)) -> list:
+    @api.get("/api/v1/jenkins/app_images/{app_id}")
+    def list_images(app_id: str, _: dict = Depends(require_token)) -> list:
         try:
-            container.applications.get_record(appid)
+            container.applications.get_record(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
-        return container.repository.list_user_images(appid)
+        return container.repository.list_user_images(app_id)
 
-    @api.get("/api/apps/{appid}/services")
-    def list_services(appid: str, _: dict = Depends(require_token)) -> list:
+    @api.get("/api/v1/jenkins/app_services/{app_id}")
+    def list_services(app_id: str, _: dict = Depends(require_token)) -> list:
         try:
-            container.applications.get_record(appid)
+            container.applications.get_record(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
-        return container.repository.list_services(appid)
+        return container.repository.list_services(app_id)
 
-    @api.get("/api/apps/{appid}/access", response_model=AppAccess)
-    def get_app_access(appid: str, _: dict = Depends(require_token)) -> AppAccess:
+    @api.get("/api/v1/jenkins/app_access/{app_id}", response_model=AppAccess)
+    def get_app_access(app_id: str, _: dict = Depends(require_token)) -> AppAccess:
         try:
-            container.applications.get_record(appid)
+            container.applications.get_record(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
 
         service_access: list[ServiceAccess] = []
-        for service in container.repository.list_services(appid):
+        for service in container.repository.list_services(app_id):
             ports = list(service.published_ports) or _legacy_published_ports(service.endpoint)
             urls = _access_urls(container.settings, ports)
             service_access.append(
@@ -323,37 +346,37 @@ def create_app(
         elif not access_urls:
             app_reason = "服务没有配置可从外部访问的 TCP published 端口"
         return AppAccess(
-            appid=appid,
+            appid=app_id,
             services=service_access,
             access_available=bool(access_urls),
             access_urls=access_urls,
             access_reason=app_reason,
         )
 
-    @api.get("/api/apps/{appid}/alerts")
-    def list_alerts(appid: str, _: dict = Depends(require_token)) -> list:
+    @api.get("/api/v1/jenkins/app_alerts/{app_id}")
+    def list_alerts(app_id: str, _: dict = Depends(require_token)) -> list:
         try:
-            container.applications.get_record(appid)
+            container.applications.get_record(app_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
-        return container.repository.list_alerts(appid)
+        return container.repository.list_alerts(app_id)
 
-    @api.get("/api/templates")
+    @api.get("/api/v1/docker/template_list")
     def list_templates(_: dict = Depends(require_token)) -> dict[str, list[str]]:
         return {"components": container.catalog.names()}
 
-    @api.post("/api/templates/compose")
+    @api.post("/api/v1/docker/template_compose")
     def compose_template(request: ComposeRequest, _: dict = Depends(require_token)) -> dict:
         try:
             return container.catalog.compose(request.components, request.dependencies)
         except TemplateError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    @api.get("/api/base-images")
+    @api.get("/api/v1/docker/base_image_list")
     def list_base_images(_: dict = Depends(require_token)) -> list:
         return container.repository.list_base_images()
 
-    @api.post("/api/base-images/sync", status_code=status.HTTP_202_ACCEPTED)
+    @api.post("/api/v1/docker/base_image_sync", status_code=status.HTTP_202_ACCEPTED)
     def sync_base_images(_: dict = Depends(require_token)) -> dict[str, str]:
         submission = container.dispatcher.dispatch_base_image_sync()
         return {"task_id": submission.task_id, "task_name": submission.task_name}
