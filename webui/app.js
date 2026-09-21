@@ -2,12 +2,14 @@
   "use strict";
 
   const TOKEN_KEY = "orchestrator.control.token";
+  const REFRESH_TOKEN_KEY = "orchestrator.control.refresh-token";
   const APP_KEY = "orchestrator.control.appid";
   const APP_NAME_KEY = "orchestrator.control.appname";
   const TOAST_TIMEOUT_MS = 5000;
   const notifiedErrors = new WeakSet();
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
+    refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY) || "",
     appid: localStorage.getItem(APP_KEY) || "",
     appName: localStorage.getItem(APP_NAME_KEY) || "",
     activeSection: "appSection",
@@ -254,7 +256,7 @@
   async function loadAppChoices() {
     const selector = $("contextAppSelect");
     if (!selector) return [];
-    const apps = await request("/api/apps");
+    const apps = await request("/api/v1/jenkins/app_list");
     selector.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
@@ -276,7 +278,7 @@
   async function selectContextApp() {
     const appid = $("contextAppSelect").value.trim();
     if (!appid) throw new Error("请先选择已有应用");
-    const value = await request(`/api/apps/${encodeURIComponent(appid)}`);
+    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
     applyApp(value);
     return value;
   }
@@ -292,24 +294,55 @@
     $("celeryTask").textContent = build.celery_task_id || "--";
   }
 
-  async function request(path, options = {}) {
+  async function refreshAccessToken() {
+    if (!state.refreshToken) throw new Error("没有可用的刷新令牌");
+    const response = await fetch("/oauth2/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: state.refreshToken }),
+    });
+    const text = await response.text();
+    let payload = null;
+    if (text) {
+      try { payload = JSON.parse(text); } catch { payload = text; }
+    }
+    if (!response.ok) throw new ApiError(response.status, payload);
+    state.token = payload.access_token;
+    state.refreshToken = payload.refresh_token || state.refreshToken;
+    localStorage.setItem(TOKEN_KEY, state.token);
+    localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
+    return payload;
+  }
+
+  async function request(path, options = {}, allowRefresh = true) {
     try {
       const headers = new Headers(options.headers || {});
+      const requestOptions = { ...options };
       if (options.body !== undefined && !(options.body instanceof FormData)) {
         headers.set("Content-Type", "application/json");
-        options.body = JSON.stringify(options.body);
+        requestOptions.body = JSON.stringify(options.body);
       }
-      if (state.token && !path.endsWith("/connect")) headers.set("Authorization", `Bearer ${state.token}`);
-      const response = await fetch(path, { ...options, headers });
+      if (state.token && !path.startsWith("/oauth2/")) headers.set("Authorization", `Bearer ${state.token}`);
+      const response = await fetch(path, { ...requestOptions, headers });
       const text = await response.text();
       let payload = null;
       if (text) {
         try { payload = JSON.parse(text); } catch { payload = text; }
       }
       if (!response.ok) {
-        if (response.status === 401 && !path.endsWith("/connect")) {
+        if (response.status === 401 && allowRefresh && !path.startsWith("/oauth2/") && state.refreshToken) {
+          try {
+            await refreshAccessToken();
+            return request(path, options, false);
+          } catch {
+            // Fall through and report the original unauthorized response.
+          }
+        }
+        if (response.status === 401 && !path.startsWith("/oauth2/")) {
           state.token = "";
+          state.refreshToken = "";
           localStorage.removeItem(TOKEN_KEY);
+          localStorage.removeItem(REFRESH_TOKEN_KEY);
           stopHistoryPolling();
           setSession(false, "访问令牌已失效，请重新连接。");
         }
@@ -337,13 +370,15 @@
   }
 
   async function connect() {
-    const payload = await request("/api/connect", {
+    const payload = await request("/oauth2/token", {
       method: "POST",
-      body: { worker_name: $("workerName").value.trim(), worker_secret: $("workerSecret").value },
+      body: { client_id: $("workerName").value.trim(), client_secret: $("workerSecret").value },
     });
     state.token = payload.access_token;
+    state.refreshToken = payload.refresh_token || "";
     localStorage.setItem(TOKEN_KEY, state.token);
-    setSession(true, `令牌有效至 ${payload.expires_at || "未知时间"}`);
+    if (state.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
+    setSession(true, `访问令牌有效 ${payload.expires_in || "未知"} 秒`);
     closeModal("connectionModal");
     await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ resetPage: true, silent: true })]);
     updateHistoryPolling();
@@ -365,7 +400,7 @@
   }
 
   async function createApp() {
-    const value = await request("/api/apps", { method: "POST", body: appPayload() });
+    const value = await request("/api/v1/jenkins/app_create", { method: "POST", body: appPayload() });
     applyApp(value);
     pretty("appOutput", value);
     return value;
@@ -373,7 +408,7 @@
 
   async function getApp() {
     const appid = appidFromInput();
-    const value = await request(`/api/apps/${encodeURIComponent(appid)}`);
+    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
     applyApp(value);
     pretty("appOutput", value);
     return value;
@@ -383,7 +418,7 @@
     const payload = appPayload();
     const appid = payload.appid;
     delete payload.appid;
-    const value = await request(`/api/apps/${encodeURIComponent(appid)}`, { method: "PATCH", body: payload });
+    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`, { method: "PATCH", body: payload });
     applyApp(value);
     pretty("appOutput", value);
     return value;
@@ -393,7 +428,7 @@
     const appid = appidFromInput();
     const gitRef = $("buildGitRef").value.trim();
     const body = gitRef ? { git_ref: gitRef } : {};
-    const value = await request(`/api/apps/${encodeURIComponent(appid)}/builds`, { method: "POST", body });
+    const value = await request(`/api/v1/jenkins/build_create/${encodeURIComponent(appid)}`, { method: "POST", body });
     applyBuild(value);
     pretty("buildOutput", value);
     loadHistory({ resetPage: true, silent: true }).catch(() => {});
@@ -404,7 +439,7 @@
     const buildId = $("buildId").value.trim() || state.buildId;
     if (!buildId) throw new Error("请先填写 Build ID");
     state.buildId = buildId;
-    const value = await request(`/api/builds/${encodeURIComponent(buildId)}`);
+    const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`);
     applyBuild(value);
     pretty("buildOutput", value);
     return value;
@@ -468,7 +503,7 @@
     const appid = $("historyAppId").value.trim();
     const status = $("historyStatus").value;
     state.historyPageSize = Number($("historyPageSize").value) || 20;
-    if (appid) params.set("appid", appid);
+    if (appid) params.set("app_id", appid);
     if (status) params.set("status", status);
     params.set("page", String(state.historyPage));
     params.set("page_size", String(state.historyPageSize));
@@ -482,7 +517,7 @@
     $("historyLoading").textContent = "加载中...";
     try {
       const params = historyFilterQuery();
-      const value = await request(`/api/builds?${params.toString()}`);
+      const value = await request(`/api/v1/jenkins/build_list?${params.toString()}`);
       const items = Array.isArray(value?.items) ? value.items : [];
       state.historyPage = Math.max(1, Number(value?.page) || state.historyPage);
       state.historyPageSize = Math.max(1, Number(value?.page_size) || state.historyPageSize);
@@ -621,11 +656,11 @@
     });
 
     const results = await Promise.allSettled([
-      request(`/api/builds/${encodeURIComponent(buildId)}`),
-      request(`/api/apps/${encodeURIComponent(selectedAppid)}/events`),
-      request(`/api/apps/${encodeURIComponent(selectedAppid)}/images`),
-      request(`/api/apps/${encodeURIComponent(selectedAppid)}/services`),
-      request(`/api/apps/${encodeURIComponent(selectedAppid)}/alerts`),
+      request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`),
+      request(`/api/v1/jenkins/app_events/${encodeURIComponent(selectedAppid)}`),
+      request(`/api/v1/jenkins/app_images/${encodeURIComponent(selectedAppid)}`),
+      request(`/api/v1/jenkins/app_services/${encodeURIComponent(selectedAppid)}`),
+      request(`/api/v1/jenkins/app_alerts/${encodeURIComponent(selectedAppid)}`),
     ]);
     const [buildResult, eventsResult, imagesResult, servicesResult, alertsResult] = results;
     renderDetailResult("historyDetailBuild", buildResult);
@@ -670,7 +705,14 @@
   async function loadResource(resource) {
     const appid = appidFromInput();
     const labels = { events: "事件", images: "用户镜像", services: "Docker Services", access: "访问入口", alerts: "告警" };
-    const value = await request(`/api/apps/${encodeURIComponent(appid)}/${resource}`);
+    const resourcePath = {
+      events: "app_events",
+      images: "app_images",
+      services: "app_services",
+      access: "app_access",
+      alerts: "app_alerts",
+    }[resource];
+    const value = await request(`/api/v1/jenkins/${resourcePath}/${encodeURIComponent(appid)}`);
     $("resourceTitle").textContent = labels[resource] || resource;
     $("resourceTimestamp").textContent = new Date().toLocaleTimeString();
     pretty("resourceOutput", value);
@@ -680,7 +722,7 @@
   }
 
   async function loadTemplates() {
-    const value = await request("/api/templates");
+    const value = await request("/api/v1/docker/template_list");
     const root = $("templateComponents");
     root.textContent = "";
     (value.components || []).forEach((component) => {
@@ -707,20 +749,20 @@
   async function composeTemplate() {
     const components = [...document.querySelectorAll("#templateComponents input:checked")].map((input) => input.value);
     const dependencies = parsedJson($("templateDependencies").value, "依赖关系", false);
-    const value = await request("/api/templates/compose", { method: "POST", body: { components, dependencies } });
+    const value = await request("/api/v1/docker/template_compose", { method: "POST", body: { components, dependencies } });
     pretty("templateOutput", value);
     $("compose").value = JSON.stringify(value, null, 2);
     return value;
   }
 
   async function loadBaseImages() {
-    const value = await request("/api/base-images");
+    const value = await request("/api/v1/docker/base_image_list");
     pretty("baseImagesOutput", value);
     return value;
   }
 
   async function syncBaseImages() {
-    const value = await request("/api/base-images/sync", { method: "POST" });
+    const value = await request("/api/v1/docker/base_image_sync", { method: "POST" });
     pretty("baseImagesOutput", value);
     return value;
   }
@@ -732,7 +774,9 @@
     });
     $("disconnectButton").addEventListener("click", () => {
       state.token = "";
+      state.refreshToken = "";
       localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
       stopHistoryPolling();
       setSession(false, "已清除当前浏览器中的访问令牌。");
       setActivity("已退出", "success");
@@ -802,8 +846,7 @@
     setCurrentApp(state.appid ? state.appName : "");
     if (!state.token) return;
     try {
-      const me = await request("/api/me");
-      setSession(true, `当前身份：${me.worker_name || "conductor"}`);
+      setSession(true, "访问令牌已恢复");
       await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ silent: true }), loadAppChoices()]);
       updateHistoryPolling();
     } catch {

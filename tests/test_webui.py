@@ -29,8 +29,8 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "page-grid" in stylesheet.text
     assert ".toast-region" in stylesheet.text
     assert script.status_code == 200
-    assert "/api/connect" in script.text
-    assert "/api/builds?" in script.text
+    assert "/oauth2/token" in script.text
+    assert "/api/v1/jenkins/build_list?" in script.text
     assert 'data-resource="access"' in page.text
     assert 'resource === "access"' in script.text
     assert "serviceAccessTable" in page.text
@@ -117,5 +117,5 @@ def test_control_console_loads_existing_apps_for_context_selection() -> None:
     assert page.status_code == 200
     assert 'id="contextAppSelect"' in page.text
     assert 'id="loadContextButton"' in page.text
-    assert "/api/apps" in script.text
+    assert "/api/v1/jenkins/app_list" in script.text
     assert "loadAppChoices" in script.text
