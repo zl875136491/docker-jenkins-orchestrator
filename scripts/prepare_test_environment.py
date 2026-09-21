@@ -156,7 +156,7 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
         "ORCHESTRATOR_DOCKER_BASE_URL": "unix:///var/run/docker.sock",
         "ORCHESTRATOR_DOCKER_SOCKET_PATH": "/var/run/docker.sock",
         "ORCHESTRATOR_DOCKER_SERVICES_NETWORK": f"{worker_name}-network",
-        "ORCHESTRATOR_DEPLOYMENT_READINESS_TIMEOUT_SECONDS": "300",
+        "ORCHESTRATOR_DEPLOYMENT_READINESS_TIMEOUT_SECONDS": "900",
         "ORCHESTRATOR_DEPLOYMENT_READINESS_POLL_INTERVAL_SECONDS": "1",
         "ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS": "30",
         "ORCHESTRATOR_PUBLIC_HOST": public_host,

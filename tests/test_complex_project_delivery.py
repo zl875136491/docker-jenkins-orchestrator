@@ -141,6 +141,13 @@ def test_project_fixture_records_all_user_role_outputs(project: str) -> None:
     assert "system feedback" in output
 
 
+def test_searxng_test_settings_avoid_network_initialization() -> None:
+    settings = yaml.safe_load((FIXTURES / "searxng" / "settings.yml").read_text(encoding="utf-8"))
+
+    assert settings["engines"] == []
+    assert "searx.plugins.tracker_url_remover.SXNGPlugin" not in settings["plugins"]
+
+
 @pytest.mark.parametrize("project", PROJECTS)
 def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(project: str) -> None:
     manifest, compose = load_project(project)

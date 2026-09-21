@@ -117,12 +117,33 @@ def delivery_compose(project: str, api_host: str) -> dict[str, Any]:
         # rely on the worker's real task and published-port probes instead.
         core.pop("healthcheck", None)
         core["environment"]["SEARXNG_BASE_URL"] = f"{public_url}/"
+        # The stock image downloads ClearURLs rules during startup. The test
+        # node has restricted DNS/egress, so provide a generated settings file
+        # with the same official defaults but all external engines disabled.
+        core["volumes"].append(
+            f"{FIXTURES / 'searxng' / 'settings.yml'}:/etc/searxng/settings.yml:ro"
+        )
     if project == "linkwarden":
-        # Meilisearch's image health probe can remain in `starting` while the
-        # service is otherwise usable on constrained test nodes. Compose
-        # dependency ordering is retained through service_started here; the
-        # application's own connection errors still fail its public probe.
-        document["services"]["linkwarden"].pop("depends_on", None)
+        # Swarm has no Compose health gate, but dependency names still control
+        # deterministic creation order. The app command below waits for the
+        # database socket before running migrations.
+        document["services"]["linkwarden"]["depends_on"] = [
+            "linkwarden-postgres",
+            "linkwarden-meilisearch",
+        ]
+        document["services"]["linkwarden"]["command"] = [
+            "sh",
+            "-c",
+            (
+                "until node -e \"const net=require('net'); const s=net.connect(5432,'linkwarden-postgres',()=>{s.end();process.exit(0)}); "
+                "s.on('error',()=>process.exit(1));\"; do sleep 2; done; "
+                "export PATH=/data/node_modules/.bin:$PATH && "
+                "prisma migrate deploy --schema=/data/packages/prisma/schema.prisma && "
+                "exec concurrently -k -n web,worker \"cd /data/apps/web && exec next start\" \"cd /data/apps/worker && exec tsx worker.ts\""
+            ),
+        ]
+        document["services"]["linkwarden"]["healthcheck"] = {"disable": True}
+        document["services"]["linkwarden-meilisearch"]["healthcheck"] = {"disable": True}
     if project == "open-webui":
         # Ollama is an optional runtime dependency for Open WebUI. Pulling its
         # multi-gigabyte image makes the delivery test depend on model-serving
@@ -132,6 +153,11 @@ def delivery_compose(project: str, api_host: str) -> dict[str, Any]:
         webui = document["services"]["open-webui"]
         webui.pop("depends_on", None)
         webui["environment"]["ENABLE_OLLAMA_API"] = "false"
+        # The official image runs a long first-start database migration. Its
+        # baked-in healthcheck marks the container unhealthy during that
+        # migration, so disable only that probe and retain the worker's real
+        # published-port readiness check.
+        webui["healthcheck"] = {"disable": True}
         document["volumes"].pop("ollama-data", None)
     if project == "linkwarden":
         document["services"]["linkwarden"]["environment"]["NEXTAUTH_URL"] = public_url
@@ -291,6 +317,13 @@ def inspect_history(page: Page, appid: str, build_id: str) -> dict[str, Any]:
 
 def inspect_resources(page: Page, appid: str) -> dict[str, Any]:
     navigate_section(page, "resourcesSection")
+    # Resource actions read the shared app context rather than the history
+    # filter, so make standalone history/resource inspections deterministic.
+    for selector in ("#appId", "#contextAppId"):
+        page.locator(selector).evaluate(
+            "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles: true})); }",
+            arg=appid,
+        )
     result: dict[str, Any] = {}
     for resource in ("events", "images", "services", "access", "alerts"):
         page.locator("#resourceOutput").evaluate("node => { node.textContent = ''; }")

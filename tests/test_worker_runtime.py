@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -449,3 +450,20 @@ def test_recovery_does_not_add_a_second_poll_chain_while_active_build_is_fresh()
 
     assert result == {"start_scheduled": 0, "poll_scheduled": 0}
     assert harness.scheduled_polls == []
+
+
+@pytest.mark.parametrize("age_seconds, expected_polls", [(1, 0), (900, 1)])
+def test_recovery_normalizes_naive_utc_last_polled_at(
+    age_seconds: int, expected_polls: int
+) -> None:
+    harness = make_harness()
+    active = queue_build(harness, "active-naive")
+    for status in (BuildStatus.VALIDATING, BuildStatus.TRIGGERING, BuildStatus.BUILDING):
+        harness.container.builds.transition(active.build_id, status)
+    naive_utc = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).replace(tzinfo=None)
+    harness.container.repository.update_build(active.build_id, {"last_polled_at": naive_utc})
+
+    result = harness.runtime.recover_builds(task_id="recovery-task")
+
+    assert result["poll_scheduled"] == expected_polls
+    assert len(harness.scheduled_polls) == expected_polls

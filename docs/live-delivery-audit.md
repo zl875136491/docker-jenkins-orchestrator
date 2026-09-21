@@ -143,9 +143,9 @@ rpc error: code = InvalidArgument desc = name must be 63 characters or fewer
 API 的安全错误摘要写入构建错误，避免只显示“Unable to deploy Docker service”。修复后的
 单独 Linkwarden 复验和正式三轮均成功。
 
-## 最终清理核验
+## 失败轮次清理核验
 
-## WebUI 五项目复验（2026-09-21）
+## WebUI 五项目复验（第一次失败尝试，2026-09-21）
 
 本轮严格从测试 WebUI 创建应用和提交构建，使用唯一 `app-name-UUID` 标识。Umami 完整通过，另外三项完成了 Jenkins/Harbor/Swarm 尝试但未达到可交付终态：
 
@@ -156,7 +156,7 @@ API 的安全错误摘要写入构建错误，避免只显示“Unable to deploy
 | Open WebUI | `open-webui-1f809b43a1244869a35fb3d4f6a4e2ad` | `e1a0cedd78a84678a6952ed922147574` / #29 | failed | 官方 WebUI 镜像任务持续 `preparing`，300 秒内未进入 running |
 | SearXNG | `searxng-1e005e849986491a9f160a288c4a606f` | `86347a0744a54a82aed5926abe8b442c` / #30 | failed | 官方镜像启动时网络引擎初始化超时并退出，公开端口不可达 |
 
-本轮同时验证了 WebUI 历史任务、详情、运行资源和访问入口查询。Open WebUI 测试 Compose 已改为官方 `ghcr.io/open-webui/open-webui:main` 单服务并关闭可选 Ollama API，避免将 Ollama 大模型运行时作为必需依赖；这仍未解决官方 WebUI 镜像在当前测试节点的拉取/准备问题。Linkwarden 和 SearXNG 的失败日志已保留在对应构建事件中，不能据此宣称项目交付成功。
+本轮同时验证了 WebUI 历史任务、详情、运行资源和访问入口查询。该轮结果只用于保留失败诊断，不能据此宣称项目交付成功。随后使用修正后的 Compose 和 900 秒 readiness 窗口重新验收。
 
 联调脚本退出后再次直接查询外部系统，结果如下：
 
@@ -169,6 +169,51 @@ API 的安全错误摘要写入构建错误，避免只显示“Unable to deploy
 
 诊断脚本和结果文件只保留在 `/tmp`，未提交到 Git；其中包含的 appid、build id 和
 基础设施状态不含密码、token 或环境变量值。
+
+## WebUI 五项目最终成功轮次（2026-09-21）
+
+本轮从测试 WebUI 创建应用、提交构建，并在 WebUI 中完成历史列表、构建详情、运行资源和
+访问入口查询。五个 appid 均采用 `app-name-UUID` 形式；成功后的 Jenkins、Harbor、Swarm
+服务和公开入口均保留在测试环境，便于复查。
+
+Jenkins job：
+`http://10.17.158.156/job/apps-orchestrator/job/orchestrator-real-delivery-20260920/`。
+对应 Harbor tags 为 Linkwarden `36-linkwarden*`、Open WebUI `37-open-webui`、Planka
+`15-planka*`、SearXNG `40-searxng*`、Umami `27-umami*`；本轮逐 tag 查询 registry
+manifest 均返回 HTTP 200 和 `sha256` digest。
+
+| 项目 | appid | build_id | Jenkins | 服务数 | 公开入口 | HTTP |
+| --- | --- | --- | ---: | ---: | --- | ---: |
+| Linkwarden | `linkwarden-94442740cc7a4d4e84d31a396f273ac7` | `edaf73aefbf14b3c9d4f78f135d102fd` | #36 | 3 | `http://10.32.12.110:18089` | 200 |
+| Open WebUI | `open-webui-25daca811c72479aa2970e5bb31a0654` | `c6de92eaed8647ee9a663e04cd91be8e` | #37 | 1 | `http://10.32.12.110:18090` | 200 |
+| Planka | `planka-1c4a17ed51fb402b9797a19f5eb650aa` | `91294f2c69364556bac9331be451d95d` | #15 | 2 | `http://10.32.12.110:18086` | 200 |
+| SearXNG | `searxng-64bb11c0d7f448779d12b3a368f794df` | `a4799b3776a840af8bc2fd5eaa483abb` | #40 | 2 | `http://10.32.12.110:18091` | 200 |
+| Umami | `umami-c90e11f298b64605a18250f8547d502d` | `5d3de1c3db674a7b823a278e50e02501` | #27 | 2 | `http://10.32.12.110:18088` | 200 |
+
+最终轮次的直接核验结果：每个 build 的 API 状态为 `succeeded`，Mongo 中均为
+`user_apps=1`、`build_jobs=1`、`deployment_services=服务数`、`alerts=0`；Jenkins 均为
+`SUCCESS` 且 artifact HTTP 200；每个 Harbor 镜像 tag 的 manifest HTTP 200 并返回
+`sha256` digest；所有 Swarm service 为 `1/1 Running`，published port 与 artifact 一致；
+五个访问接口均返回 HTTP 200。Redis broker `PING` 成功，构建/镜像队列长度均为 0；本轮
+Linkwarden、Open WebUI、SearXNG 的 worker 日志分别记录了 `start_build`、多次 `poll_build`
+和终态 `succeeded`，证明 Celery 投递和消费完成。
+
+为适配真实官方镜像启动行为，本轮 Compose 调整如下：Linkwarden 保留数据库依赖并在容器
+内等待 PostgreSQL 后执行 migration/web/worker；Open WebUI 移除可选 Ollama、关闭内置
+healthcheck 以等待首次 Alembic migration；SearXNG 使用仓库内最小 settings、空 engines，
+并移除会无条件下载 ClearURLs 规则的 `tracker_url_remover` 插件。三项调整均保留原公开
+服务端口，且由 worker 的 Swarm task 和 TCP readiness 检查判定成功。
+
+本轮的 WebUI 复核结果：Linkwarden `1/3`、Open WebUI `1/1`、Planka `1/2`、SearXNG
+`1/2`、Umami `1/2` 服务具有外部入口；数据库、搜索后端和 Valkey 等内部服务没有发布
+端口，WebUI 正确显示“未发布端口”，不影响应用入口可用性。
+
+最终 SearXNG 记录的独立复核（#40）：Jenkins 返回 `SUCCESS`，artifact 中
+`searxng-core` 保留 `ports: ["18091:8080"]`；两个 Harbor manifest 均返回 HTTP 200，
+Swarm 中 `searxng-core` 和 `searxng-valkey` 均为 `1/1`，外部
+`GET http://10.32.12.110:18091/` 返回 HTTP 200。此前因端口冲突失败的临时 app
+`searxng-e4858f653d744dd8b0d5284bb5f082f4` 已删除 Mongo 记录和 Harbor repository；
+Jenkins #39 因当前联调账号没有 Job/Delete 权限而保留，作为失败诊断痕迹，不属于成功交付。
 
 ## 可复现命令
 

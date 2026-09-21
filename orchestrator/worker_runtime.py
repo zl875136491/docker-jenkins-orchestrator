@@ -12,6 +12,7 @@ import hashlib
 import socket
 import time
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
@@ -278,12 +279,23 @@ class WorkerRuntime:
                 results["start_scheduled"] += 1
             elif build.status in {BuildStatus.BUILDING, BuildStatus.DEPLOYING}:
                 if build.last_polled_at is not None:
-                    age = (utc_now() - build.last_polled_at).total_seconds()
+                    last_polled_at = self._utc_aware_datetime(build.last_polled_at)
+                    age = (utc_now() - last_polled_at).total_seconds()
                     if age < stale_after:
                         continue
                 self._schedule_poll(build.build_id, 0)
                 results["poll_scheduled"] += 1
         return results
+
+    @staticmethod
+    def _utc_aware_datetime(value: datetime) -> datetime:
+        """Normalize repository timestamps before comparing them with UTC now."""
+
+        if value.tzinfo is None or value.utcoffset() is None:
+            # PyMongo returns naive datetimes unless tz_aware is enabled; the
+            # repository contract stores those values as UTC.
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _application(self, build: BuildJob) -> UserAppRecord:
         app = self.repository.get_app(build.appid)
