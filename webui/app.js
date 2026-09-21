@@ -107,7 +107,7 @@
     const status = $("sessionStatus");
     status.textContent = online ? "已连接" : "未连接";
     status.className = `status-dot ${online ? "online" : "offline"}`;
-    $("sessionDetail").textContent = detail || (online ? "JWT 已保存到当前浏览器。" : "请输入 worker 凭据获取 JWT。");
+    $("sessionDetail").textContent = detail || (online ? "JWT 已保存到当前浏览器。" : "请输入 client 凭据获取 JWT。");
   }
 
   function setCurrentApp(name = "") {

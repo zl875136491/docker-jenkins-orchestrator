@@ -162,7 +162,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 
 ## 9. 验收标准
 
-1. 无 JWT、错误 JWT 和错误 worker 凭据均被拒绝；有效 token 可访问所有业务接口。
+1. 无 JWT、错误 JWT 和错误 client 凭据均被拒绝；有效 access token 可访问所有业务接口，refresh token 不能直接调用业务接口。
 2. Mongo 模式下重启 API 后 user-app、构建、事件、镜像、服务和告警仍可查询；appid 重复创建返回 409。
 3. 创建构建会写入 `queued` 状态并投递 Redis broker；worker 可恢复并推进状态机。
 4. fake GitLab/Jenkins/Harbor/Docker adapters 的集成测试覆盖成功、构建失败、Jenkins 等待、产物缺失和部署失败。
