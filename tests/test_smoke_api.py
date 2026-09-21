@@ -17,6 +17,27 @@ def test_healthz_smoke() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_cors_allows_any_origin() -> None:
+    response = client.get("/healthz", headers={"Origin": "https://any.example"})
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+def test_cors_preflight_allows_any_method_and_header() -> None:
+    response = client.options(
+        "/api/apps",
+        headers={
+            "Origin": "https://any.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "POST" in response.headers["access-control-allow-methods"]
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
 def test_connect_and_protected_route_smoke() -> None:
     response = client.post("/api/connect", json={"worker_name": "local-worker", "worker_secret": "local-worker-secret"})
     assert response.status_code == 200

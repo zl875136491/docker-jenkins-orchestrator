@@ -42,6 +42,8 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 
 `POST /api/connect` 接受 `worker_name` 和 `worker_secret`，使用常量时间比较校验 `ORCHESTRATOR_WORKER_NAME` 与 `ORCHESTRATOR_WORKER_SECRET`，然后签发带 `sub`、`scope`、`iat`、`exp` 的 HS256 JWT。`/healthz` 与 `/api/connect` 外的全部路由都必须携带 Bearer JWT。
 
+API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用跨域凭据模式。API 本身仍按 Bearer JWT 校验受保护接口。
+
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/healthz` | 进程存活检查 |
@@ -89,7 +91,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 
 控制台的“运行资源”页面提供“访问入口”查询按钮，会将每个服务的端口和 URL 渲染为表格；没有入口时直接显示原因和 Compose 修复示例，原始 JSON 仍保留在下方供排障。
 
-创建构建前，`compose` 必须由 conductor/用户角色提供且包含 `services`。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。如果上游仓库没有合适的 Compose，用户角色应在系统外依据模板调整并重新提交；本系统只校验、构建和部署，不在运行时生成项目专用编排。
+创建应用时可以暂不填写 `compose`，但提交构建前必须由 conductor/用户角色提供且包含 `services` 的 Compose 文档。系统不会在请求缺少 Compose 时自动从项目 Git 查找 `docker-compose.yaml`、`docker-compose.yml` 或 `compose.yaml`；仓库仅用于 Jenkins checkout/build context。也可以先调用模板组合 API 生成 Compose，再保存到应用。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。
 
 ## 5. 构建状态机
 
