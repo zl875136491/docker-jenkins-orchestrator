@@ -8,6 +8,7 @@
 | 登录、获取 JWT | `POST /api/connect` |
 | 当前身份 | `GET /api/me` |
 | 系统调用说明 | `GET /api/system-guide` |
+| 完整 Markdown 使用指引 | `GET /api/readme` |
 | 应用列表/创建 | `GET/POST /api/apps` |
 | 应用详情/更新 | `GET/PATCH /api/apps/{appid}` |
 | 创建构建 | `POST /api/apps/{appid}/builds` |

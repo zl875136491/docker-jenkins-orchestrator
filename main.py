@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -196,6 +196,13 @@ def create_app(
             },
             "troubleshooting_order": ["webui_request", "control_api", "mongo", "celery_redis", "jenkins", "harbor", "docker_swarm", "external_http"],
         }
+
+    @api.get("/api/readme", response_class=PlainTextResponse)
+    def readme(_: dict = Depends(require_token)) -> str:
+        """Return the complete Markdown API usage guide."""
+        guide_path = Path(__file__).parent / "docs" / "api-reference.md"
+        flow_path = Path(__file__).parent / "docs" / "api-call-flow.md"
+        return f"{guide_path.read_text(encoding='utf-8').rstrip()}\n\n---\n\n{flow_path.read_text(encoding='utf-8').rstrip()}\n"
 
     @api.post("/api/apps", response_model=UserApp, status_code=status.HTTP_201_CREATED)
     def create_user_app(request: UserAppCreate, _: dict = Depends(require_token)) -> UserApp:

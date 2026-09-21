@@ -31,5 +31,6 @@ See [docs/architecture.md](docs/architecture.md) for the system boundaries, API 
 - [API Reference](docs/api-reference.md)
 - [API Call Flow](docs/api-call-flow.md)
 - 运行中的机器可读说明：`GET /api/system-guide`
+- 完整 Markdown 使用指引：`GET /api/readme`
 
 See [docs/delivery-audit.md](docs/delivery-audit.md) for the eight-project complex Compose delivery test and the remaining production integration boundaries.

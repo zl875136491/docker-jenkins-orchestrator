@@ -120,6 +120,16 @@ def test_system_guide_requires_authentication_and_matches_routes() -> None:
     assert guide["compose_rules"]["git_auto_discovery"] is False
 
 
+def test_readme_returns_complete_markdown_guide() -> None:
+    assert client.get("/api/readme").status_code == 401
+    response = client.get("/api/readme", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "# API Reference" in response.text
+    assert "# API 调用流程" in response.text
+    assert "POST /api/apps/{appid}/builds" in response.text
+
+
 def test_build_history_requires_authentication_and_supports_filters_pagination_and_detail() -> None:
     assert client.get("/api/builds").status_code == 401
 
