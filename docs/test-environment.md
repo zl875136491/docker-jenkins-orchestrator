@@ -18,7 +18,7 @@ docker compose --env-file /opt/orchestrator-test/.env \
 
 The script writes only `/opt/orchestrator-test/.env` (mode `0600`), Redis and
 Celery Beat data, and a small non-secret `environment.json`. It generates the
-worker credentials, JWT secret, Fernet key, Redis password, and Mongo database
+client credentials, JWT secret, Fernet key, Redis password, and Mongo database
 name for each run. The generated database is never the default `orchestrator`
 database.
 

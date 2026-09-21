@@ -18,7 +18,7 @@ python3 -m compileall -q .        # passed
 
 ## 已具备的交付能力
 
-- FastAPI 通过 `worker-name`/`worker-secret` 签发 JWT，业务路由要求 Bearer token；应用、构建、事件、镜像、服务和告警均以 `appid` 关联。
+- FastAPI 通过 OAuth2 `client_id`/`client_secret` 签发 access/refresh JWT，业务路由要求 Bearer access token；应用、构建、事件、镜像、服务和告警均以 `appid` 关联。
 - Mongo 是业务状态的权威存储，Redis 只作为 Celery broker；worker/beat 可以从 Mongo 重新发现非终态构建，不依赖 Celery result backend。
 - Jenkins queue/build/artifact 轮询、失败告警、重复投递幂等状态推进和 Docker service 记录已有 fake adapter 集成测试。
 - 构建输入要求 conductor/用户角色先提供包含 `services` 的 Compose；仓库没有可直接使用的 Compose 时，构建入口明确报错。用户根据通用模板在系统外完成调整并重新提交，系统不会替用户猜测或生成应用编排。
