@@ -26,4 +26,10 @@ Before requesting a build, conductor must store a user-provided Compose document
 
 See [docs/architecture.md](docs/architecture.md) for the system boundaries, API contract, template catalog, task lifecycle, recovery behavior, and feature acceptance criteria.
 
+接口与调用顺序：
+
+- [API Reference](docs/api-reference.md)
+- [API Call Flow](docs/api-call-flow.md)
+- 运行中的机器可读说明：`GET /api/system-guide`
+
 See [docs/delivery-audit.md](docs/delivery-audit.md) for the eight-project complex Compose delivery test and the remaining production integration boundaries.

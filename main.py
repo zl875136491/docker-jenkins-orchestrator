@@ -169,6 +169,34 @@ def create_app(
     def me(claims: dict = Depends(require_token)) -> dict[str, str]:
         return {"worker_name": str(claims["sub"]), "scope": str(claims["scope"])}
 
+    @api.get("/api/system-guide")
+    def system_guide(_: dict = Depends(require_token)) -> dict:
+        """Return the machine-readable control-plane workflow and conventions."""
+        return {
+            "name": "Docker-Jenkins Orchestrator",
+            "version": "0.2.0",
+            "authentication": {"connect": "POST /api/connect", "scheme": "Bearer JWT"},
+            "roles": ["webui", "control_api", "mongodb", "redis_celery", "worker", "jenkins", "harbor", "docker_swarm"],
+            "call_sequence": [
+                "POST /api/connect", "GET /api/apps", "POST /api/apps or PATCH /api/apps/{appid}",
+                "POST /api/apps/{appid}/builds", "GET /api/builds/{build_id}",
+                "GET /api/apps/{appid}/events", "GET /api/apps/{appid}/images",
+                "GET /api/apps/{appid}/services", "GET /api/apps/{appid}/access", "GET /api/apps/{appid}/alerts",
+            ],
+            "build_statuses": [status.value for status in BuildStatus],
+            "compose_rules": {
+                "required_before_build": True,
+                "git_auto_discovery": False,
+                "external_access_requires_ports": True,
+                "expose_is_external": False,
+            },
+            "polling": {
+                "endpoint": "GET /api/builds/{build_id}",
+                "terminal_statuses": [BuildStatus.SUCCEEDED.value, BuildStatus.FAILED.value, BuildStatus.CANCELLED.value],
+            },
+            "troubleshooting_order": ["webui_request", "control_api", "mongo", "celery_redis", "jenkins", "harbor", "docker_swarm", "external_http"],
+        }
+
     @api.post("/api/apps", response_model=UserApp, status_code=status.HTTP_201_CREATED)
     def create_user_app(request: UserAppCreate, _: dict = Depends(require_token)) -> UserApp:
         try:

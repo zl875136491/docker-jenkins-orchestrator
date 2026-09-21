@@ -109,6 +109,17 @@ def test_app_list_requires_authentication_and_returns_existing_apps() -> None:
     assert all("environment_ciphertext" not in item for item in selected)
 
 
+def test_system_guide_requires_authentication_and_matches_routes() -> None:
+    assert client.get("/api/system-guide").status_code == 401
+    response = client.get("/api/system-guide", headers=auth_headers())
+    assert response.status_code == 200
+    guide = response.json()
+    assert "POST /api/apps/{appid}/builds" in guide["call_sequence"]
+    assert guide["polling"]["endpoint"] == "GET /api/builds/{build_id}"
+    assert set(guide["polling"]["terminal_statuses"]) == {"succeeded", "failed", "cancelled"}
+    assert guide["compose_rules"]["git_auto_discovery"] is False
+
+
 def test_build_history_requires_authentication_and_supports_filters_pagination_and_detail() -> None:
     assert client.get("/api/builds").status_code == 401
 
