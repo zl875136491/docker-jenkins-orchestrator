@@ -30,6 +30,7 @@ class Repository(Protocol):
     def close(self) -> None: ...
     def create_app(self, app: UserAppRecord) -> UserAppRecord: ...
     def get_app(self, appid: str) -> UserAppRecord | None: ...
+    def list_apps(self) -> list[UserAppRecord]: ...
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None: ...
     def create_build(self, build: BuildJob) -> BuildJob: ...
     def get_build(self, build_id: str) -> BuildJob | None: ...
@@ -91,6 +92,11 @@ class InMemoryRepository:
         with self._lock:
             app = self.apps.get(appid)
             return self._copy(app) if app else None
+
+    def list_apps(self) -> list[UserAppRecord]:
+        with self._lock:
+            values = sorted(self.apps.values(), key=lambda app: (app.name.lower(), app.appid))
+            return [self._copy(app) for app in values]
 
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
         with self._lock:
@@ -265,6 +271,10 @@ class MongoRepository:
 
     def get_app(self, appid: str) -> UserAppRecord | None:
         return self._model(UserAppRecord, self.apps.find_one({"appid": appid}))
+
+    def list_apps(self) -> list[UserAppRecord]:
+        documents = self.apps.find({}).sort([("name", 1), ("appid", 1)])
+        return [self._model(UserAppRecord, document) for document in documents]
 
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
         from pymongo import ReturnDocument

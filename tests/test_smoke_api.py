@@ -62,6 +62,32 @@ def test_app_build_lifecycle_smoke() -> None:
     assert "mongodb://mongodb/demo" not in str(app_document)
 
 
+def test_app_list_requires_authentication_and_returns_existing_apps() -> None:
+    assert client.get("/api/apps").status_code == 401
+    headers = auth_headers()
+    first = f"list-first-{uuid4().hex}"
+    second = f"list-second-{uuid4().hex}"
+    for appid, name in ((first, "Zeta"), (second, "Alpha")):
+        response = client.post(
+            "/api/apps",
+            headers=headers,
+            json={
+                "appid": appid,
+                "name": name,
+                "repository_url": "https://git.example/list.git",
+                "compose": {"services": {"api": {"image": "example/list:latest"}}},
+            },
+        )
+        assert response.status_code == 201
+
+    response = client.get("/api/apps", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    selected = [item for item in payload if item["appid"] in {first, second}]
+    assert [item["name"] for item in selected] == ["Alpha", "Zeta"]
+    assert all("environment_ciphertext" not in item for item in selected)
+
+
 def test_build_history_requires_authentication_and_supports_filters_pagination_and_detail() -> None:
     assert client.get("/api/builds").status_code == 401
 

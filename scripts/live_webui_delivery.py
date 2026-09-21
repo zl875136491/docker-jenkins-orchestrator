@@ -224,14 +224,9 @@ def create_app(page: Page, project: str, appid: str, compose: dict[str, Any], co
 
 def submit_build(page: Page, appid: str, git_ref: str) -> dict[str, Any]:
     navigate_section(page, "buildSection")
-    # Navigation keeps the shared app context, but the previous project may
-    # still be present in a modal/input that appidFromInput() reads first.
-    # Set both controls explicitly before submitting each independent run.
+    # Navigation keeps the shared app context; set the configuration App ID
+    # explicitly before submitting each independent run.
     page.locator("#appId").evaluate(
-        "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }",
-        arg=appid,
-    )
-    page.locator("#contextAppId").evaluate(
         "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }",
         arg=appid,
     )
@@ -319,11 +314,10 @@ def inspect_resources(page: Page, appid: str) -> dict[str, Any]:
     navigate_section(page, "resourcesSection")
     # Resource actions read the shared app context rather than the history
     # filter, so make standalone history/resource inspections deterministic.
-    for selector in ("#appId", "#contextAppId"):
-        page.locator(selector).evaluate(
-            "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles: true})); }",
-            arg=appid,
-        )
+    page.locator("#appId").evaluate(
+        "(node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles: true})); }",
+        arg=appid,
+    )
     result: dict[str, Any] = {}
     for resource in ("events", "images", "services", "access", "alerts"):
         page.locator("#resourceOutput").evaluate("node => { node.textContent = ''; }")

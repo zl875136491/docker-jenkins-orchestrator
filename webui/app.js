@@ -226,13 +226,14 @@
   }
 
   function appidFromInput() {
-    const value = $("appId").value.trim() || $("contextAppId").value.trim() || state.appid;
+    const value = $("appId").value.trim() || state.appid;
     if (!value) throw new Error("请先填写 App ID");
     if (value !== state.appid) setCurrentApp("");
     state.appid = value;
     localStorage.setItem(APP_KEY, value);
     $("appId").value = value;
-    $("contextAppId").value = value;
+    const selector = $("contextAppSelect");
+    if (selector) selector.value = value;
     return value;
   }
 
@@ -241,12 +242,43 @@
     localStorage.setItem(APP_KEY, state.appid);
     setCurrentApp(app.name || "");
     $("appId").value = app.appid || "";
-    $("contextAppId").value = app.appid || "";
+    const selector = $("contextAppSelect");
+    if (selector) selector.value = app.appid || "";
     $("appName").value = app.name || "";
     $("repositoryUrl").value = app.repository_url || "";
     $("gitRef").value = app.git_ref || "main";
     $("components").value = (app.components || []).join(",");
     $("compose").value = app.compose ? JSON.stringify(app.compose, null, 2) : "";
+  }
+
+  async function loadAppChoices() {
+    const selector = $("contextAppSelect");
+    if (!selector) return [];
+    const apps = await request("/api/apps");
+    selector.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = apps.length ? "请选择应用" : "暂无已创建应用";
+    selector.appendChild(placeholder);
+    apps.forEach((app) => {
+      const option = document.createElement("option");
+      option.value = app.appid;
+      option.textContent = `${app.name} (${app.appid})`;
+      selector.appendChild(option);
+    });
+    selector.value = apps.some((app) => app.appid === state.appid) ? state.appid : "";
+    $("contextAppHint").textContent = apps.length
+      ? `已加载 ${apps.length} 个应用，选择后会同步资源查询上下文。`
+      : "暂无已创建应用，请先在应用页面创建。";
+    return apps;
+  }
+
+  async function selectContextApp() {
+    const appid = $("contextAppSelect").value.trim();
+    if (!appid) throw new Error("请先选择已有应用");
+    const value = await request(`/api/apps/${encodeURIComponent(appid)}`);
+    applyApp(value);
+    return value;
   }
 
   function applyBuild(build) {
@@ -710,19 +742,23 @@
       $("metricHealth").textContent = value.status || "ok";
       return value;
     }, null));
+    $("openAppContextModal").addEventListener("click", () => {
+      if (state.token) withFeedback(() => loadAppChoices(), null);
+    });
+    $("refreshContextAppsButton").addEventListener("click", () => withFeedback(loadAppChoices, null));
     $("loadContextButton").addEventListener("click", () => {
-      withFeedback(getApp, "appOutput").then((value) => {
+      withFeedback(selectContextApp, "appOutput").then((value) => {
         if (value) closeModal("appContextModal");
       });
     });
     $("appId").addEventListener("input", (event) => {
       const previous = state.appid;
-      $("contextAppId").value = event.target.value;
+      const selector = $("contextAppSelect");
+      if (selector) selector.value = "";
       state.appid = event.target.value.trim();
       if (state.appid) localStorage.setItem(APP_KEY, state.appid);
       if (state.appid !== previous) setCurrentApp("");
     });
-    $("contextAppId").addEventListener("input", (event) => { $("appId").value = event.target.value; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
     $("getAppButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
     $("patchAppButton").addEventListener("click", () => withFeedback(patchApp, "appOutput"));
@@ -762,14 +798,13 @@
   async function restoreSession() {
     if (state.appid) {
       $("appId").value = state.appid;
-      $("contextAppId").value = state.appid;
     }
     setCurrentApp(state.appid ? state.appName : "");
     if (!state.token) return;
     try {
       const me = await request("/api/me");
       setSession(true, `当前身份：${me.worker_name || "conductor"}`);
-      await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ silent: true })]);
+      await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ silent: true }), loadAppChoices()]);
       updateHistoryPolling();
     } catch {
       setSession(false);

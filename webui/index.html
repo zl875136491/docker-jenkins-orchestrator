@@ -69,11 +69,14 @@
             <a id="closeAppContextModal" class="modal-close" href="#" aria-label="关闭当前应用设置">关闭</a>
           </div>
           <label>
-            App ID
-            <input id="contextAppId" placeholder="例如 demo-app" autocomplete="off" />
+            已有应用
+            <select id="contextAppSelect" required>
+              <option value="">连接后加载应用列表</option>
+            </select>
           </label>
-          <button id="loadContextButton" class="button button-secondary full-width" type="button">载入应用</button>
-          <p class="muted small">查询资源、提交构建时会使用此 App ID。</p>
+          <button id="refreshContextAppsButton" class="button button-quiet full-width" type="button">刷新应用列表</button>
+          <button id="loadContextButton" class="button button-secondary full-width" type="button">选择应用</button>
+          <p id="contextAppHint" class="muted small">选择后会同步当前应用和资源查询上下文。</p>
         </div>
       </section>
 

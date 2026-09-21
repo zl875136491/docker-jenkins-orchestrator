@@ -82,6 +82,9 @@ class ApplicationService:
     def get_app(self, appid: str) -> UserApp:
         return self._public(self.get_record(appid))
 
+    def list_apps(self) -> list[UserApp]:
+        return [self._public(record) for record in self.repository.list_apps()]
+
     def get_environment(self, appid: str) -> dict[str, str]:
         return self.secret_box.decrypt_environment(self.get_record(appid).environment_ciphertext)
 

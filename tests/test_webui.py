@@ -84,7 +84,8 @@ def test_control_console_has_connection_and_app_context_modals() -> None:
     ):
         assert marker in page.text
     assert 'id="connectForm"' in page.text
-    assert 'id="contextAppId"' in page.text
+    assert 'id="contextAppSelect"' in page.text
+    assert 'id="refreshContextAppsButton"' in page.text
 
 
 def test_control_console_exposes_topbar_session_and_app_status_markers() -> None:
@@ -108,3 +109,13 @@ def test_control_console_exposes_topbar_session_and_app_status_markers() -> None
     assert "function setSession" in script.text
     assert '$("sessionStatus")' in script.text
     assert '$("metricApp")' in script.text
+
+
+def test_control_console_loads_existing_apps_for_context_selection() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    assert page.status_code == 200
+    assert 'id="contextAppSelect"' in page.text
+    assert 'id="loadContextButton"' in page.text
+    assert "/api/apps" in script.text
+    assert "loadAppChoices" in script.text

@@ -168,6 +168,10 @@ def create_app(
         except DuplicateAppError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="appid already exists") from exc
 
+    @api.get("/api/apps", response_model=list[UserApp])
+    def list_user_apps(_: dict = Depends(require_token)) -> list[UserApp]:
+        return container.applications.list_apps()
+
     @api.get("/api/apps/{appid}", response_model=UserApp)
     def get_user_app(appid: str, _: dict = Depends(require_token)) -> UserApp:
         try:

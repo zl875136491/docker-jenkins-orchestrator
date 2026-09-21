@@ -46,7 +46,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 |---|---|---|
 | GET | `/healthz` | 进程存活检查 |
 | POST | `/api/connect` | conductor-app 获取 JWT |
-| POST / GET / PATCH | `/api/apps`, `/api/apps/{appid}` | 创建、读取、更新 user-app |
+| GET / POST / GET / PATCH | `/api/apps`, `/api/apps/{appid}` | 列出、创建、读取、更新 user-app |
 | POST | `/api/apps/{appid}/builds` | 创建并投递构建任务 |
 | GET | `/api/builds` | 分页查询构建历史，可按 `appid`、`status` 筛选 |
 | GET | `/api/builds/{build_id}` | 查询任务和当前状态 |
