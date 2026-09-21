@@ -35,8 +35,8 @@ outbound address, rather than only to loopback. Read the advertised URL from
 `/opt/orchestrator-test/environment.json` (the current test host uses
 `10.32.12.110`):
 
-Open `http://<test-host-address>:18080/ui/` and use the generated worker
-credentials from `/opt/orchestrator-test/.env`. The UI uses same-origin API
+Open `http://<test-host-address>:18080/ui/` and use the generated client
+credentials from `/opt/orchestrator-test/.env` with `POST /oauth2/token`. The UI uses same-origin API
 requests, so this URL exercises the frontend served by the test API container.
 The preparation script also writes the advertised host to
 `ORCHESTRATOR_PUBLIC_HOST`, so the UI's **访问入口** view can turn published
@@ -55,7 +55,7 @@ The machine-readable access query is:
 
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  http://<test-host-address>:18080/api/apps/<appid>/access
+  http://<test-host-address>:18080/api/v1/jenkins/app_access/<app_id>
 ```
 
 It returns one entry per deployed service, including `build_id`, `published_ports`,

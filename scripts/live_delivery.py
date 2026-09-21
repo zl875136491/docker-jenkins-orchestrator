@@ -427,12 +427,11 @@ def main() -> int:
             raise RuntimeError("Celery worker did not report readiness")
 
         connection = requests.post(
-            f"{api_url}/api/connect", json={"worker_name": worker_name, "worker_secret": worker_secret}, timeout=10
+            f"{api_url}/oauth2/token", json={"client_id": worker_name, "client_secret": worker_secret}, timeout=10
         )
         connection.raise_for_status()
         session = requests.Session()
         session.headers.update({"Authorization": f"Bearer {connection.json()['access_token']}"})
-        session.get(f"{api_url}/api/me", timeout=10).raise_for_status()
 
         for project in options.projects:
             name, repository_url, git_ref = PROJECTS[project]
@@ -449,7 +448,7 @@ def main() -> int:
                 (ROOT / "tests" / "fixtures" / "complex_projects" / project / "user-compose.yml").read_text()
             )
             app_response = session.post(
-                f"{api_url}/api/apps",
+                f"{api_url}/api/v1/jenkins/app_create",
                 json={
                     "appid": appid,
                     "name": name,
@@ -471,7 +470,7 @@ def main() -> int:
                 pass
             if run in json.dumps(public_app):
                 raise RuntimeError("API leaked environment values")
-            build = session.post(f"{api_url}/api/apps/{appid}/builds", json={}, timeout=10)
+            build = session.post(f"{api_url}/api/v1/jenkins/build_create/{appid}", json={}, timeout=10)
             build.raise_for_status()
             build_data = build.json()
             build_id = build_data["build_id"]
@@ -479,7 +478,7 @@ def main() -> int:
             statuses = [build_data["status"]]
             started = time.time()
             while time.time() - started < 180:
-                current = session.get(f"{api_url}/api/builds/{build_id}", timeout=10)
+                current = session.get(f"{api_url}/api/v1/jenkins/build_info/{build_id}", timeout=10)
                 current.raise_for_status()
                 payload = current.json()
                 if payload["status"] != statuses[-1]:
@@ -492,10 +491,10 @@ def main() -> int:
             if payload["status"] != "succeeded":
                 raise RuntimeError(f"{project} build failed: {payload.get('error') or payload['status']}")
 
-            events = session.get(f"{api_url}/api/apps/{appid}/events", timeout=10).json()
-            images = session.get(f"{api_url}/api/apps/{appid}/images", timeout=10).json()
-            services = session.get(f"{api_url}/api/apps/{appid}/services", timeout=10).json()
-            alerts = session.get(f"{api_url}/api/apps/{appid}/alerts", timeout=10).json()
+            events = session.get(f"{api_url}/api/v1/jenkins/app_events/{appid}", timeout=10).json()
+            images = session.get(f"{api_url}/api/v1/jenkins/app_images/{appid}", timeout=10).json()
+            services = session.get(f"{api_url}/api/v1/jenkins/app_services/{appid}", timeout=10).json()
+            alerts = session.get(f"{api_url}/api/v1/jenkins/app_alerts/{appid}", timeout=10).json()
             expected = len(compose["services"])
             if len(images) != expected or len(services) != expected or alerts:
                 raise RuntimeError(f"{project} repository counts are invalid")

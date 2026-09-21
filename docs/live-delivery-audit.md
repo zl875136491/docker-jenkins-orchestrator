@@ -64,7 +64,7 @@ Swarm -> Mongo 的交付链路、参数传递和资源生命周期；不应将�
 
 每一轮均验证了：
 
-- FastAPI `/api/connect`、JWT Bearer 认证和 `/api/me`；
+- FastAPI `/oauth2/token`、OAuth2 refresh/JWT Bearer 认证；
 - Mongo 中 `user_apps=1`、`build_jobs=1`、`deployment_services=服务数`、`alerts=0`；
 - Celery worker 从 Redis 接收 `start_build`/`poll_build`，Redis MONITOR 观察到本轮独有 queue 的投递和消费；
 - Jenkins build 完成且 `orchestrator-result.json` artifact 存在，artifact 服务拓扑与用户 Compose 一致；
@@ -93,7 +93,7 @@ Redis 仅作为 Celery broker，业务状态仍由 Mongo 持久化。
 `test-real-nginx-0cc696b9d3f3`、build id `ee778e50e1184fe89cdf0dff2f35dd16` 和
 Jenkins job `orchestrator-real-delivery-20260920` #5。Jenkins artifact、Harbor tag
 `5-web`、Swarm endpoint `18083:80` 均存在，`GET http://10.32.12.110:18083/` 返回
-Nginx `200 OK`；控制端 `/api/apps/{appid}/access` 返回
+Nginx `200 OK`；控制端 `/api/v1/jenkins/app_access/{app_id}` 返回
 `http://10.32.12.110:18083`。
 
 随后用同一 app 触发 Jenkins #6（build id
@@ -113,7 +113,7 @@ command，再触发 Jenkins #10（build id `dd31c99775544a849ceb0aae0835c601`）
 command，Harbor 镜像为
 `10.17.158.118/apps-orchestrator/test-demo-1:10-react`，Swarm task 为 `Running`，
 `GET http://10.32.12.110:18082/` 返回 `200 OK`，控制端
-`/api/apps/test-demo-1/access` 返回 `http://10.32.12.110:18082`。
+`/api/v1/jenkins/app_access/test-demo-1` 返回 `http://10.32.12.110:18082`。
 
 ### 历史服务记录与 Compose 端口诊断（2026-09-21）
 

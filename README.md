@@ -11,7 +11,7 @@ uvicorn main:app --reload
 
 The default settings use an in-memory repository and dispatcher, so the API can be exercised without MongoDB, Celery, Jenkins, Harbor, or Docker Services. The test suite uses fake external adapters and never creates real Jenkins builds or Harbor pushes. Set the `ORCHESTRATOR_*` variables from `.env.example` for deployment; never commit service credentials.
 
-The dependency-free control console is served by the API at [`/ui/`](http://127.0.0.1:8000/ui/). Start the local API with `uvicorn main:app --reload`, open that URL, and use the configured worker credentials to obtain a JWT. The console covers app management, paginated build history and build detail inspection, event, image, service, service-access, alert, template, and base-image endpoints; it does not add a separate API contract. On the **运行资源** page, choose **访问入口** to see published ports and clickable URLs. A deployed service with `endpoint: null` has no externally published port; add a port such as `18082:3000` to the final Compose artifact and rebuild it.
+The dependency-free control console is served by the API at [`/ui/`](http://127.0.0.1:8000/ui/). Start the local API with `uvicorn main:app --reload`, open that URL, and use the configured client credentials to obtain OAuth2 tokens. The console covers app management, paginated build history and build detail inspection, event, image, service, service-access, alert, template, and base-image endpoints; it does not add a separate API contract. On the **运行资源** page, choose **访问入口** to see published ports and clickable URLs. A deployed service with `endpoint: null` has no externally published port; add a port such as `18082:3000` to the final Compose artifact and rebuild it.
 
 For the container topology, copy `.env.example` to `.env`, supply every required secret, and validate the rendered deployment before starting it:
 
@@ -30,7 +30,7 @@ See [docs/architecture.md](docs/architecture.md) for the system boundaries, API 
 
 - [API Reference](docs/api-reference.md)
 - [API Call Flow](docs/api-call-flow.md)
-- 运行中的机器可读说明：`GET /api/system-guide`
-- 完整 Markdown 使用指引：`GET /api/readme`
+- 运行中的机器可读说明：`GET /api/v1/system-guide`
+- 完整 Markdown 使用指引：`GET /api/v1/readme`
 
 See [docs/delivery-audit.md](docs/delivery-audit.md) for the eight-project complex Compose delivery test and the remaining production integration boundaries.

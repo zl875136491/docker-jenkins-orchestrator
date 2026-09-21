@@ -40,31 +40,30 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 
 ## 4. 认证与 API
 
-`POST /api/connect` 接受 `worker_name` 和 `worker_secret`，使用常量时间比较校验 `ORCHESTRATOR_WORKER_NAME` 与 `ORCHESTRATOR_WORKER_SECRET`，然后签发带 `sub`、`scope`、`iat`、`exp` 的 HS256 JWT。`/healthz` 与 `/api/connect` 外的全部路由都必须携带 Bearer JWT。
+`POST /oauth2/token` 接受 `client_id` 和 `client_secret`，使用常量时间比较校验 `ORCHESTRATOR_WORKER_NAME` 与 `ORCHESTRATOR_WORKER_SECRET`，然后签发 access/refresh HS256 JWT。`POST /oauth2/refresh` 使用 refresh token 换发令牌；除 `/healthz` 和两个 OAuth2 接口外的全部路由都必须携带 Bearer access token。`/api/me` 已删除。
 
 API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用跨域凭据模式。API 本身仍按 Bearer JWT 校验受保护接口。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/healthz` | 进程存活检查 |
-| POST | `/api/connect` | conductor-app 获取 JWT |
-| GET / POST / GET / PATCH | `/api/apps`, `/api/apps/{appid}` | 列出、创建、读取、更新 user-app |
-| POST | `/api/apps/{appid}/builds` | 创建并投递构建任务 |
-| GET | `/api/builds` | 分页查询构建历史，可按 `appid`、`status` 筛选 |
-| GET | `/api/builds/{build_id}` | 查询任务和当前状态 |
-| GET | `/api/apps/{appid}/events` | 查询按时间排序的审计事件/日志 |
-| GET | `/api/apps/{appid}/images` | 查询用户镜像 |
-| GET | `/api/apps/{appid}/services` | 查询 Docker Services 部署结果 |
-| GET | `/api/apps/{appid}/access` | 查询服务发布端口、公共访问 URL 和不可访问原因 |
-| GET | `/api/apps/{appid}/alerts` | 查询告警 |
-| GET / POST | `/api/templates`, `/api/templates/compose` | 查询/组合静态技术栈模板 |
-| GET / POST | `/api/base-images`, `/api/base-images/sync` | 查询或投递基础镜像同步任务 |
+| POST | `/oauth2/token` | conductor-app 获取 access/refresh token |
+| POST | `/oauth2/refresh` | 使用 refresh token 换发令牌 |
+| GET / POST | `/api/v1/jenkins/app_list`, `/api/v1/jenkins/app_create` | 列出、创建 user-app |
+| GET / PATCH | `/api/v1/jenkins/app_info/{app_id}` | 读取、更新 user-app |
+| POST | `/api/v1/jenkins/build_create/{app_id}` | 创建并投递构建任务 |
+| GET | `/api/v1/jenkins/build_list` | 分页查询构建历史，可按 `app_id`、`status` 筛选 |
+| GET | `/api/v1/jenkins/build_info/{build_id}` | 查询任务和当前状态 |
+| GET | `/api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` | 查询应用运行资源 |
+| GET / POST | `/api/v1/docker/template_list`, `/api/v1/docker/template_compose` | 查询/组合静态技术栈模板 |
+| GET / POST | `/api/v1/docker/base_image_list`, `/api/v1/docker/base_image_sync` | 查询或投递基础镜像同步任务 |
+| GET | `/api/v1/system-guide`, `/api/v1/readme` | 查询机器可读或 Markdown 使用说明 |
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
 
-`GET /api/builds` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `appid` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
+`GET /api/v1/jenkins/build_list` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `app_id` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
 
-`GET /api/apps/{appid}/access` 是交付结果的访问入口查询接口。它不会把 Swarm overlay 网络中的内部服务名误当成公网地址，而是只为 Compose/Swarm 中明确声明的 `published` 端口生成 URL。公共主机和协议由 `ORCHESTRATOR_PUBLIC_HOST`、`ORCHESTRATOR_PUBLIC_SCHEME` 配置；未配置公共主机时不会生成外部 URL，避免在反向代理、多节点或内部请求场景下返回错误地址。服务没有已发布端口时，响应中的 `access_urls` 为空，并在 `access_reason` 中说明需要在最终 Compose 中配置例如 `18082:3000` 后重新构建部署。
+`GET /api/v1/jenkins/app_access/{app_id}` 是交付结果的访问入口查询接口。它不会把 Swarm overlay 网络中的内部服务名误当成公网地址，而是只为 Compose/Swarm 中明确声明的 `published` 端口生成 URL。公共主机和协议由 `ORCHESTRATOR_PUBLIC_HOST`、`ORCHESTRATOR_PUBLIC_SCHEME` 配置；未配置公共主机时不会生成外部 URL，避免在反向代理、多节点或内部请求场景下返回错误地址。服务没有已发布端口时，响应中的 `access_urls` 为空，并在 `access_reason` 中说明需要在最终 Compose 中配置例如 `18082:3000` 后重新构建部署。
 
 典型响应如下：
 

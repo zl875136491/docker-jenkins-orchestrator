@@ -1,30 +1,63 @@
 # API Reference
 
-除 `GET /healthz` 与 `POST /api/connect` 外，所有接口都需要 `Authorization: Bearer <JWT>`。
+`GET /healthz` 不需要认证。`POST /oauth2/token` 和 `POST /oauth2/refresh` 用于认证；其余接口需要 `Authorization: Bearer <access_token>`。`/api/me` 已删除。
+
+## OAuth2
+
+```http
+POST /oauth2/token
+Content-Type: application/json
+
+{"client_id":"local-worker","client_secret":"local-worker-secret"}
+```
+
+响应：
+
+```json
+{"access_token":"...","refresh_token":"...","token_type":"Bearer","expires_in":3600}
+```
+
+令牌过期后调用：
+
+```http
+POST /oauth2/refresh
+Content-Type: application/json
+
+{"refresh_token":"..."}
+```
+
+## 接口列表
 
 | 用途 | 方法与路径 |
 |---|---|
 | 健康检查 | `GET /healthz` |
-| 登录、获取 JWT | `POST /api/connect` |
-| 当前身份 | `GET /api/me` |
-| 系统调用说明 | `GET /api/system-guide` |
-| 完整 Markdown 使用指引 | `GET /api/readme` |
-| 应用列表/创建 | `GET/POST /api/apps` |
-| 应用详情/更新 | `GET/PATCH /api/apps/{appid}` |
-| 创建构建 | `POST /api/apps/{appid}/builds` |
-| 构建历史 | `GET /api/builds?appid=<id>&page=1&page_size=20` |
-| 构建详情 | `GET /api/builds/{build_id}` |
-| 事件、镜像、服务、入口、告警 | `GET /api/apps/{appid}/{events|images|services|access|alerts}` |
-| 模板 | `GET /api/templates`、`POST /api/templates/compose` |
-| 基础镜像 | `GET /api/base-images`、`POST /api/base-images/sync` |
+| 获取访问令牌 | `POST /oauth2/token` |
+| 刷新访问令牌 | `POST /oauth2/refresh` |
+| 系统调用说明 | `GET /api/v1/system-guide` |
+| 完整 Markdown 使用指引 | `GET /api/v1/readme` |
+| 创建应用 | `POST /api/v1/jenkins/app_create` |
+| 应用列表 | `GET /api/v1/jenkins/app_list` |
+| 应用详情/更新 | `GET/PATCH /api/v1/jenkins/app_info/{app_id}` |
+| 创建构建 | `POST /api/v1/jenkins/build_create/{app_id}` |
+| 构建历史 | `GET /api/v1/jenkins/build_list?app_id=<id>&page=1&page_size=20` |
+| 构建详情 | `GET /api/v1/jenkins/build_info/{build_id}` |
+| 事件、镜像、服务、入口、告警 | `GET /api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` |
+| 模板列表/组合 | `GET /api/v1/docker/template_list`、`POST /api/v1/docker/template_compose` |
+| 基础镜像列表/同步 | `GET /api/v1/docker/base_image_list`、`POST /api/v1/docker/base_image_sync` |
 
-典型请求：
+应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。
+
+## 最短调用示例
 
 ```bash
-TOKEN=$(curl -s localhost:8000/api/connect -H 'content-type: application/json' \
-  -d '{"worker_name":"...","worker_secret":"..."}' | jq -r .access_token)
-curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/system-guide
-curl -H "Authorization: Bearer $TOKEN" localhost:8000/api/builds/<build_id>
+TOKEN_JSON=$(curl -sS http://localhost:8000/oauth2/token \
+  -H 'content-type: application/json' \
+  -d '{"client_id":"local-worker","client_secret":"local-worker-secret"}')
+TOKEN=$(printf '%s' "$TOKEN_JSON" | jq -r .access_token)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/app_list
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/system-guide
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/readme
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/build_info/<build_id>
 ```
 
-创建构建返回 `202` 和 `build_id`，不是同步完成结果。常见错误为 `401`（JWT 无效）、`404`（应用或构建不存在）、`409`（appid 重复）和 `422`（Compose 无效）。
+常见错误：`401` 为客户端凭据或 Bearer 令牌无效，`404` 为应用或构建不存在，`409` 为 appid 重复，`422` 为请求或 Compose 无效。
