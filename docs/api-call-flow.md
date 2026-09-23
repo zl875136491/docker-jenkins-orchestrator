@@ -4,12 +4,18 @@
 
 1. `POST /oauth2/token` 使用 `client_id` 和 `client_secret` 获取 `access_token`、`refresh_token`。
 2. `GET /api/v1/jenkins/app_list` 选择应用，或 `POST /api/v1/jenkins/app_create` 创建应用。
-3. `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
-4. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
-5. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
-6. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
+3. 通过 `GET /api/v1/docker/tech_stack_list` 读取平台模板；必要时用技术栈 CRUD 更新模板，或调用 `GET /api/v1/docker/compose_prompt` 获取给用户模型的 Markdown 提示词。
+4. 使用 `POST /api/v1/docker/template_compose` 根据技术栈生成 Compose，或提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
+5. `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
+6. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
+7. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
+8. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
 
 访问令牌过期时，调用 `POST /oauth2/refresh`，然后用新 access token 重试业务请求。`/api/me` 不再提供。
+
+## 技术栈与用户模型协作
+
+技术栈不是只有一个名称列表，而是可持久化的三维记录：YAML 原文、解析后的 JSON 和 JSONPath 对齐的行间注释。注释用于告诉用户模型哪些镜像、端口、变量、卷和依赖需要结合项目实际情况修改。平台保存记录后，技术栈会立即进入 Compose 组合器；删除技术栈会使后续组合请求拒绝该组件。
 
 ## 角色
 

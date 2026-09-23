@@ -43,9 +43,42 @@ Content-Type: application/json
 | 构建详情 | `GET /api/v1/jenkins/build_info/{build_id}` |
 | 事件、镜像、服务、入口、告警 | `GET /api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` |
 | 模板列表/组合 | `GET /api/v1/docker/template_list`、`POST /api/v1/docker/template_compose` |
+| 技术栈 CRUD | `GET/POST /api/v1/docker/tech_stack_list`, `/api/v1/docker/tech_stack_create` |
+| 技术栈详情/修改/删除 | `GET/PATCH/DELETE /api/v1/docker/tech_stack_info/{tech_stack_id}` |
+| Compose 生成提示词 | `GET /api/v1/docker/compose_prompt` |
 | 基础镜像列表/同步 | `GET /api/v1/docker/base_image_list`、`POST /api/v1/docker/base_image_sync` |
 
 应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。
+
+### 技术栈记录
+
+技术栈记录的三个核心字段必须保持一致：
+
+```json
+{
+  "tech_stack_id": "react",
+  "name": "React",
+  "yaml_original": "images:\n  - node:20.18.1-alpine3.20\nport: 3000\n",
+  "json_data": {"images": ["node:20.18.1-alpine3.20"], "port": 3000},
+  "line_comments": {
+    "$": "",
+    "$.images": "",
+    "$.images[0]": "固定基础镜像版本",
+    "$.port": "确认应用实际监听端口"
+  }
+}
+```
+
+`yaml_original` 解析后的对象必须与 `json_data` 深度相等。`line_comments` 使用 JSONPath-like 路径，服务端会为缺少的路径补 `""`，并拒绝不存在于 `json_data` 的路径。创建和修改技术栈时，JSON 仍必须符合平台 Compose 组件结构（`images`、`port` 等），这样新增数据会立即参与 `template_compose`。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/docker/tech_stack_list
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  http://localhost:8000/api/v1/docker/tech_stack_create -d @tech-stack.json
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/docker/compose_prompt
+```
 
 ## 最短调用示例
 

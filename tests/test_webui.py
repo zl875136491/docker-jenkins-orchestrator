@@ -32,6 +32,8 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "/oauth2/token" in script.text
     assert "/api/v1/jenkins/build_list?" in script.text
     assert 'data-resource="access"' in page.text
+    assert 'id="loadComposePromptButton"' in page.text
+    assert 'id="composePromptOutput"' in page.text
     assert 'resource === "access"' in script.text
     assert "serviceAccessTable" in page.text
     assert "未发布端口" in script.text
@@ -118,4 +120,5 @@ def test_control_console_loads_existing_apps_for_context_selection() -> None:
     assert 'id="contextAppSelect"' in page.text
     assert 'id="loadContextButton"' in page.text
     assert "/api/v1/jenkins/app_list" in script.text
+    assert "/api/v1/docker/compose_prompt" in script.text
     assert "loadAppChoices" in script.text

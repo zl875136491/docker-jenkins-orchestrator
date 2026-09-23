@@ -382,6 +382,7 @@ code { background: #e7efed; border: 1px solid var(--line); border-radius: 3px; c
 .inline-heading { justify-content: space-between; margin-bottom: 11px; }
 .inline-heading h3 { font-size: 13px; margin: 0; }
 .component-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .component-choice { align-items: center; background: var(--surface-alt); border: 1px solid var(--line); border-radius: 3px; color: #3b5358; cursor: pointer; display: inline-flex; font-size: 12px; gap: 6px; padding: 7px 9px; }
 .component-choice:has(input:checked) { background: #d8ece6; border-color: #94c7ba; color: var(--teal-dark); }
 .component-choice input { accent-color: var(--teal); margin: 0; width: auto; }

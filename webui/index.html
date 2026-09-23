@@ -374,13 +374,16 @@
                 <p class="eyebrow">05 / COMPOSE</p>
                 <h2>模板组合</h2>
               </div>
-              <span class="section-note">从静态技术栈目录生成 Compose</span>
+              <span class="section-note">从可维护技术栈目录生成 Compose</span>
             </div>
             <div class="split-panel template-panel">
               <div>
                 <div class="inline-heading">
                   <h3>可用组件</h3>
-                  <button id="loadTemplatesButton" class="button button-quiet" type="button">刷新目录</button>
+                  <div class="button-row">
+                    <button id="loadTemplatesButton" class="button button-quiet" type="button">刷新目录</button>
+                    <button id="loadComposePromptButton" class="button button-quiet" type="button">获取模型提示词</button>
+                  </div>
                 </div>
                 <div id="templateComponents" class="component-list">
                   <span class="muted small">连接后加载模板目录</span>
@@ -395,6 +398,7 @@
               </form>
             </div>
             <pre id="templateOutput" class="json-output tall">等待模板组合</pre>
+            <pre id="composePromptOutput" class="json-output tall">等待 Markdown 提示词</pre>
           </section>
 
           <section id="baseImagesSection" class="workspace-section last-section">

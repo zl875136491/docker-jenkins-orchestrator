@@ -32,5 +32,8 @@ See [docs/architecture.md](docs/architecture.md) for the system boundaries, API 
 - [API Call Flow](docs/api-call-flow.md)
 - 运行中的机器可读说明：`GET /api/v1/system-guide`
 - 完整 Markdown 使用指引：`GET /api/v1/readme`
+- Compose 设计 Markdown 提示词：`GET /api/v1/docker/compose_prompt`
+- 技术栈模板 CRUD：`/api/v1/docker/tech_stack_list`、`tech_stack_create`、`tech_stack_info/{tech_stack_id}`
+- 提示词正文：[Compose Generation Prompt](docs/compose-generation-prompt.md)
 
 See [docs/delivery-audit.md](docs/delivery-audit.md) for the eight-project complex Compose delivery test and the remaining production integration boundaries.

@@ -33,6 +33,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | `app_events` | `appid+created_at`，`build_id+created_at` | 不可变审计事件、任务日志和外部调用摘要 |
 | `user_images` | `appid+build_id+reference` | Jenkins 产出的应用镜像，与基础镜像隔离 |
 | `base_images` | 唯一 `source_image` | `boot-images` 项目的同步状态、摘要和错误 |
+| `tech_stacks` | 唯一 `tech_stack_id` | 可编辑技术栈模板的 YAML 原文、JSON 数据和逐路径注释 |
 | `deployment_services` | `appid+build_id+service_name` | Docker Swarm Service ID、镜像、状态、内部端点和已发布端口 |
 | `alerts` | `appid+created_at` | 构建/部署失败及需要人工处理的告警 |
 
@@ -55,11 +56,15 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 | GET | `/api/v1/jenkins/build_list` | 分页查询构建历史，可按 `app_id`、`status` 筛选 |
 | GET | `/api/v1/jenkins/build_info/{build_id}` | 查询任务和当前状态 |
 | GET | `/api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` | 查询应用运行资源 |
-| GET / POST | `/api/v1/docker/template_list`, `/api/v1/docker/template_compose` | 查询/组合静态技术栈模板 |
+| GET / POST | `/api/v1/docker/template_list`, `/api/v1/docker/template_compose` | 查询/组合技术栈模板 |
+| GET / POST / PATCH / DELETE | `/api/v1/docker/tech_stack_*` | 技术栈模板 CRUD |
+| GET | `/api/v1/docker/compose_prompt` | 获取结合当前模板的 Markdown 提示词 |
 | GET / POST | `/api/v1/docker/base_image_list`, `/api/v1/docker/base_image_sync` | 查询或投递基础镜像同步任务 |
 | GET | `/api/v1/system-guide`, `/api/v1/readme` | 查询机器可读或 Markdown 使用说明 |
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
+
+技术栈记录包含 `yaml_original`、`json_data` 和 `line_comments` 三个维度。服务端要求 YAML 解析结果与 JSON 深度相等；注释键采用 JSONPath-like 路径并覆盖 JSON 的每个对象/数组节点，缺失注释归一化为空字符串，未知路径拒绝。启动时静态 catalog 会初始化 `tech_stacks` 集合，之后 CRUD 修改会同步到 Compose 组合器。`GET /api/v1/docker/compose_prompt` 返回一份 Markdown 提示词，并附带当前全部技术栈 YAML，供用户交给自己的模型生成项目 Compose。
 
 `GET /api/v1/jenkins/build_list` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `app_id` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
 

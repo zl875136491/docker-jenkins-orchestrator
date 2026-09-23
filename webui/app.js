@@ -755,6 +755,12 @@
     return value;
   }
 
+  async function loadComposePrompt() {
+    const value = await request("/api/v1/docker/compose_prompt");
+    $("composePromptOutput").textContent = value || "";
+    return value;
+  }
+
   async function loadBaseImages() {
     const value = await request("/api/v1/docker/base_image_list");
     pretty("baseImagesOutput", value);
@@ -834,6 +840,7 @@
     });
     $("refreshAccessButton").addEventListener("click", () => withFeedback(() => loadResource("access"), "resourceOutput"));
     $("loadTemplatesButton").addEventListener("click", () => withFeedback(loadTemplates, null));
+    $("loadComposePromptButton").addEventListener("click", () => withFeedback(loadComposePrompt, null));
     $("templateForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(composeTemplate, "templateOutput"); });
     $("loadBaseImagesButton").addEventListener("click", () => withFeedback(loadBaseImages, "baseImagesOutput"));
     $("syncBaseImagesButton").addEventListener("click", () => withFeedback(syncBaseImages, "baseImagesOutput"));
