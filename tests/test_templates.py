@@ -133,3 +133,35 @@ def test_compose_yaml_round_trips_and_rejects_invalid_references(catalog: Templa
         catalog.compose(["go"], service_environment={"redis": {"REDIS_URL": "redis://remote"}})
     with pytest.raises(TemplateError, match="Duplicate dependencies"):
         catalog.compose(["go", "redis"], {"go": ["redis", "redis"]})
+
+
+def test_commented_compose_yaml_round_trips_for_every_catalog_component(catalog: TemplateCatalog) -> None:
+    for component_name in catalog.names():
+        document = catalog.compose([component_name])
+        rendered = catalog.render_commented_yaml(document)
+
+        assert yaml.safe_load(rendered) == document
+        assert "# " in rendered
+
+
+def test_commented_data_handles_numeric_scalars_before_sibling_fields(catalog: TemplateCatalog) -> None:
+    document = {
+        "healthcheck": {
+            "retries": 10,
+            "start_period": "30s",
+            "enabled": True,
+        }
+    }
+    comments = {
+        "$": "document help",
+        "$.healthcheck": "healthcheck help",
+        "$.healthcheck.retries": "retry help",
+        "$.healthcheck.start_period": "start period help",
+        "$.healthcheck.enabled": "enabled help",
+    }
+
+    rendered = catalog.render_commented_data(document, comments)
+
+    assert yaml.safe_load(rendered) == document
+    assert "\n...\n" not in rendered
+    assert "# retry help\n  retries: 10\n  # start period help" in rendered

@@ -222,14 +222,18 @@ class TechStackService:
 
     def _record(self, payload: TechStackCreate, now: datetime | None = None) -> tuple[TechStack, dict[str, Any]]:
         normalized = self.catalog.validate_component(payload.tech_stack_id, payload.json_data)
-        # Store the caller's YAML/JSON pair verbatim; the catalog receives the
-        # normalized component so it can render reliable Compose documents.
+        supplied_comments = self._comments(payload.json_data, payload.line_comments)
+        default_comments = self._default_comments(payload.tech_stack_id, payload.json_data)
+        comments = {
+            path: supplied_comments[path] if supplied_comments[path].strip() else default_comments[path]
+            for path in default_comments
+        }
         return TechStack(
             tech_stack_id=payload.tech_stack_id,
             name=payload.name,
-            yaml_original=payload.yaml_original,
+            yaml_original=self.catalog.render_commented_data(payload.json_data, comments),
             json_data=deepcopy(payload.json_data),
-            line_comments=self._comments(payload.json_data, payload.line_comments),
+            line_comments=comments,
             created_at=now or utc_now(),
             updated_at=now or utc_now(),
         ), normalized
@@ -240,14 +244,14 @@ class TechStackService:
             seed: list[TechStack] = []
             for name in self.catalog.names():
                 component = deepcopy(self.catalog.components[name])
-                yaml_original = self.catalog.component_yaml(name)
+                comments = self._default_comments(name, component)
                 seed.append(
                     TechStack(
                         tech_stack_id=name,
                         name=name,
-                        yaml_original=yaml_original,
+                        yaml_original=self.catalog.render_commented_data(component, comments),
                         json_data=component,
-                        line_comments=self._default_comments(name, component),
+                        line_comments=comments,
                     )
                 )
             for record in seed:
@@ -256,9 +260,15 @@ class TechStackService:
         synchronized: list[TechStack] = []
         for record in records:
             comments = self._merge_default_comments(record)
+            yaml_original = self.catalog.render_commented_data(record.json_data, comments)
+            updates: dict[str, Any] = {}
             if comments != record.line_comments:
-                updated = self.repository.update_tech_stack(record.tech_stack_id, {"line_comments": comments})
-                synchronized.append(updated or record.model_copy(update={"line_comments": comments}, deep=True))
+                updates["line_comments"] = comments
+            if yaml_original != record.yaml_original:
+                updates["yaml_original"] = yaml_original
+            if updates:
+                updated = self.repository.update_tech_stack(record.tech_stack_id, updates)
+                synchronized.append(updated or record.model_copy(update=updates, deep=True))
             else:
                 synchronized.append(record)
         records = synchronized
@@ -300,18 +310,25 @@ class TechStackService:
         if yaml_original is not None or json_data is not None or comments is not None:
             yaml_original = yaml_original if yaml_original is not None else existing.yaml_original
             json_data = json_data if json_data is not None else existing.json_data
+            if comments is None:
+                valid_paths = set(json_structure_paths(json_data))
+                comments = {
+                    path: comment
+                    for path, comment in existing.line_comments.items()
+                    if path in valid_paths
+                }
             candidate = TechStackCreate(
                 tech_stack_id=tech_stack_id,
                 name=str(fields.get("name", existing.name)),
                 yaml_original=yaml_original,
                 json_data=json_data,
-                line_comments=comments if comments is not None else existing.line_comments,
+                line_comments=comments,
             )
-            _, normalized = self._record(candidate, now=existing.updated_at)
+            record, normalized = self._record(candidate, now=existing.updated_at)
             fields.update(
-                yaml_original=candidate.yaml_original,
-                json_data=deepcopy(candidate.json_data),
-                line_comments=candidate.line_comments,
+                yaml_original=record.yaml_original,
+                json_data=record.json_data,
+                line_comments=record.line_comments,
             )
         if "name" not in fields and not (yaml_original is not None or json_data is not None or comments is not None):
             fields["name"] = existing.name

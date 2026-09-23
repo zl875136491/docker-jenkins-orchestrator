@@ -10,9 +10,9 @@
 
 平台会提供若干技术栈模板。每个模板同时有三个严格对应的维度：
 
-1. `yaml_original`：平台保存的 YAML 原文；
+1. `yaml_original`：平台保存的带逐路径注释 YAML；注释是适配提示，不属于数据；
 2. `json_data`：`yaml_original` 解析后的 JSON 对象；
-3. `line_comments`：以 JSONPath（例如 `$.services.api.image`、`$.environment.PORT`）为键的逐项说明。每个 JSONPath 都必须有键，没有说明时使用空字符串。
+3. `line_comments`：以 JSONPath（例如 `$.services.api.image`、`$.environment.PORT`）为键的逐项说明。优先结合 YAML 中的注释与映射值适配项目；若两种说明同时存在，以 `line_comments` 为准。
 
 模板中的镜像版本是平台建议的已固定版本。优先复用模板的镜像、端口、健康检查、卷和依赖语义；只有项目确实需要时才修改，并说明原因。
 

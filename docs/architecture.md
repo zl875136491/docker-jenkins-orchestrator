@@ -64,7 +64,7 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 
 创建或更新 user-app 时可提供已验证的 `compose` 文档，或通过模板组合 API 生成后保存。请求中的 `environment` 仅写入，不在响应中返回值。
 
-技术栈记录包含 `yaml_original`、`json_data` 和 `line_comments` 三个维度。服务端要求 YAML 解析结果与 JSON 深度相等；注释键采用 JSONPath-like 路径并覆盖 JSON 的每个对象/数组节点，启动时会为缺失或空注释补充面向 YAML 适配的说明并保留用户非空内容，未知路径拒绝。启动时静态 catalog 会初始化 `tech_stacks` 集合，之后 CRUD 修改会同步到 Compose 组合器。`GET /api/v1/docker/compose_prompt` 返回一份面向内部 worker 的 Markdown 提示词，并附带当前全部技术栈 YAML，供上游模型生成项目 Compose。`POST /api/v1/docker/template_compose?format=json` 返回 Compose JSON 与完整注释，`?format=yaml` 返回带注释 YAML。
+技术栈记录包含带路径注释的 `yaml_original`、`json_data` 和 `line_comments` 三个维度。服务端要求 YAML 解析结果与 JSON 深度相等；注释键采用 JSONPath-like 路径并覆盖 JSON 的每个对象/数组节点，创建、更新和启动迁移时会为缺失或空注释补充面向 YAML 适配的说明并保留用户非空内容，未知路径拒绝。启动时静态 catalog 会初始化 `tech_stacks` 集合，之后 CRUD 修改会同步到 Compose 组合器。`GET /api/v1/docker/compose_prompt` 返回一份面向内部 worker 的 Markdown 提示词，并附带当前全部技术栈 YAML，供上游模型生成项目 Compose。`POST /api/v1/docker/template_compose?format=json` 返回 Compose JSON 与完整注释，`?format=yaml` 返回带注释 YAML。
 
 `GET /api/v1/jenkins/build_list` 默认返回第 1 页、每页 20 条记录；`page_size` 最大为 100。响应包含 `items`、`total`、`page` 和 `page_size`，按 `created_at` 倒序返回。控制台详情视图以单个 `build_id` 查询构建，并按其 `app_id` 拉取事件、镜像、Docker Services 和告警后在界面中按构建过滤。
 

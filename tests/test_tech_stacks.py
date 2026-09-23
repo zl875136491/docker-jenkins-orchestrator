@@ -65,7 +65,10 @@ def test_tech_stack_crud_keeps_yaml_json_and_aligned_comments() -> None:
     assert value["tech_stack_id"] == stack_id
     assert value["line_comments"]["$.environment.APP_MODE"]
     assert "$.images[0]" in value["line_comments"]
-    assert value["line_comments"]["$.images[0]"] == ""
+    assert "候选基础镜像" in value["line_comments"]["$.images[0]"]
+    assert yaml.safe_load(value["yaml_original"]) == value["json_data"]
+    assert "# 用户必须根据项目实际启动方式补充。" in value["yaml_original"]
+    assert "# 候选基础镜像" in value["yaml_original"]
 
     listed = client.get("/api/v1/docker/tech_stack_list", headers=headers)
     assert listed.status_code == 200
@@ -79,7 +82,9 @@ def test_tech_stack_crud_keeps_yaml_json_and_aligned_comments() -> None:
     assert updated.status_code == 200, updated.text
     assert updated.json()["name"] == "Updated Web"
     assert updated.json()["line_comments"]["$.port"] == "新的端口说明"
-    assert updated.json()["line_comments"]["$.images[0]"] == ""
+    assert "候选基础镜像" in updated.json()["line_comments"]["$.images[0]"]
+    assert "# 新的端口说明" in updated.json()["yaml_original"]
+    assert yaml.safe_load(updated.json()["yaml_original"]) == updated.json()["json_data"]
 
     composed = client.post(
         "/api/v1/docker/template_compose",
@@ -106,6 +111,8 @@ def test_default_tech_stacks_have_meaningful_comments_for_every_json_path() -> N
         assert all(comment.strip() for comment in record.line_comments.values())
         assert "固定版本基础镜像" in record.line_comments["$.images"]
         assert "监听" in record.line_comments.get("$.port", record.line_comments.get("$.ports", ""))
+        assert yaml.safe_load(record.yaml_original) == record.json_data
+        assert all(comment in record.yaml_original for comment in record.line_comments.values())
 
 
 def test_startup_fills_empty_comments_and_preserves_nonempty_custom_comments() -> None:
@@ -135,6 +142,9 @@ def test_startup_fills_empty_comments_and_preserves_nonempty_custom_comments() -
     assert "固定版本基础镜像" in migrated.line_comments["$.images"]
     assert migrated.line_comments["$.working_dir"].strip()
     assert all(comment.strip() for comment in migrated.line_comments.values())
+    assert yaml.safe_load(migrated.yaml_original) == component
+    assert "# 保留这条由用户编写的端口说明。" in migrated.yaml_original
+    assert "# 可选的固定版本基础镜像列表" in migrated.yaml_original
 
 
 def test_tech_stack_requires_yaml_json_equality_and_rejects_unknown_comment_paths() -> None:
@@ -188,6 +198,18 @@ def test_template_compose_supports_json_data_with_comments_and_commented_yaml() 
     parsed = yaml.safe_load(yaml_response.text)
     assert parsed["services"]
     assert "外部端口申请" in yaml_response.text
+
+    mysql_yaml_response = client.post(
+        "/api/v1/docker/template_compose?format=yaml",
+        headers=headers,
+        json={"components": ["mysql"], "dependencies": {}},
+    )
+    assert mysql_yaml_response.status_code == 200, mysql_yaml_response.text
+    mysql_document = yaml.safe_load(mysql_yaml_response.text)
+    mysql_healthcheck = mysql_document["services"]["mysql"]["healthcheck"]
+    assert mysql_healthcheck["retries"] == 10
+    assert mysql_healthcheck["start_period"] == "30s"
+    assert "\n...\n" not in mysql_yaml_response.text
 
     invalid = client.post(
         "/api/v1/docker/template_compose?format=toml",

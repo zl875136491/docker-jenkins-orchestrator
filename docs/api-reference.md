@@ -58,18 +58,18 @@ Content-Type: application/json
 {
   "tech_stack_id": "react",
   "name": "React",
-  "yaml_original": "images:\n  - node:20.18.1-alpine3.20\nport: 3000\n",
+  "yaml_original": "# React 技术栈配置\nimages:\n  # 固定版本镜像说明\n  # 固定基础镜像版本\n  - node:20.18.1-alpine3.20\n# 确认应用实际监听端口\nport: 3000\n",
   "json_data": {"images": ["node:20.18.1-alpine3.20"], "port": 3000},
   "line_comments": {
-    "$": "",
-    "$.images": "",
+    "$": "React 技术栈配置",
+    "$.images": "固定版本镜像说明",
     "$.images[0]": "固定基础镜像版本",
     "$.port": "确认应用实际监听端口"
   }
 }
 ```
 
-`yaml_original` 解析后的对象必须与 `json_data` 深度相等。`line_comments` 使用 JSONPath-like 路径，服务端会为缺少的路径补 `""`，并拒绝不存在于 `json_data` 的路径。创建和修改技术栈时，JSON 仍必须符合平台 Compose 组件结构（`images`、`port` 等），这样新增数据会立即参与 `template_compose`。
+`yaml_original` 返回带逐路径注释的 YAML，解析后的对象必须与 `json_data` 深度相等。创建和修改请求可以提交无注释 YAML；服务端会依据 `line_comments` 重新生成带注释的 YAML。注释使用 JSONPath-like 路径，缺失或空白注释会补充该技术栈的适配说明，非空自定义注释会保留，不存在于 `json_data` 的路径会被拒绝。JSON 仍必须符合平台 Compose 组件结构（`images`、`port` 等），这样新增数据会立即参与 `template_compose`。
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \

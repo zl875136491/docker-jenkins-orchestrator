@@ -221,9 +221,9 @@ def create_app(
                 "compose_output_formats": ["json", "yaml"],
             },
             "tech_stack_schema": {
-                "yaml_original": "original YAML text",
+                "yaml_original": "YAML text rendered with line_comments; parsing must equal json_data",
                 "json_data": "parsed JSON object; must equal yaml_original after parsing",
-                "line_comments": "JSONPath-to-comment mapping covering every JSON path; missing values are empty strings",
+                "line_comments": "JSONPath-to-comment mapping covering every JSON path; missing comments are filled with stack-specific guidance",
             },
             "polling": {
                 "endpoint": "GET /api/v1/jenkins/build_info/{build_id}",

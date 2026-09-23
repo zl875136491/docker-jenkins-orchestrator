@@ -324,6 +324,18 @@ class TemplateCatalog:
 
         self.validate_compose_document(document)
         comments = dict(line_comments or self.compose_line_comments(document))
+        return self.render_commented_data(document, comments)
+
+    def render_commented_data(
+        self,
+        document: Mapping[str, Any],
+        line_comments: Mapping[str, str] | None = None,
+    ) -> str:
+        """Render an arbitrary mapping as YAML with comments at JSON paths."""
+
+        if not isinstance(document, Mapping):
+            raise TemplateError("Commented YAML document must be a mapping")
+        comments = dict(line_comments or {})
 
         def comment_lines(path: str, indent: int) -> list[str]:
             comment = str(comments.get(path, "")).strip()
@@ -337,7 +349,15 @@ class TemplateCatalog:
                 return json.dumps(value, ensure_ascii=False)
             if value is None:
                 return "null"
-            return yaml.safe_dump(value, allow_unicode=False, default_flow_style=True, sort_keys=False).strip()
+            rendered = yaml.safe_dump(
+                value,
+                allow_unicode=False,
+                default_flow_style=True,
+                sort_keys=False,
+            ).strip()
+            if rendered.endswith("\n..."):
+                rendered = rendered[:-4].rstrip()
+            return rendered
 
         def key_text(value: Any) -> str:
             if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
@@ -381,9 +401,9 @@ class TemplateCatalog:
         try:
             parsed = yaml.safe_load(rendered)
         except yaml.YAMLError as exc:
-            raise TemplateError(f"Generated commented Compose YAML is invalid: {exc}") from exc
+            raise TemplateError(f"Generated commented YAML is invalid: {exc}") from exc
         if parsed != document:
-            raise TemplateError("Generated commented Compose YAML did not round-trip cleanly")
+            raise TemplateError("Generated commented YAML did not round-trip cleanly")
         return rendered
 
     def parse_compose_yaml(self, rendered: str) -> dict[str, Any]:
