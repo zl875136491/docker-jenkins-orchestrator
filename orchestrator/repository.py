@@ -12,6 +12,7 @@ from orchestrator.models import (
     BuildJob,
     BuildStatus,
     DeploymentService,
+    TechStack,
     UserAppRecord,
     UserImage,
 )
@@ -22,6 +23,10 @@ class RepositoryError(RuntimeError):
 
 
 class DuplicateAppError(RepositoryError):
+    pass
+
+
+class DuplicateTechStackError(RepositoryError):
     pass
 
 
@@ -52,6 +57,11 @@ class Repository(Protocol):
     def list_user_images(self, appid: str) -> list[UserImage]: ...
     def save_base_image(self, image: BaseImage) -> BaseImage: ...
     def list_base_images(self) -> list[BaseImage]: ...
+    def create_tech_stack(self, stack: TechStack) -> TechStack: ...
+    def get_tech_stack(self, tech_stack_id: str) -> TechStack | None: ...
+    def list_tech_stacks(self) -> list[TechStack]: ...
+    def update_tech_stack(self, tech_stack_id: str, fields: dict[str, Any]) -> TechStack | None: ...
+    def delete_tech_stack(self, tech_stack_id: str) -> bool: ...
     def save_service(self, service: DeploymentService) -> DeploymentService: ...
     def list_services(self, appid: str) -> list[DeploymentService]: ...
     def create_alert(self, alert: Alert) -> Alert: ...
@@ -68,6 +78,7 @@ class InMemoryRepository:
         self.events: list[AppEvent] = []
         self.user_images: dict[str, UserImage] = {}
         self.base_images: dict[str, BaseImage] = {}
+        self.tech_stacks: dict[str, TechStack] = {}
         self.services: dict[str, DeploymentService] = {}
         self.alerts: dict[str, Alert] = {}
 
@@ -191,6 +202,36 @@ class InMemoryRepository:
         with self._lock:
             return [self._copy(image) for image in self.base_images.values()]
 
+    def create_tech_stack(self, stack: TechStack) -> TechStack:
+        with self._lock:
+            if stack.tech_stack_id in self.tech_stacks:
+                raise DuplicateTechStackError(stack.tech_stack_id)
+            self.tech_stacks[stack.tech_stack_id] = self._copy(stack)
+            return self._copy(stack)
+
+    def get_tech_stack(self, tech_stack_id: str) -> TechStack | None:
+        with self._lock:
+            stack = self.tech_stacks.get(tech_stack_id)
+            return self._copy(stack) if stack else None
+
+    def list_tech_stacks(self) -> list[TechStack]:
+        with self._lock:
+            values = sorted(self.tech_stacks.values(), key=lambda item: (item.name.lower(), item.tech_stack_id))
+            return [self._copy(item) for item in values]
+
+    def update_tech_stack(self, tech_stack_id: str, fields: dict[str, Any]) -> TechStack | None:
+        with self._lock:
+            existing = self.tech_stacks.get(tech_stack_id)
+            if existing is None:
+                return None
+            updated = existing.model_copy(update=fields, deep=True)
+            self.tech_stacks[tech_stack_id] = updated
+            return self._copy(updated)
+
+    def delete_tech_stack(self, tech_stack_id: str) -> bool:
+        with self._lock:
+            return self.tech_stacks.pop(tech_stack_id, None) is not None
+
     def save_service(self, service: DeploymentService) -> DeploymentService:
         with self._lock:
             self.services[service.service_id] = self._copy(service)
@@ -220,6 +261,7 @@ class MongoRepository:
         self.events = database["app_events"]
         self.user_images = database["user_images"]
         self.base_images = database["base_images"]
+        self.tech_stacks = database["tech_stacks"]
         self.services = database["deployment_services"]
         self.alerts = database["alerts"]
 
@@ -253,6 +295,7 @@ class MongoRepository:
         self.events.create_index([("build_id", 1), ("created_at", -1)], name="events_by_build")
         self.user_images.create_index([("appid", 1), ("build_id", 1), ("reference", 1)], unique=True, name="unique_user_image")
         self.base_images.create_index("source_image", unique=True, name="unique_base_image")
+        self.tech_stacks.create_index("tech_stack_id", unique=True, name="unique_tech_stack_id")
         self.services.create_index([("appid", 1), ("build_id", 1), ("service_name", 1)], unique=True, name="unique_deployment_service")
         self.alerts.create_index([("appid", 1), ("created_at", -1)], name="alerts_by_app")
 
@@ -362,6 +405,33 @@ class MongoRepository:
 
     def list_base_images(self) -> list[BaseImage]:
         return [self._model(BaseImage, document) for document in self.base_images.find({}).sort("source_image", 1)]
+
+    def create_tech_stack(self, stack: TechStack) -> TechStack:
+        try:
+            self.tech_stacks.insert_one(self._document(stack))
+        except Exception as exc:
+            if getattr(exc, "code", None) == 11000:
+                raise DuplicateTechStackError(stack.tech_stack_id) from exc
+            raise RepositoryError("Unable to create technology stack") from exc
+        return stack
+
+    def get_tech_stack(self, tech_stack_id: str) -> TechStack | None:
+        return self._model(TechStack, self.tech_stacks.find_one({"tech_stack_id": tech_stack_id}))
+
+    def list_tech_stacks(self) -> list[TechStack]:
+        documents = self.tech_stacks.find({}).sort([("name", 1), ("tech_stack_id", 1)])
+        return [self._model(TechStack, document) for document in documents]
+
+    def update_tech_stack(self, tech_stack_id: str, fields: dict[str, Any]) -> TechStack | None:
+        from pymongo import ReturnDocument
+
+        document = self.tech_stacks.find_one_and_update(
+            {"tech_stack_id": tech_stack_id}, {"$set": fields}, return_document=ReturnDocument.AFTER
+        )
+        return self._model(TechStack, document)
+
+    def delete_tech_stack(self, tech_stack_id: str) -> bool:
+        return self.tech_stacks.delete_one({"tech_stack_id": tech_stack_id}).deleted_count == 1
 
     def save_service(self, service: DeploymentService) -> DeploymentService:
         self.services.replace_one(

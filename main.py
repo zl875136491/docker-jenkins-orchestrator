@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -24,11 +24,14 @@ from orchestrator.models import (
     BuildStatus,
     PublishedPort,
     ServiceAccess,
+    TechStack,
+    TechStackCreate,
+    TechStackUpdate,
     UserApp,
     UserAppCreate,
     UserAppUpdate,
 )
-from orchestrator.repository import DuplicateAppError
+from orchestrator.repository import DuplicateAppError, DuplicateTechStackError
 from orchestrator.services import BuildInputError, NotFoundError
 from orchestrator.templates import TemplateError
 
@@ -53,7 +56,7 @@ class TokenResponse(BaseModel):
 
 class ComposeRequest(BaseModel):
     components: list[str]
-    dependencies: dict[str, list[str]] = Field(default_factory=dict)
+    dependencies: dict[str, list[str] | dict[str, str]] = Field(default_factory=dict)
 
 
 _LEGACY_ENDPOINT_PORT = re.compile(r":(?P<port>[1-9]\d{0,4})$")
@@ -205,6 +208,7 @@ def create_app(
                 "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
                 "GET /api/v1/jenkins/app_events/{app_id}", "GET /api/v1/jenkins/app_images/{app_id}",
                 "GET /api/v1/jenkins/app_services/{app_id}", "GET /api/v1/jenkins/app_access/{app_id}", "GET /api/v1/jenkins/app_alerts/{app_id}",
+                "GET/POST/PATCH/DELETE /api/v1/docker/tech_stack_*", "GET /api/v1/docker/compose_prompt",
             ],
             "build_statuses": [status.value for status in BuildStatus],
             "compose_rules": {
@@ -212,6 +216,11 @@ def create_app(
                 "git_auto_discovery": False,
                 "external_access_requires_ports": True,
                 "expose_is_external": False,
+            },
+            "tech_stack_schema": {
+                "yaml_original": "original YAML text",
+                "json_data": "parsed JSON object; must equal yaml_original after parsing",
+                "line_comments": "JSONPath-to-comment mapping covering every JSON path; missing values are empty strings",
             },
             "polling": {
                 "endpoint": "GET /api/v1/jenkins/build_info/{build_id}",
@@ -226,6 +235,26 @@ def create_app(
         guide_path = Path(__file__).parent / "docs" / "api-reference.md"
         flow_path = Path(__file__).parent / "docs" / "api-call-flow.md"
         return f"{guide_path.read_text(encoding='utf-8').rstrip()}\n\n---\n\n{flow_path.read_text(encoding='utf-8').rstrip()}\n"
+
+    @api.get("/api/v1/docker/compose_prompt", response_class=PlainTextResponse)
+    def compose_prompt(_: dict = Depends(require_token)) -> PlainTextResponse:
+        """Return a Markdown prompt preloaded with the current stack templates."""
+
+        prompt_path = Path(__file__).parent / "docs" / "compose-generation-prompt.md"
+        prompt = prompt_path.read_text(encoding="utf-8").rstrip()
+        stacks = container.tech_stacks.list()
+        catalog_text = ["", "## 当前可用技术栈模板", ""]
+        for stack in stacks:
+            catalog_text.extend(
+                [
+                    f"### {stack.tech_stack_id} ({stack.name})",
+                    "```yaml",
+                    stack.yaml_original.rstrip(),
+                    "```",
+                    "",
+                ]
+            )
+        return PlainTextResponse("\n".join([prompt, *catalog_text]), media_type="text/markdown")
 
     @api.post("/api/v1/jenkins/app_create", response_model=UserApp, status_code=status.HTTP_201_CREATED)
     def create_user_app(request: UserAppCreate, _: dict = Depends(require_token)) -> UserApp:
@@ -361,9 +390,46 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         return container.repository.list_alerts(app_id)
 
+    @api.get("/api/v1/docker/tech_stack_list", response_model=list[TechStack])
+    def list_tech_stacks(_: dict = Depends(require_token)) -> list[TechStack]:
+        return container.tech_stacks.list()
+
+    @api.post("/api/v1/docker/tech_stack_create", response_model=TechStack, status_code=status.HTTP_201_CREATED)
+    def create_tech_stack(request: TechStackCreate, _: dict = Depends(require_token)) -> TechStack:
+        try:
+            return container.tech_stacks.create(request)
+        except DuplicateTechStackError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="tech_stack_id already exists") from exc
+        except (TemplateError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @api.get("/api/v1/docker/tech_stack_info/{tech_stack_id}", response_model=TechStack)
+    def get_tech_stack(tech_stack_id: str, _: dict = Depends(require_token)) -> TechStack:
+        try:
+            return container.tech_stacks.get(tech_stack_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Technology stack not found") from exc
+
+    @api.patch("/api/v1/docker/tech_stack_info/{tech_stack_id}", response_model=TechStack)
+    def update_tech_stack(tech_stack_id: str, request: TechStackUpdate, _: dict = Depends(require_token)) -> TechStack:
+        try:
+            return container.tech_stacks.update(tech_stack_id, request)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Technology stack not found") from exc
+        except (TemplateError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @api.delete("/api/v1/docker/tech_stack_info/{tech_stack_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_tech_stack(tech_stack_id: str, _: dict = Depends(require_token)) -> Response:
+        try:
+            container.tech_stacks.delete(tech_stack_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Technology stack not found") from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @api.get("/api/v1/docker/template_list")
-    def list_templates(_: dict = Depends(require_token)) -> dict[str, list[str]]:
-        return {"components": container.catalog.names()}
+    def list_templates(_: dict = Depends(require_token)) -> dict:
+        return {"components": container.catalog.names(), "tech_stacks": container.tech_stacks.list()}
 
     @api.post("/api/v1/docker/template_compose")
     def compose_template(request: ComposeRequest, _: dict = Depends(require_token)) -> dict:

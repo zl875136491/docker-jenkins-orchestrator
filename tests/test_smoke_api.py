@@ -122,6 +122,7 @@ def test_system_guide_requires_authentication_and_matches_routes() -> None:
     assert guide["polling"]["endpoint"] == "GET /api/v1/jenkins/build_info/{build_id}"
     assert set(guide["polling"]["terminal_statuses"]) == {"succeeded", "failed", "cancelled"}
     assert guide["compose_rules"]["git_auto_discovery"] is False
+    assert set(guide["tech_stack_schema"]) == {"yaml_original", "json_data", "line_comments"}
 
 
 def test_readme_returns_complete_markdown_guide() -> None:

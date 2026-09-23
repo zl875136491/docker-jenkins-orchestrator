@@ -65,6 +65,36 @@ class TemplateCatalog:
     def names(self) -> list[str]:
         return sorted(self.components)
 
+    def validate_component(self, name: str, component: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate and normalize one editable technology-stack definition."""
+
+        if not isinstance(name, str) or not _APPID_PATTERN.fullmatch(name):
+            raise TemplateError("Technology stack id must contain only letters, numbers, underscores, and hyphens")
+        return self._validate_component(name, component)
+
+    def upsert_component(self, name: str, component: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = self.validate_component(name, component)
+        self.components[name] = normalized
+        return deepcopy(normalized)
+
+    def remove_component(self, name: str) -> bool:
+        return self.components.pop(name, None) is not None
+
+    def load_components(self, components: Mapping[str, Mapping[str, Any]]) -> None:
+        self.components = {}
+        for name, component in components.items():
+            self.upsert_component(name, component)
+
+    def component_yaml(self, name: str) -> str:
+        if name not in self.components:
+            raise TemplateError(f"Unknown component: {name}")
+        return yaml.safe_dump(
+            deepcopy(self.components[name]),
+            allow_unicode=False,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+
     def compose(
         self,
         components: list[str],

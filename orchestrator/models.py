@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
+import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import model_validator
 
 
 def utc_now() -> datetime:
@@ -13,6 +15,25 @@ def utc_now() -> datetime:
 
 class DomainModel(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+def _json_paths(value: Any, path: str = "$") -> list[str]:
+    """Return every object/array path used by the line-comment contract."""
+
+    paths = [path]
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(_json_paths(child, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(_json_paths(child, f"{path}[{index}]"))
+    return paths
+
+
+def json_structure_paths(value: Any) -> list[str]:
+    """Expose deterministic JSONPath-like paths for API and service validation."""
+
+    return _json_paths(value)
 
 
 class BuildStatus(str, Enum):
@@ -184,6 +205,58 @@ class BaseImage(DomainModel):
     @property
     def harbor_repository(self) -> str:
         return self.harbor_reference
+
+
+class TechStackCreate(DomainModel):
+    """A user-editable platform technology-stack template.
+
+    ``line_comments`` is keyed by JSONPath-like locations (for example
+    ``$.environment.PORT``). Missing paths are normalized to an empty comment;
+    unknown paths are rejected so comments cannot drift from the JSON schema.
+    """
+
+    tech_stack_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    name: str = Field(min_length=1, max_length=128)
+    yaml_original: str = Field(
+        min_length=1,
+        validation_alias=AliasChoices("yaml_original", "yaml"),
+    )
+    json_data: dict[str, Any] = Field(
+        validation_alias=AliasChoices("json_data", "json"),
+    )
+    line_comments: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_and_align_documents(self) -> "TechStackCreate":
+        try:
+            parsed = yaml.safe_load(self.yaml_original)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"yaml_original is invalid YAML: {exc}") from exc
+        if parsed != self.json_data:
+            raise ValueError("yaml_original must parse to exactly json_data")
+        paths = json_structure_paths(self.json_data)
+        unknown = sorted(set(self.line_comments) - set(paths))
+        if unknown:
+            raise ValueError(f"line_comments contains unknown JSON paths: {', '.join(unknown)}")
+        self.line_comments = {path: self.line_comments.get(path, "") for path in paths}
+        return self
+
+
+class TechStackUpdate(DomainModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    yaml_original: str | None = Field(default=None, min_length=1, validation_alias=AliasChoices("yaml_original", "yaml"))
+    json_data: dict[str, Any] | None = Field(default=None, validation_alias=AliasChoices("json_data", "json"))
+    line_comments: dict[str, str] | None = None
+
+
+class TechStack(DomainModel):
+    tech_stack_id: str
+    name: str
+    yaml_original: str
+    json_data: dict[str, Any]
+    line_comments: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class PublishedPort(DomainModel):

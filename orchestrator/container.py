@@ -6,7 +6,7 @@ from pathlib import Path
 from orchestrator.config import Settings
 from orchestrator.repository import InMemoryRepository, MongoRepository, Repository
 from orchestrator.secrets import SecretBox
-from orchestrator.services import ApplicationService, BuildService
+from orchestrator.services import ApplicationService, BuildService, TechStackService
 from orchestrator.tasks import InMemoryTaskDispatcher, TaskDispatcher
 from orchestrator.templates import TemplateCatalog
 
@@ -20,6 +20,7 @@ class ApplicationContainer:
     builds: BuildService
     dispatcher: TaskDispatcher
     catalog: TemplateCatalog
+    tech_stacks: TechStackService
 
     def close(self) -> None:
         self.repository.close()
@@ -48,6 +49,7 @@ def create_container(
     if catalog is None:
         catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
     applications = ApplicationService(repository, secret_box)
+    tech_stacks = TechStackService(repository, catalog)
     return ApplicationContainer(
         settings=settings,
         repository=repository,
@@ -56,4 +58,5 @@ def create_container(
         builds=BuildService(repository, applications, dispatcher),
         dispatcher=dispatcher,
         catalog=catalog,
+        tech_stacks=tech_stacks,
     )
