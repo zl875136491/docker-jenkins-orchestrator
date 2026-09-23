@@ -42,7 +42,7 @@ Content-Type: application/json
 | 构建历史 | `GET /api/v1/jenkins/build_list?app_id=<id>&page=1&page_size=20` |
 | 构建详情 | `GET /api/v1/jenkins/build_info/{build_id}` |
 | 事件、镜像、服务、入口、告警 | `GET /api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` |
-| 模板列表/组合 | `GET /api/v1/docker/template_list`、`POST /api/v1/docker/template_compose` |
+| 模板列表/组合 | `GET /api/v1/docker/template_list`、`POST /api/v1/docker/template_compose[?format=json|yaml]` |
 | 技术栈 CRUD | `GET/POST /api/v1/docker/tech_stack_list`, `/api/v1/docker/tech_stack_create` |
 | 技术栈详情/修改/删除 | `GET/PATCH/DELETE /api/v1/docker/tech_stack_info/{tech_stack_id}` |
 | Compose 生成提示词 | `GET /api/v1/docker/compose_prompt` |
@@ -94,3 +94,23 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/buil
 ```
 
 常见错误：`401` 为客户端凭据或 Bearer 令牌无效，`404` 为应用或构建不存在，`409` 为 appid 重复，`422` 为请求或 Compose 无效。
+
+### Compose 组合输出格式
+
+`POST /api/v1/docker/template_compose` 的请求体仍为：
+
+```json
+{"components": ["react", "mongodb"], "dependencies": {"react": ["mongodb"]}}
+```
+
+可通过 query 参数选择交付材料：
+
+- 不传 `format`：返回历史兼容的 Compose JSON 文档。
+- `format=json`：返回 `{ "format": "json", "json_data": <Compose JSON>, "line_comments": <JSONPath 注释> }`。
+- `format=yaml`：返回 `application/yaml`，内容为带 JSONPath 语义注释的 YAML；注释不会改变 YAML 解析结果。
+
+Compose 中的宿主机 published 端口只是用户申请值。部署 worker 会结合现有 Swarm 服务检查冲突并在配置范围内重新分配，最终 `published_port` 可能不同；容器侧 target 端口不会被替换。`expose` 只用于内部网络，不会生成外部访问入口。
+
+## 应用访问入口
+
+主程序消费 `GET /api/v1/jenkins/app_access/{app_id}` 时，应以应用级 `access_available` 和 `access_urls` 决定是否展示入口；服务级无入口对数据库、缓存、搜索等内部依赖是正常状态。完整字段契约、Linkwarden 多服务示例和 TypeScript 调用方式见 [应用访问入口 API](app-access.md)。

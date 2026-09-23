@@ -161,6 +161,8 @@ class DockerSwarmAdapter:
         client_factory: Callable[[str | None], Any] | None = None,
         readiness_timeout_seconds: float = 60.0,
         readiness_poll_interval_seconds: float = 1.0,
+        published_port_range_start: int = 18000,
+        published_port_range_end: int = 18999,
     ) -> None:
         if not isinstance(network_name, str) or not _NAME_PATTERN.fullmatch(network_name):
             raise ValueError("Docker services network name is invalid")
@@ -168,10 +170,18 @@ class DockerSwarmAdapter:
             raise ValueError("Docker service readiness timeout is invalid")
         if isinstance(readiness_poll_interval_seconds, bool) or readiness_poll_interval_seconds <= 0:
             raise ValueError("Docker service readiness poll interval is invalid")
+        if isinstance(published_port_range_start, bool) or not 1 <= published_port_range_start <= 65535:
+            raise ValueError("Docker published port range start is invalid")
+        if isinstance(published_port_range_end, bool) or not 1 <= published_port_range_end <= 65535:
+            raise ValueError("Docker published port range end is invalid")
+        if published_port_range_start > published_port_range_end:
+            raise ValueError("Docker published port range start must not exceed end")
         self.base_url = base_url
         self.network_name = network_name
         self.readiness_timeout_seconds = float(readiness_timeout_seconds)
         self.readiness_poll_interval_seconds = float(readiness_poll_interval_seconds)
+        self.published_port_range_start = int(published_port_range_start)
+        self.published_port_range_end = int(published_port_range_end)
         self._docker_client = docker_client
         self._client_factory = client_factory or self._create_client
 
@@ -183,6 +193,8 @@ class DockerSwarmAdapter:
             docker_client=docker_client,
             readiness_timeout_seconds=getattr(settings, "deployment_readiness_timeout_seconds", 60),
             readiness_poll_interval_seconds=getattr(settings, "deployment_readiness_poll_interval_seconds", 1.0),
+            published_port_range_start=getattr(settings, "deployment_port_range_start", 18000),
+            published_port_range_end=getattr(settings, "deployment_port_range_end", 18999),
         )
 
     def __repr__(self) -> str:
@@ -208,6 +220,7 @@ class DockerSwarmAdapter:
         services = self._compose_services(compose)
         volume_sources = self._volume_sources(compose)
         client = self._client()
+        reserved_ports = self._occupied_published_ports(client, set(self._service_name(namespace, name) for name in services))
         network_name, network_target, network_created = self._ensure_network(client, namespace)
 
         deployments: list[ServiceDeployment] = []
@@ -222,6 +235,7 @@ class DockerSwarmAdapter:
                     definition,
                     network_target,
                     volume_sources,
+                    reserved_ports,
                 )
                 if deployment.action == "created":
                     created_service_names.append(deployment.service_name)
@@ -251,7 +265,8 @@ class DockerSwarmAdapter:
         self._validate_service_image(service_name, service)
         client = self._client()
         _, network_target, _ = self._ensure_network(client, namespace)
-        deployment = self._deploy_one(client, namespace, service_name, service, network_target, {})
+        reserved_ports = self._occupied_published_ports(client, {self._service_name(namespace, service_name)})
+        deployment = self._deploy_one(client, namespace, service_name, service, network_target, {}, reserved_ports)
         self._wait_for_service_ready(client, deployment.service_name)
         return deployment
 
@@ -625,6 +640,7 @@ class DockerSwarmAdapter:
         definition: Mapping[str, Any],
         network_target: str,
         volume_sources: Mapping[str, str],
+        reserved_ports: set[tuple[int, str, str]],
     ) -> ServiceDeployment:
         if not isinstance(compose_name, str) or not _NAME_PATTERN.fullmatch(compose_name):
             raise DockerServiceError("Compose service name is invalid")
@@ -635,7 +651,16 @@ class DockerSwarmAdapter:
             raise DockerServiceError("Compose service must define an image")
 
         name = self._service_name(appid, compose_name)
-        ports = self._ports(definition.get("ports"))
+        ports = self._allocate_ports(
+            self._ports(definition.get("ports")),
+            reserved_ports,
+            service_name=name,
+        )
+        reserved_ports.update(
+            (port.published_port, port.protocol, port.mode)
+            for port in ports
+            if port.published_port is not None
+        )
         kwargs = self._service_kwargs(appid, compose_name, definition, network_target, ports, volume_sources)
 
         try:
@@ -721,6 +746,84 @@ class DockerSwarmAdapter:
         if healthcheck is not None:
             kwargs["healthcheck"] = healthcheck
         return kwargs
+
+    def _occupied_published_ports(
+        self,
+        client: Any,
+        ignored_service_names: set[str] | None = None,
+    ) -> set[tuple[int, str, str]]:
+        """Read published Swarm ports, ignoring services being reconciled."""
+
+        services_api = getattr(client, "services", None)
+        list_services = getattr(services_api, "list", None)
+        if not callable(list_services):
+            return set()
+        try:
+            services = list_services()
+        except Exception as exc:
+            raise DockerServiceError(f"Unable to inspect existing Docker service ports: {self._safe_error_detail(exc)}") from exc
+        occupied: set[tuple[int, str, str]] = set()
+        ignored_service_names = ignored_service_names or set()
+        for service in services if isinstance(services, Sequence) and not isinstance(services, (str, bytes)) else ():
+            name = self._service_name_from_object(service)
+            if name in ignored_service_names:
+                continue
+            attrs = getattr(service, "attrs", None)
+            if not isinstance(attrs, Mapping) and isinstance(service, Mapping):
+                attrs = service
+            endpoint = attrs.get("Endpoint") if isinstance(attrs, Mapping) else None
+            raw_ports = endpoint.get("Ports") if isinstance(endpoint, Mapping) else None
+            if not isinstance(raw_ports, Sequence) or isinstance(raw_ports, (str, bytes)):
+                continue
+            for raw in raw_ports:
+                if not isinstance(raw, Mapping) or raw.get("PublishedPort") is None:
+                    continue
+                try:
+                    published = self._port_number(raw.get("PublishedPort"))
+                except DockerServiceError:
+                    continue
+                protocol = raw.get("Protocol", "tcp")
+                mode = raw.get("PublishMode", "ingress")
+                if isinstance(protocol, str) and isinstance(mode, str):
+                    occupied.add((published, protocol, mode))
+        return occupied
+
+    def _allocate_ports(
+        self,
+        ports: list[PublishedPort],
+        occupied: set[tuple[int, str, str]],
+        *,
+        service_name: str,
+    ) -> list[PublishedPort]:
+        """Preserve free requests and allocate conflicting/dynamic ports."""
+
+        allocated: list[PublishedPort] = []
+        for port in ports:
+            requested = port.published_port
+            key = (requested, port.protocol, port.mode) if requested is not None else None
+            if key is not None and key not in occupied:
+                chosen = requested
+            else:
+                chosen = None
+                for candidate in range(self.published_port_range_start, self.published_port_range_end + 1):
+                    candidate_key = (candidate, port.protocol, port.mode)
+                    if candidate_key not in occupied:
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    raise DockerServiceError(
+                        f"No available published port for Docker service {service_name} "
+                        f"in range {self.published_port_range_start}-{self.published_port_range_end}"
+                    )
+            allocated_port = PublishedPort(
+                target_port=port.target_port,
+                published_port=chosen,
+                protocol=port.protocol,
+                mode=port.mode,
+            )
+            allocated.append(allocated_port)
+            occupied.add((chosen, port.protocol, port.mode))
+        return allocated
 
     @classmethod
     def _validate_compose_features(cls, services: Mapping[str, Mapping[str, Any]]) -> None:

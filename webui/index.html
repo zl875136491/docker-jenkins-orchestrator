@@ -462,6 +462,13 @@
                     依赖关系 JSON
                     <textarea id="templateDependencies" rows="6" spellcheck="false">{}</textarea>
                   </label>
+                  <label>
+                    输出格式
+                    <select id="templateFormat">
+                      <option value="json" selected>JSON 数据 + 路径注释</option>
+                      <option value="yaml">带路径注释的 YAML</option>
+                    </select>
+                  </label>
                   <button id="generateComposeButton" class="button button-primary" type="submit">生成 Compose</button>
                 </form>
                 <pre id="templateOutput" class="json-output tall" aria-live="polite">等待模板组合</pre>

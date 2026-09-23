@@ -981,9 +981,16 @@
     if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
       throw new Error("依赖关系必须是 JSON 对象");
     }
-    const value = await request("/api/v1/docker/template_compose", { method: "POST", body: { components, dependencies } });
+    const format = $("templateFormat")?.value || "json";
+    const value = await request(`/api/v1/docker/template_compose?format=${encodeURIComponent(format)}`, {
+      method: "POST",
+      body: { components, dependencies },
+    });
     if ($("templateOutput")) pretty("templateOutput", value);
-    if ($("compose")) $("compose").value = JSON.stringify(value, null, 2);
+    if (format === "json" && $("compose")) {
+      const document = value?.json_data || value;
+      $("compose").value = JSON.stringify(document, null, 2);
+    }
     return value;
   }
 

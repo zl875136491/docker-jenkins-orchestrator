@@ -1,8 +1,15 @@
 from uuid import uuid4
+from copy import deepcopy
+from pathlib import Path
 
 from fastapi.testclient import TestClient
+import yaml
 
 from main import app
+from orchestrator.models import TechStack, json_structure_paths
+from orchestrator.repository import InMemoryRepository
+from orchestrator.services import TechStackService
+from orchestrator.templates import TemplateCatalog
 
 
 client = TestClient(app)
@@ -87,6 +94,49 @@ def test_tech_stack_crud_keeps_yaml_json_and_aligned_comments() -> None:
     assert client.get(f"/api/v1/docker/tech_stack_info/{stack_id}", headers=headers).status_code == 404
 
 
+def test_default_tech_stacks_have_meaningful_comments_for_every_json_path() -> None:
+    repository = InMemoryRepository()
+    catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
+    service = TechStackService(repository, catalog)
+
+    records = service.list()
+    assert {record.tech_stack_id for record in records} == set(catalog.names())
+    for record in records:
+        assert set(record.line_comments) == set(json_structure_paths(record.json_data))
+        assert all(comment.strip() for comment in record.line_comments.values())
+        assert "固定版本基础镜像" in record.line_comments["$.images"]
+        assert "监听" in record.line_comments.get("$.port", record.line_comments.get("$.ports", ""))
+
+
+def test_startup_fills_empty_comments_and_preserves_nonempty_custom_comments() -> None:
+    repository = InMemoryRepository()
+    catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
+    component = deepcopy(catalog.components["python"])
+    repository.create_tech_stack(
+        TechStack(
+            tech_stack_id="python",
+            name="Python",
+            yaml_original=catalog.component_yaml("python"),
+            json_data=component,
+            line_comments={
+                "$.port": "保留这条由用户编写的端口说明。",
+                "$.images": "",
+                "$.working_dir": "   ",
+            },
+        )
+    )
+
+    TechStackService(repository, catalog)
+
+    migrated = repository.get_tech_stack("python")
+    assert migrated is not None
+    assert set(migrated.line_comments) == set(json_structure_paths(component))
+    assert migrated.line_comments["$.port"] == "保留这条由用户编写的端口说明。"
+    assert "固定版本基础镜像" in migrated.line_comments["$.images"]
+    assert migrated.line_comments["$.working_dir"].strip()
+    assert all(comment.strip() for comment in migrated.line_comments.values())
+
+
 def test_tech_stack_requires_yaml_json_equality_and_rejects_unknown_comment_paths() -> None:
     headers = auth_headers()
     payload = stack_payload(f"invalid-{uuid4().hex}")
@@ -108,5 +158,40 @@ def test_compose_prompt_is_authenticated_markdown() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/markdown")
     assert "docker-compose.yaml" in response.text
-    assert "/api/v1/docker/tech_stack_create" in response.text
+    assert "内部 worker 输出交付材料" in response.text
+    assert "/api/v1/docker/tech_stack_create" not in response.text
     assert "## 当前可用技术栈模板" in response.text
+
+
+def test_template_compose_supports_json_data_with_comments_and_commented_yaml() -> None:
+    headers = auth_headers()
+    json_response = client.post(
+        "/api/v1/docker/template_compose?format=json",
+        headers=headers,
+        json={"components": ["react"], "dependencies": {}},
+    )
+    assert json_response.status_code == 200, json_response.text
+    payload = json_response.json()
+    assert payload["format"] == "json"
+    assert payload["json_data"]["services"]
+    assert set(payload["line_comments"]) == set(json_structure_paths(payload["json_data"]))
+    assert "系统部署时会统一检查并重新分配" in payload["line_comments"]["$.services.react.ports"]
+
+    yaml_response = client.post(
+        "/api/v1/docker/template_compose?format=yaml",
+        headers=headers,
+        json={"components": ["react"], "dependencies": {}},
+    )
+    assert yaml_response.status_code == 200, yaml_response.text
+    assert yaml_response.headers["content-type"].startswith("application/yaml")
+    assert "#" in yaml_response.text
+    parsed = yaml.safe_load(yaml_response.text)
+    assert parsed["services"]
+    assert "外部端口申请" in yaml_response.text
+
+    invalid = client.post(
+        "/api/v1/docker/template_compose?format=toml",
+        headers=headers,
+        json={"components": ["react"], "dependencies": {}},
+    )
+    assert invalid.status_code == 422

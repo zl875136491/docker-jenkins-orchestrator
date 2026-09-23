@@ -5,7 +5,7 @@
 1. `POST /oauth2/token` 使用 `client_id` 和 `client_secret` 获取 `access_token`、`refresh_token`。
 2. `GET /api/v1/jenkins/app_list` 选择应用，或 `POST /api/v1/jenkins/app_create` 创建应用。
 3. 通过 `GET /api/v1/docker/tech_stack_list` 读取平台模板；必要时用技术栈 CRUD 更新模板，或调用 `GET /api/v1/docker/compose_prompt` 获取给用户模型的 Markdown 提示词。
-4. 使用 `POST /api/v1/docker/template_compose` 根据技术栈生成 Compose，或提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
+4. 使用 `POST /api/v1/docker/template_compose?format=json` 获取 Compose JSON 与完整路径注释，或使用 `?format=yaml` 获取带注释 YAML；也可以提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
 5. `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
 6. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
 7. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
@@ -23,7 +23,7 @@ WebUI 调用 Control API；MongoDB 保存应用、构建、事件、镜像、服
 
 ## Compose 规则
 
-构建前必须保存有效的 `services` mapping。系统不会自动从 Git 查找 Compose。`ports` 才会产生外部入口，例如 `18082:3000` 表示宿主机 18082 转发到容器 3000；`expose` 仅供容器网络使用。服务必须真正监听 target port。
+构建前必须保存有效的 `services` mapping。系统不会自动从 Git 查找 Compose。`ports` 才会申请外部入口，例如 `18082:3000` 表示期望宿主机 18082 转发到容器 3000；worker 会在部署前检查冲突并可能重新分配宿主机 published 端口，实际端口以 `app_access`/`published_ports` 为准。`expose` 仅供容器网络使用。服务必须真正监听 target port。
 
 ## 排障顺序
 

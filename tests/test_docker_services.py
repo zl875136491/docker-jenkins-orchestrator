@@ -168,6 +168,56 @@ def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> 
     ]
 
 
+def test_swarm_adapter_reassigns_conflicting_and_dynamic_published_ports() -> None:
+    docker = FakeDocker()
+    occupied = FakeService("other-api")
+    occupied.attrs["Endpoint"] = {
+        "Ports": [{"PublishedPort": 18000, "TargetPort": 80, "Protocol": "tcp", "PublishMode": "ingress"}]
+    }
+    docker.services.items[occupied.name] = occupied
+    adapter = DockerSwarmAdapter(docker_client=docker, published_port_range_start=18000, published_port_range_end=18002)
+
+    deployment = adapter.deploy(
+        "demo",
+        {"services": {"api": {"image": "example/api:1", "ports": ["18000:80", "81"]}}},
+    )
+
+    ports = deployment.services[0].ports
+    assert [(port.published_port, port.target_port) for port in ports] == [(18001, 80), (18002, 81)]
+    endpoint_ports = docker.services.create_calls[0][1]["endpoint_spec"]["Ports"]
+    assert [port["PublishedPort"] for port in endpoint_ports] == [18001, 18002]
+
+
+def test_swarm_adapter_allows_same_published_number_for_different_protocol() -> None:
+    docker = FakeDocker()
+    occupied = FakeService("other-api")
+    occupied.attrs["Endpoint"] = {
+        "Ports": [{"PublishedPort": 18000, "TargetPort": 80, "Protocol": "udp", "PublishMode": "ingress"}]
+    }
+    docker.services.items[occupied.name] = occupied
+    adapter = DockerSwarmAdapter(docker_client=docker, published_port_range_start=18000, published_port_range_end=18000)
+
+    deployment = adapter.deploy(
+        "demo",
+        {"services": {"api": {"image": "example/api:1", "ports": [{"target": 80, "published": 18000, "protocol": "tcp"}]}}},
+    )
+
+    assert deployment.services[0].ports[0].published_port == 18000
+
+
+def test_swarm_adapter_reports_published_port_range_exhaustion() -> None:
+    docker = FakeDocker()
+    occupied = FakeService("other-api")
+    occupied.attrs["Endpoint"] = {
+        "Ports": [{"PublishedPort": 18000, "TargetPort": 80, "Protocol": "tcp", "PublishMode": "ingress"}]
+    }
+    docker.services.items[occupied.name] = occupied
+    adapter = DockerSwarmAdapter(docker_client=docker, published_port_range_start=18000, published_port_range_end=18000)
+
+    with pytest.raises(DockerServiceError, match="No available published port"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1", "ports": ["18000:80"]}}})
+
+
 def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> None:
     docker = FakeDocker()
     docker.networks.items["orchestrator-demo"] = FakeNetwork("orchestrator-demo")
@@ -200,6 +250,22 @@ def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> 
             },
         }
     ]
+
+
+def test_swarm_adapter_reuses_existing_service_port_during_update() -> None:
+    docker = FakeDocker()
+    docker.networks.items["orchestrator-demo"] = FakeNetwork("orchestrator-demo")
+    existing = FakeService("demo-api")
+    existing.attrs["Endpoint"] = {
+        "Ports": [{"PublishedPort": 18000, "TargetPort": 80, "Protocol": "tcp", "PublishMode": "ingress"}]
+    }
+    docker.services.items[existing.name] = existing
+    adapter = DockerSwarmAdapter(docker_client=docker, published_port_range_start=18000, published_port_range_end=18001)
+
+    deployment = adapter.deploy("Demo", {"services": {"api": {"image": "example/api:2", "ports": ["18000:80"]}}})
+
+    assert deployment.services[0].service_name == "demo-api"
+    assert deployment.services[0].ports[0].published_port == 18000
 
 
 def test_swarm_adapter_rejects_unsupported_host_ip_port_binding_before_service_creation() -> None:

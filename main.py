@@ -5,6 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -216,6 +217,8 @@ def create_app(
                 "git_auto_discovery": False,
                 "external_access_requires_ports": True,
                 "expose_is_external": False,
+                "published_ports_reassigned_on_conflict": True,
+                "compose_output_formats": ["json", "yaml"],
             },
             "tech_stack_schema": {
                 "yaml_original": "original YAML text",
@@ -431,10 +434,24 @@ def create_app(
     def list_templates(_: dict = Depends(require_token)) -> dict:
         return {"components": container.catalog.names(), "tech_stacks": container.tech_stacks.list()}
 
-    @api.post("/api/v1/docker/template_compose")
-    def compose_template(request: ComposeRequest, _: dict = Depends(require_token)) -> dict:
+    @api.post("/api/v1/docker/template_compose", response_model=None)
+    def compose_template(
+        request: ComposeRequest,
+        format: Literal["json", "yaml"] | None = Query(default=None),
+        _: dict = Depends(require_token),
+    ) -> dict | PlainTextResponse:
         try:
-            return container.catalog.compose(request.components, request.dependencies)
+            document = container.catalog.compose(request.components, request.dependencies)
+            if format is None:
+                # Preserve the original response shape for existing callers.
+                return document
+            line_comments = container.catalog.compose_line_comments(document)
+            if format == "json":
+                return {"format": "json", "json_data": document, "line_comments": line_comments}
+            return PlainTextResponse(
+                container.catalog.render_commented_yaml(document, line_comments),
+                media_type="application/yaml",
+            )
         except TemplateError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 

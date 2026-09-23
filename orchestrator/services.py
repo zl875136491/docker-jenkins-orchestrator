@@ -128,6 +128,98 @@ class TechStackService:
             raise TemplateError(f"line_comments contains unknown JSON paths: {', '.join(unknown)}")
         return {path: str(comments.get(path, "")) for path in paths}
 
+    @staticmethod
+    def _default_comment(tech_stack_id: str, path: str, value: Any) -> str:
+        """Describe a catalog field so seeded and migrated records are self-explanatory."""
+
+        if path == "$":
+            return f"{tech_stack_id} 技术栈的完整组件配置；组合 Compose 时按项目实际需求核对。"
+        if path == "$.images":
+            return "可选的固定版本基础镜像列表；交付时选择与项目运行时兼容的一项。"
+        if path.startswith("$.images["):
+            return f"候选基础镜像 {value}；使用前确认架构、运行时版本和安全更新要求。"
+        if path == "$.port":
+            return "服务在容器内监听的主端口；必须与应用实际监听端口一致。"
+        if path == "$.ports":
+            return "服务需要监听的容器端口列表；逐项确认用途以及是否需要公开。"
+        if path.startswith("$.ports["):
+            return f"容器监听端口 {value}；仅在需要外部访问时映射宿主机端口。"
+        if path == "$.publish_ports":
+            return "是否为模板服务生成宿主机端口映射；数据库和内部依赖通常保持关闭。"
+        if path == "$.working_dir":
+            return "容器内应用工作目录；启动命令和相对路径均以此目录为基准。"
+        if path == "$.restart":
+            return "容器重启策略；应符合目标环境的故障恢复和人工停机要求。"
+        if path == "$.command":
+            return "覆盖镜像默认启动命令的参数列表；修改前核对镜像入口点。"
+        if path.startswith("$.command["):
+            return f"启动命令参数 `{value}`；顺序会影响容器的实际启动行为。"
+        if path == "$.environment":
+            return "服务运行环境变量；秘密必须通过部署环境注入，不能保存真实值。"
+        if path.startswith("$.environment."):
+            variable = path.rsplit(".", 1)[-1]
+            if any(marker in variable.upper() for marker in ("PASSWORD", "SECRET", "TOKEN", "KEY")):
+                return f"敏感环境变量 {variable}；必须保留变量引用并由部署环境安全注入。"
+            return f"环境变量 {variable}；根据项目源码和部署环境确认最终值。"
+        if path == "$.volumes":
+            return "持久化挂载列表；确保有状态数据在容器重建后仍然保留。"
+        if ".volumes[" in path and path.endswith(".source"):
+            return "命名卷的逻辑名称；组合时会按应用和服务生成唯一卷名。"
+        if ".volumes[" in path and path.endswith(".target"):
+            return f"容器内持久化目录 {value}；必须与镜像实际数据目录一致。"
+        if path.startswith("$.volumes["):
+            return "一项持久化卷挂载配置，包含卷来源和容器内目标目录。"
+        if path == "$.healthcheck":
+            return "服务就绪探针；依赖方可据此等待服务真正可用。"
+        if path == "$.healthcheck.test":
+            return "健康检查命令及参数；应验证真实服务协议而不只是进程存在。"
+        if path.startswith("$.healthcheck.test["):
+            return f"健康检查命令片段 `{value}`；修改后需在目标镜像中验证可执行性。"
+        if path == "$.healthcheck.interval":
+            return "两次健康检查之间的时间间隔。"
+        if path == "$.healthcheck.timeout":
+            return "单次健康检查允许的最长执行时间。"
+        if path == "$.healthcheck.retries":
+            return "连续检查失败多少次后将服务标记为不健康。"
+        if path == "$.healthcheck.start_period":
+            return "容器启动后的健康检查宽限期，应覆盖服务正常初始化时间。"
+        if path == "$.connection":
+            return "供其他模板服务引用的连接信息生成规则。"
+        if path == "$.connection.environment":
+            return "依赖此服务的容器将获得的连接环境变量模板。"
+        if path.startswith("$.connection.environment."):
+            variable = path.rsplit(".", 1)[-1]
+            return f"向依赖服务注入 {variable}；主机名和端口会替换为实际 Compose 服务信息。"
+        if isinstance(value, dict):
+            return f"{tech_stack_id} 模板中 `{path}` 的配置对象；子项必须结合项目逐一确认。"
+        if isinstance(value, list):
+            return f"{tech_stack_id} 模板中 `{path}` 的有序配置列表；调整时保留有效顺序。"
+        return f"{tech_stack_id} 模板字段 `{path}`，当前建议值为 `{value}`；交付前按项目实际情况确认。"
+
+    @classmethod
+    def _default_comments(cls, tech_stack_id: str, json_data: dict[str, Any]) -> dict[str, str]:
+        comments: dict[str, str] = {}
+
+        def visit(value: Any, path: str = "$") -> None:
+            comments[path] = cls._default_comment(tech_stack_id, path, value)
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    visit(child, f"{path}.{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, f"{path}[{index}]")
+
+        visit(json_data)
+        return comments
+
+    @classmethod
+    def _merge_default_comments(cls, record: TechStack) -> dict[str, str]:
+        comments = cls._default_comments(record.tech_stack_id, record.json_data)
+        for path, comment in record.line_comments.items():
+            if path in comments and str(comment).strip():
+                comments[path] = str(comment)
+        return comments
+
     def _record(self, payload: TechStackCreate, now: datetime | None = None) -> tuple[TechStack, dict[str, Any]]:
         normalized = self.catalog.validate_component(payload.tech_stack_id, payload.json_data)
         # Store the caller's YAML/JSON pair verbatim; the catalog receives the
@@ -155,12 +247,21 @@ class TechStackService:
                         name=name,
                         yaml_original=yaml_original,
                         json_data=component,
-                        line_comments={path: "" for path in json_structure_paths(component)},
+                        line_comments=self._default_comments(name, component),
                     )
                 )
             for record in seed:
                 self.repository.create_tech_stack(record)
             records = seed
+        synchronized: list[TechStack] = []
+        for record in records:
+            comments = self._merge_default_comments(record)
+            if comments != record.line_comments:
+                updated = self.repository.update_tech_stack(record.tech_stack_id, {"line_comments": comments})
+                synchronized.append(updated or record.model_copy(update={"line_comments": comments}, deep=True))
+            else:
+                synchronized.append(record)
+        records = synchronized
         self.catalog.load_components({record.tech_stack_id: record.json_data for record in records})
 
     def list(self) -> list[TechStack]:

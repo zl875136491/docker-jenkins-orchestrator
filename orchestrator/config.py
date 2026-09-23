@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     docker_services_network: str = "orchestrator"
     deployment_readiness_timeout_seconds: int = 60
     deployment_readiness_poll_interval_seconds: float = 1.0
+    deployment_port_range_start: int = 18000
+    deployment_port_range_end: int = 18999
     external_request_timeout_seconds: int = 30
     public_host: str | None = None
     public_scheme: Literal["http", "https"] = "http"
@@ -51,6 +53,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_dependencies(self) -> "Settings":
+        if not 1 <= self.deployment_port_range_start <= 65535:
+            raise ValueError("ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_START must be between 1 and 65535")
+        if not 1 <= self.deployment_port_range_end <= 65535:
+            raise ValueError("ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_END must be between 1 and 65535")
+        if self.deployment_port_range_start > self.deployment_port_range_end:
+            raise ValueError("ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_START must not exceed END")
         if self.storage_backend == "mongo" and not self.data_encryption_key:
             raise ValueError("ORCHESTRATOR_DATA_ENCRYPTION_KEY is required when storage_backend=mongo")
         if self.environment == "production":

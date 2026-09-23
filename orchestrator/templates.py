@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -238,6 +239,152 @@ class TemplateCatalog:
         """Alias for :meth:`compose_yaml` for callers that request YAML directly."""
 
         return self.compose_yaml(components, dependencies, **kwargs)
+
+    def compose_json_with_comments(
+        self,
+        components: list[str],
+        dependencies: Mapping[str, Sequence[str] | Mapping[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Return generated Compose JSON together with complete path comments."""
+
+        document = self.compose(components, dependencies, **kwargs)
+        return {"json_data": document, "line_comments": self.compose_line_comments(document)}
+
+    @classmethod
+    def compose_line_comments(cls, document: Mapping[str, Any]) -> dict[str, str]:
+        """Describe every generated Compose path for the internal worker."""
+
+        comments: dict[str, str] = {}
+
+        def describe(path: str, value: Any) -> str:
+            if path == "$":
+                return "完整 Docker Compose 交付文档；提交前核对服务、端口、依赖、持久化和秘密注入。"
+            if path == "$.version":
+                return 'Compose 文件版本固定为 "3.9"，不要改成未验证的版本。'
+            if path == "$.name":
+                return "应用级 Compose 名称；由系统用于隔离服务和网络。"
+            if path == "$.services":
+                return "按项目实际运行所需声明服务，不要为了凑模板增加无关服务。"
+            if path.endswith(".image"):
+                return "固定版本镜像；确认架构、运行时版本和 Harbor 交付镜像是否匹配。"
+            if path.endswith(".ports"):
+                return "外部端口申请；系统部署时会统一检查并重新分配 published 端口，YAML 中的宿主机端口不保证原值交付，容器 target 端口必须准确。"
+            if ".ports[" in path:
+                return "外部端口映射申请；系统会避免与其他应用冲突并可能改写宿主机 published 端口，冒号右侧容器端口必须与应用监听一致。"
+            if path.endswith(".expose") or ".expose[" in path:
+                return "仅供 Compose/Swarm 内部网络使用，不会产生浏览器可访问入口。"
+            if path.endswith(".environment"):
+                return "服务运行环境变量；真实密码、令牌和密钥必须由部署环境安全注入。"
+            if ".environment." in path:
+                key = path.rsplit(".", 1)[-1].upper()
+                if any(marker in key for marker in ("PASSWORD", "SECRET", "TOKEN", "KEY")):
+                    return f"敏感变量 {key}；只能保留变量引用，禁止写入真实秘密。"
+                return f"环境变量 {key}；根据项目源码和容器启动方式确认最终值。"
+            if path.endswith(".volumes"):
+                return "持久化挂载；确认容器目标目录与项目真实数据目录一致。"
+            if ".volumes[" in path:
+                return "持久化卷映射；使用应用隔离的命名卷，避免依赖宿主机相对路径。"
+            if path.endswith(".depends_on") or ".depends_on." in path:
+                return "服务依赖关系；只声明真实依赖，健康条件必须有对应 healthcheck。"
+            if path.endswith(".healthcheck") or ".healthcheck." in path:
+                return "可执行健康检查；应验证真实服务协议和就绪状态，而不只是进程存在。"
+            if path.endswith(".working_dir"):
+                return "容器内工作目录；启动命令和相对路径以此目录为基准。"
+            if path.endswith(".command") or ".command[" in path:
+                return "启动命令配置；必须与镜像入口点、项目启动参数和监听端口一致。"
+            if path.endswith(".restart"):
+                return "服务重启策略；按目标环境的故障恢复要求确认。"
+            if path.endswith(".deploy") or ".deploy." in path:
+                return "Swarm 部署参数；确认副本数、资源限制和重启策略适合项目。"
+            if isinstance(value, Mapping):
+                return "配置对象；结合项目实际源码逐项确认子字段。"
+            if isinstance(value, list):
+                return "有序配置列表；调整时保留项目运行所需的顺序和完整性。"
+            return "生成的 Compose 字段；交付前根据项目实际运行方式确认。"
+
+        def visit(value: Any, path: str = "$") -> None:
+            comments[path] = describe(path, value)
+            if isinstance(value, Mapping):
+                for key, child in value.items():
+                    visit(child, f"{path}.{key}")
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, f"{path}[{index}]")
+
+        visit(document)
+        return comments
+
+    def render_commented_yaml(
+        self,
+        document: Mapping[str, Any],
+        line_comments: Mapping[str, str] | None = None,
+    ) -> str:
+        """Render valid YAML with a comment immediately before every JSON path."""
+
+        self.validate_compose_document(document)
+        comments = dict(line_comments or self.compose_line_comments(document))
+
+        def comment_lines(path: str, indent: int) -> list[str]:
+            comment = str(comments.get(path, "")).strip()
+            if not comment:
+                return []
+            prefix = " " * indent
+            return [f"{prefix}# {line.strip()}" for line in comment.splitlines() if line.strip()]
+
+        def scalar(value: Any) -> str:
+            if isinstance(value, str):
+                return json.dumps(value, ensure_ascii=False)
+            if value is None:
+                return "null"
+            return yaml.safe_dump(value, allow_unicode=False, default_flow_style=True, sort_keys=False).strip()
+
+        def key_text(value: Any) -> str:
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+                return value
+            return scalar(value)
+
+        def render(value: Any, path: str, indent: int, include_comment: bool = True) -> list[str]:
+            lines = comment_lines(path, indent) if include_comment else []
+            prefix = " " * indent
+            if isinstance(value, Mapping):
+                if not value:
+                    lines.append(f"{prefix}{{}}")
+                    return lines
+                for key, child in value.items():
+                    child_path = f"{path}.{key}"
+                    lines.extend(comment_lines(child_path, indent))
+                    rendered_key = key_text(key)
+                    if isinstance(child, (Mapping, list)) and child:
+                        lines.append(f"{prefix}{rendered_key}:")
+                        lines.extend(render(child, child_path, indent + 2, include_comment=False))
+                    else:
+                        lines.append(f"{prefix}{rendered_key}: {scalar(child)}")
+                return lines
+            if isinstance(value, list):
+                if not value:
+                    lines.append(f"{prefix}[]")
+                    return lines
+                for index, child in enumerate(value):
+                    child_path = f"{path}[{index}]"
+                    lines.extend(comment_lines(child_path, indent))
+                    if isinstance(child, (Mapping, list)) and child:
+                        lines.append(f"{prefix}-")
+                        lines.extend(render(child, child_path, indent + 2, include_comment=False))
+                    else:
+                        lines.append(f"{prefix}- {scalar(child)}")
+                return lines
+            lines.append(f"{prefix}{scalar(value)}")
+            return lines
+
+        rendered = "\n".join(render(document, "$", 0)) + "\n"
+        try:
+            parsed = yaml.safe_load(rendered)
+        except yaml.YAMLError as exc:
+            raise TemplateError(f"Generated commented Compose YAML is invalid: {exc}") from exc
+        if parsed != document:
+            raise TemplateError("Generated commented Compose YAML did not round-trip cleanly")
+        return rendered
 
     def parse_compose_yaml(self, rendered: str) -> dict[str, Any]:
         """Parse and validate rendered Compose YAML without executing it."""

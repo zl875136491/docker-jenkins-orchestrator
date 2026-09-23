@@ -146,6 +146,7 @@ def test_template_workspace_exposes_technology_stack_editor_and_compose_actions(
         'id="deleteTechStackButton"',
         'id="resetTechStackButton"',
         'id="copyComposePromptButton"',
+        'id="templateFormat"',
     ):
         assert marker in page.text
     for path in (

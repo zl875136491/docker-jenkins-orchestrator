@@ -42,8 +42,10 @@ The preparation script also writes the advertised host to
 `ORCHESTRATOR_PUBLIC_HOST`, so the UI's **访问入口** view can turn published
 Swarm ports into links such as `http://10.32.12.110:18082`. A service record
 with `endpoint: null` and no published port is deployed but has no external
-URL; its final Jenkins Compose artifact must declare a mapping such as
-`18082:3000` before rebuilding.
+URL. A Compose mapping such as `18082:3000` requests external access; the
+worker checks the configured published-port range and may assign another free
+host port when `18082` is occupied. Use `published_ports` from `app_access`
+as the final value.
 
 The worker also waits for real Swarm tasks to reach `running`. When
 `ORCHESTRATOR_PUBLIC_HOST` is set (as it is in this test environment), every

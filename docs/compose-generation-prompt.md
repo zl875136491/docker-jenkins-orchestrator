@@ -21,7 +21,7 @@
 1. 列出项目真正需要的服务，并把每个服务映射到平台技术栈模板；不要为了凑模板数量添加无关服务。
 2. 对照项目源码确认每个服务的镜像启动命令、工作目录和容器内监听端口。
 3. 设计 `depends_on`，只表达真实依赖；数据库、消息队列等服务在有健康检查时优先使用 `service_healthy`。
-4. 为需要从外部访问的服务配置 `ports`，使用 `宿主机端口:容器端口`；`expose` 只用于容器网络，不产生外部入口。
+4. 为需要从外部访问的服务配置 `ports`，使用 `宿主机端口:容器端口`；`expose` 只用于容器网络，不产生外部入口。宿主机 published 端口只是申请值，内部 worker 会统一检查并重新分配以避免项目之间冲突，最终交付端口可能与 YAML 不同；冒号右侧的容器 target 端口必须与应用实际监听一致。
 5. 为数据库、上传目录、缓存数据等持久化内容配置命名卷或明确的绑定挂载，避免把源码目录误当成数据卷。
 6. 把密钥、密码、令牌和域名写成 `${VARIABLE:?set VARIABLE}` 或 `${VARIABLE:-合理默认值}`，绝不把真实秘密写入 Compose。
 7. 为关键服务添加可执行的 healthcheck，检查真实端口或服务协议，不要只检查进程存在。
@@ -53,7 +53,7 @@
   "$.version": "固定 Compose 版本，不要修改",
   "$.services": "根据项目实际服务增删",
   "$.services.api.image": "替换为项目最终交付镜像或平台固定模板镜像",
-  "$.services.api.ports[0]": "确认宿主机端口没有冲突",
+  "$.services.api.ports[0]": "宿主机 published 端口仅为申请值，内部 worker 会重新检查和分配；确认冒号右侧容器端口与应用监听一致",
   "$.services.api.environment.APP_SECRET": "必须由部署环境注入，不能提交真实值"
 }
 ```
@@ -62,17 +62,8 @@
 
 确认以下项目：Compose 能被 YAML 解析；`services` 非空；每个服务有镜像；依赖服务名称存在；端口的容器侧与实际监听一致；数据目录有持久化；没有真实秘密；公开服务配置了 `ports`；Jenkins artifact 不会丢失端口和健康检查。
 
-## 平台 API 联调
+## 内部 worker 输出交付材料
 
-平台提供以下接口获取和维护技术栈模板：
+你的输出将作为内部 worker 的输入，不需要调用或描述任何平台 API。请一次性交付以下材料：事实与待确认项、最终 `docker-compose.yaml`、与 YAML 深度相等的 JSON、覆盖每个 JSONPath 的完整 `line_comments`，以及交付检查清单。
 
-```text
-GET    /api/v1/docker/tech_stack_list
-POST   /api/v1/docker/tech_stack_create
-GET    /api/v1/docker/tech_stack_info/{tech_stack_id}
-PATCH  /api/v1/docker/tech_stack_info/{tech_stack_id}
-DELETE /api/v1/docker/tech_stack_info/{tech_stack_id}
-GET    /api/v1/docker/compose_prompt
-```
-
-提交前请把最终 YAML、解析后的 JSON 和完整 `line_comments` 一起交给用户确认。平台要求 `yaml_original` 解析后必须与 `json_data` 完全相等，并会为缺失的注释路径补充空字符串、拒绝未知路径。
+worker 会校验 YAML 与 JSON 是否完全一致、注释路径是否属于最终 JSON，并将这些材料用于后续构建和部署。提交前明确标出仍需人工确认的镜像、端口、环境变量和持久化路径；不要声称已经执行构建、访问外部服务或完成部署验证。
