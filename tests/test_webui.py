@@ -122,3 +122,40 @@ def test_control_console_loads_existing_apps_for_context_selection() -> None:
     assert "/api/v1/jenkins/app_list" in script.text
     assert "/api/v1/docker/compose_prompt" in script.text
     assert "loadAppChoices" in script.text
+
+
+def test_template_workspace_exposes_technology_stack_editor_and_compose_actions() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    stylesheet = client.get("/ui/styles.css")
+    assert page.status_code == 200
+    assert script.status_code == 200
+    assert stylesheet.status_code == 200
+    for marker in (
+        'id="techStackSearch"',
+        'id="techStackList"',
+        'id="techStackForm"',
+        'id="techStackId"',
+        'id="techStackName"',
+        'id="techStackYaml"',
+        'id="techStackJson"',
+        'id="techStackComments"',
+        'id="newTechStackButton"',
+        'id="createTechStackButton"',
+        'id="saveTechStackButton"',
+        'id="deleteTechStackButton"',
+        'id="resetTechStackButton"',
+        'id="copyComposePromptButton"',
+    ):
+        assert marker in page.text
+    for path in (
+        "/api/v1/docker/tech_stack_list",
+        "/api/v1/docker/tech_stack_create",
+        "/api/v1/docker/tech_stack_info/",
+        "/api/v1/docker/template_compose",
+        "/api/v1/docker/compose_prompt",
+    ):
+        assert path in script.text
+    for marker in ("renderTechStackList", "saveTechStack", "deleteTechStack", "copyText"):
+        assert marker in script.text
+    assert ".tech-stack-workspace" in stylesheet.text

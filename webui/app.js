@@ -20,6 +20,8 @@
     historyTotal: 0,
     historyLoading: false,
     historyTimer: null,
+    techStacks: [],
+    selectedTechStackId: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -721,44 +723,302 @@
     return value;
   }
 
-  async function loadTemplates() {
-    const value = await request("/api/v1/docker/template_list");
-    const root = $("templateComponents");
-    root.textContent = "";
-    (value.components || []).forEach((component) => {
-      const label = document.createElement("label");
-      label.className = "component-choice";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.value = component;
-      const name = document.createElement("span");
-      name.textContent = component;
-      label.append(input, name);
-      root.appendChild(label);
+  function templateElement(...ids) {
+    for (const id of ids) {
+      const element = $(id);
+      if (element) return element;
+    }
+    return null;
+  }
+
+  function setTechStackStatus(message) {
+    const target = $("techStackStatus");
+    if (target) target.textContent = message;
+  }
+
+  function techStackEditorFields() {
+    return {
+      id: $("techStackId"),
+      name: $("techStackName"),
+      yaml: $("techStackYaml"),
+      json: $("techStackJson"),
+      comments: $("techStackComments"),
+    };
+  }
+
+  function setTechStackEditorMode(isExisting) {
+    const fields = techStackEditorFields();
+    if (fields.id) fields.id.readOnly = isExisting;
+    const createButton = $("createTechStackButton");
+    const saveButton = $("saveTechStackButton");
+    const deleteButton = $("deleteTechStackButton");
+    if (createButton) createButton.disabled = isExisting;
+    if (saveButton) saveButton.disabled = !isExisting;
+    if (deleteButton) deleteButton.disabled = !isExisting;
+  }
+
+  function applyTechStack(stack) {
+    if (!stack) return;
+    state.selectedTechStackId = stack.tech_stack_id || "";
+    const fields = techStackEditorFields();
+    if (fields.id) fields.id.value = stack.tech_stack_id || "";
+    if (fields.name) fields.name.value = stack.name || "";
+    if (fields.yaml) fields.yaml.value = stack.yaml_original || "";
+    if (fields.json) fields.json.value = JSON.stringify(stack.json_data || {}, null, 2);
+    if (fields.comments) fields.comments.value = JSON.stringify(stack.line_comments || {}, null, 2);
+    setTechStackEditorMode(true);
+    renderTechStackList();
+    setTechStackStatus(`正在编辑 ${stack.name || stack.tech_stack_id}`);
+  }
+
+  function newTechStack() {
+    state.selectedTechStackId = "";
+    const fields = techStackEditorFields();
+    if (fields.id) fields.id.value = "";
+    if (fields.name) fields.name.value = "";
+    if (fields.yaml) fields.yaml.value = "";
+    if (fields.json) fields.json.value = "{}";
+    if (fields.comments) fields.comments.value = "{}";
+    setTechStackEditorMode(false);
+    renderTechStackList();
+    setTechStackStatus("正在新建技术栈，请填写全部必填字段。");
+    fields.id?.focus();
+  }
+
+  function resetTechStack() {
+    const selected = state.techStacks.find((stack) => stack.tech_stack_id === state.selectedTechStackId);
+    if (selected) applyTechStack(selected);
+    else newTechStack();
+  }
+
+  function renderTechStackList() {
+    const root = $("techStackList");
+    const count = $("techStackCount");
+    if (!root && !count) return;
+    const query = ($("techStackSearch")?.value || "").trim().toLowerCase();
+    const filtered = state.techStacks.filter((stack) => {
+      return !query || [stack.tech_stack_id, stack.name].some((value) => String(value || "").toLowerCase().includes(query));
     });
-    if (!value.components?.length) {
-      const empty = document.createElement("span");
+    if (count) {
+      count.textContent = query
+        ? `${filtered.length} / ${state.techStacks.length} 个技术栈`
+        : `${state.techStacks.length} 个技术栈`;
+    }
+    if (!root) return;
+    root.replaceChildren();
+    filtered.forEach((stack) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "tech-stack-item";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(stack.tech_stack_id === state.selectedTechStackId));
+      const id = document.createElement("span");
+      id.className = "tech-stack-item-id";
+      id.textContent = stack.tech_stack_id;
+      const name = document.createElement("span");
+      name.className = "tech-stack-item-name";
+      name.textContent = stack.name || stack.tech_stack_id;
+      button.append(id, name);
+      button.addEventListener("click", () => withFeedback(() => selectTechStack(stack.tech_stack_id), null));
+      root.appendChild(button);
+    });
+    if (!filtered.length) {
+      const empty = document.createElement("p");
       empty.className = "muted small";
-      empty.textContent = "暂无组件";
+      empty.textContent = query ? "没有匹配的技术栈。" : "暂无技术栈。";
       root.appendChild(empty);
     }
-    setActivity(`已加载 ${value.components?.length || 0} 个模板组件`, "success");
+  }
+
+  function componentRoots() {
+    const ids = ["templateComponents", "composeComponents", "composeStackPicker"];
+    return ids.map((id) => $(id)).filter((root, index, roots) => root && roots.indexOf(root) === index);
+  }
+
+  function selectedTemplateComponents() {
+    const selected = new Set();
+    componentRoots().forEach((root) => {
+      if (root instanceof HTMLSelectElement) {
+        [...root.selectedOptions].forEach((option) => selected.add(option.value));
+      } else {
+        root.querySelectorAll("input:checked").forEach((input) => selected.add(input.value));
+      }
+    });
+    return [...selected];
+  }
+
+  function renderTemplateComponents(components) {
+    const previouslySelected = new Set(selectedTemplateComponents());
+    componentRoots().forEach((root) => {
+      root.replaceChildren();
+      if (root instanceof HTMLSelectElement) {
+        components.forEach((component) => {
+          const option = document.createElement("option");
+          option.value = component;
+          option.textContent = component;
+          option.selected = previouslySelected.has(component);
+          root.appendChild(option);
+        });
+        return;
+      }
+      components.forEach((component) => {
+        const label = document.createElement("label");
+        label.className = "component-choice";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = component;
+        input.checked = previouslySelected.has(component);
+        const name = document.createElement("span");
+        name.textContent = component;
+        label.append(input, name);
+        root.appendChild(label);
+      });
+      if (!components.length) {
+        const empty = document.createElement("span");
+        empty.className = "muted small";
+        empty.textContent = "暂无组件";
+        root.appendChild(empty);
+      }
+    });
+  }
+
+  async function loadTemplates() {
+    const [templates, techStacks] = await Promise.all([
+      request("/api/v1/docker/template_list"),
+      request("/api/v1/docker/tech_stack_list"),
+    ]);
+    const components = Array.isArray(templates?.components) ? templates.components : [];
+    state.techStacks = Array.isArray(techStacks)
+      ? techStacks
+      : Array.isArray(templates?.tech_stacks) ? templates.tech_stacks : [];
+    if (state.selectedTechStackId && !state.techStacks.some((stack) => stack.tech_stack_id === state.selectedTechStackId)) {
+      state.selectedTechStackId = "";
+    }
+    renderTemplateComponents(components);
+    renderTechStackList();
+    setTechStackEditorMode(Boolean(state.selectedTechStackId));
+    setTechStackStatus(`已加载 ${state.techStacks.length} 个技术栈、${components.length} 个可组合组件。`);
+    setActivity(`已加载 ${components.length} 个模板组件`, "success");
+    return { ...templates, tech_stacks: state.techStacks };
+  }
+
+  async function selectTechStack(techStackId) {
+    const value = await request(`/api/v1/docker/tech_stack_info/${encodeURIComponent(techStackId)}`);
+    const index = state.techStacks.findIndex((stack) => stack.tech_stack_id === techStackId);
+    if (index >= 0) state.techStacks[index] = value;
+    else state.techStacks.push(value);
+    applyTechStack(value);
     return value;
   }
 
+  function techStackPayload() {
+    const fields = techStackEditorFields();
+    const techStackId = fields.id?.value.trim() || "";
+    const name = fields.name?.value.trim() || "";
+    const yamlOriginal = fields.yaml?.value || "";
+    if (!techStackId || !name || !yamlOriginal.trim()) throw new Error("技术栈 ID、名称和 YAML 原文均为必填项");
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(techStackId)) {
+      throw new Error("技术栈 ID 只能包含字母、数字、下划线和连字符，且必须以字母或数字开头");
+    }
+    const jsonData = parsedJson(fields.json?.value || "", "JSON 数据", false);
+    const lineComments = parsedJson(fields.comments?.value || "{}", "路径注释", false);
+    if (!jsonData || typeof jsonData !== "object" || Array.isArray(jsonData)) throw new Error("JSON 数据必须是对象");
+    if (!lineComments || typeof lineComments !== "object" || Array.isArray(lineComments)) throw new Error("路径注释必须是 JSON 对象");
+    return {
+      tech_stack_id: techStackId,
+      name,
+      yaml_original: yamlOriginal,
+      json_data: jsonData,
+      line_comments: lineComments,
+    };
+  }
+
+  async function saveTechStack(forceCreate = false) {
+    const payload = techStackPayload();
+    const existingId = state.selectedTechStackId;
+    if (existingId && payload.tech_stack_id !== existingId) throw new Error("已存在技术栈的 ID 不可修改");
+    let value;
+    if (!forceCreate && existingId) {
+      const body = { ...payload };
+      delete body.tech_stack_id;
+      value = await request(`/api/v1/docker/tech_stack_info/${encodeURIComponent(existingId)}`, { method: "PATCH", body });
+    } else {
+      value = await request("/api/v1/docker/tech_stack_create", { method: "POST", body: payload });
+    }
+    state.selectedTechStackId = value.tech_stack_id;
+    await loadTemplates();
+    applyTechStack(value);
+    setTechStackStatus(`${forceCreate || !existingId ? "已创建" : "已保存"}技术栈 ${value.tech_stack_id}。`);
+    return value;
+  }
+
+  async function deleteTechStack() {
+    const techStackId = state.selectedTechStackId;
+    if (!techStackId) throw new Error("请先选择要删除的技术栈");
+    if (!window.confirm(`确定删除技术栈 ${techStackId}？此操作无法撤销。`)) return null;
+    await request(`/api/v1/docker/tech_stack_info/${encodeURIComponent(techStackId)}`, { method: "DELETE" });
+    state.selectedTechStackId = "";
+    newTechStack();
+    await loadTemplates();
+    setTechStackStatus(`已删除技术栈 ${techStackId}。`);
+    return { deleted: techStackId };
+  }
+
+  function setAllTemplateComponents(checked) {
+    componentRoots().forEach((root) => {
+      if (root instanceof HTMLSelectElement) {
+        [...root.options].forEach((option) => { option.selected = checked; });
+      } else {
+        root.querySelectorAll('input[type="checkbox"]').forEach((input) => { input.checked = checked; });
+      }
+    });
+  }
+
   async function composeTemplate() {
-    const components = [...document.querySelectorAll("#templateComponents input:checked")].map((input) => input.value);
-    const dependencies = parsedJson($("templateDependencies").value, "依赖关系", false);
+    const components = selectedTemplateComponents();
+    if (!components.length) throw new Error("请至少选择一个模板组件");
+    const dependencies = parsedJson($("templateDependencies")?.value || "{}", "依赖关系", false);
+    if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+      throw new Error("依赖关系必须是 JSON 对象");
+    }
     const value = await request("/api/v1/docker/template_compose", { method: "POST", body: { components, dependencies } });
-    pretty("templateOutput", value);
-    $("compose").value = JSON.stringify(value, null, 2);
+    if ($("templateOutput")) pretty("templateOutput", value);
+    if ($("compose")) $("compose").value = JSON.stringify(value, null, 2);
     return value;
   }
 
   async function loadComposePrompt() {
     const value = await request("/api/v1/docker/compose_prompt");
-    $("composePromptOutput").textContent = value || "";
+    const output = $("composePromptOutput");
+    if (output) output.textContent = typeof value === "string" ? value : "";
+    const panel = templateElement("templatePromptPanel", "composePromptPanel");
+    if (panel) panel.hidden = false;
     return value;
+  }
+
+  async function copyText(text, label) {
+    if (!text) throw new Error(`${label}为空，暂无可复制内容`);
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setActivity(`${label}已复制`, "success");
+        return text;
+      } catch {
+        // Fall back for insecure origins and denied clipboard permissions.
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("浏览器不允许访问剪贴板，请手动选择并复制");
+    setActivity(`${label}已复制`, "success");
+    return text;
   }
 
   async function loadBaseImages() {
@@ -771,6 +1031,12 @@
     const value = await request("/api/v1/docker/base_image_sync", { method: "POST" });
     pretty("baseImagesOutput", value);
     return value;
+  }
+
+  function bindOptional(id, eventName, listener) {
+    const element = $(id);
+    if (element) element.addEventListener(eventName, listener);
+    return element;
   }
 
   function bindEvents() {
@@ -839,9 +1105,45 @@
       button.addEventListener("click", () => withFeedback(() => loadResource(button.dataset.resource), "resourceOutput"));
     });
     $("refreshAccessButton").addEventListener("click", () => withFeedback(() => loadResource("access"), "resourceOutput"));
-    $("loadTemplatesButton").addEventListener("click", () => withFeedback(loadTemplates, null));
-    $("loadComposePromptButton").addEventListener("click", () => withFeedback(loadComposePrompt, null));
-    $("templateForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(composeTemplate, "templateOutput"); });
+    bindOptional("loadTemplatesButton", "click", () => withFeedback(loadTemplates, null));
+    bindOptional("loadComposePromptButton", "click", () => withFeedback(loadComposePrompt, null));
+    bindOptional("templateForm", "submit", (event) => {
+      event.preventDefault();
+      withFeedback(composeTemplate, "templateOutput");
+    });
+    bindOptional("techStackSearch", "input", renderTechStackList);
+    bindOptional("newTechStackButton", "click", newTechStack);
+    bindOptional("createTechStackButton", "click", () => withFeedback(() => saveTechStack(true), null));
+    bindOptional("saveTechStackButton", "click", () => withFeedback(() => saveTechStack(false), null));
+    bindOptional("deleteTechStackButton", "click", () => withFeedback(deleteTechStack, null));
+    const techStackForm = templateElement("techStackForm", "techStackEditor");
+    if (techStackForm) {
+      techStackForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        withFeedback(() => saveTechStack(false), null);
+      });
+      techStackForm.addEventListener("reset", (event) => {
+        event.preventDefault();
+        resetTechStack();
+      });
+    } else {
+      bindOptional("resetTechStackButton", "click", (event) => {
+        event.preventDefault();
+        resetTechStack();
+      });
+    }
+    bindOptional("selectAllTechStacksButton", "click", () => setAllTemplateComponents(true));
+    bindOptional("clearTechStacksButton", "click", () => setAllTemplateComponents(false));
+    ["copyTemplateOutputButton", "copyComposeOutputButton"].forEach((id) => {
+      bindOptional(id, "click", () => withFeedback(
+        () => copyText($("templateOutput")?.textContent || "", "Compose 结果"),
+        null,
+      ));
+    });
+    bindOptional("copyComposePromptButton", "click", () => withFeedback(
+      () => copyText($("composePromptOutput")?.textContent || "", "Markdown 提示词"),
+      null,
+    ));
     $("loadBaseImagesButton").addEventListener("click", () => withFeedback(loadBaseImages, "baseImagesOutput"));
     $("syncBaseImagesButton").addEventListener("click", () => withFeedback(syncBaseImages, "baseImagesOutput"));
   }

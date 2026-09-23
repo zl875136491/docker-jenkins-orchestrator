@@ -371,34 +371,113 @@
           <section id="templatesSection" class="workspace-section">
             <div class="section-heading">
               <div>
-                <p class="eyebrow">05 / COMPOSE</p>
-                <h2>模板组合</h2>
+                <p class="eyebrow">05 / TECHNOLOGY STACKS</p>
+                <h2>技术栈工作区</h2>
               </div>
-              <span class="section-note">从可维护技术栈目录生成 Compose</span>
+              <span class="section-note">维护技术栈目录，并组合生成 Compose</span>
             </div>
-            <div class="split-panel template-panel">
-              <div>
+
+            <div class="template-toolbar" aria-label="技术栈工具栏">
+              <div class="button-row">
+                <button id="loadTemplatesButton" class="button button-secondary" type="button">刷新</button>
+                <button id="newTechStackButton" class="button button-quiet" type="button">新建</button>
+                <button id="loadComposePromptButton" class="button button-quiet" type="button">提示词</button>
+                <button id="copyTemplateOutputButton" class="button button-quiet" type="button">复制</button>
+              </div>
+              <p id="techStackStatus" class="muted small" aria-live="polite">刷新后选择一个技术栈进行编辑。</p>
+            </div>
+
+            <div class="tech-stack-workspace">
+              <aside class="tech-stack-catalog" aria-labelledby="techStackCatalogTitle">
                 <div class="inline-heading">
-                  <h3>可用组件</h3>
-                  <div class="button-row">
-                    <button id="loadTemplatesButton" class="button button-quiet" type="button">刷新目录</button>
-                    <button id="loadComposePromptButton" class="button button-quiet" type="button">获取模型提示词</button>
+                  <div>
+                    <h3 id="techStackCatalogTitle">技术栈目录</h3>
+                    <p id="techStackCount" class="muted small">0 个技术栈</p>
                   </div>
                 </div>
-                <div id="templateComponents" class="component-list">
-                  <span class="muted small">连接后加载模板目录</span>
-                </div>
-              </div>
-              <form id="templateForm" class="stack-form">
-                <label>
-                  依赖关系 JSON
-                  <textarea id="templateDependencies" rows="6" spellcheck="false">{}</textarea>
+                <label class="tech-stack-search-label" for="techStackSearch">
+                  搜索技术栈
+                  <input id="techStackSearch" type="search" placeholder="按 ID 或名称筛选" autocomplete="off" />
                 </label>
-                <button class="button button-primary" type="submit">生成 Compose</button>
+                <div id="techStackList" class="tech-stack-list" role="listbox" aria-label="技术栈列表">
+                  <p class="muted small">连接后刷新技术栈目录。</p>
+                </div>
+              </aside>
+
+              <form id="techStackForm" class="tech-stack-editor" aria-labelledby="techStackEditorTitle">
+                <div class="inline-heading">
+                  <div>
+                    <h3 id="techStackEditorTitle">技术栈编辑器</h3>
+                    <p class="muted small">YAML、JSON 与逐路径注释必须保持一致。</p>
+                  </div>
+                </div>
+                <div class="tech-stack-identity">
+                  <label>
+                    技术栈 ID
+                    <input id="techStackId" name="tech_stack_id" placeholder="web-api" autocomplete="off" required />
+                  </label>
+                  <label>
+                    名称
+                    <input id="techStackName" name="name" placeholder="Web API" autocomplete="off" required />
+                  </label>
+                </div>
+                <label>
+                  YAML 原文
+                  <textarea id="techStackYaml" name="yaml_original" rows="12" spellcheck="false" placeholder="images:\n  - example/api:latest\nport: 8080" required></textarea>
+                </label>
+                <label>
+                  JSON 数据
+                  <textarea id="techStackJson" name="json_data" rows="10" spellcheck="false" placeholder='{"images":["example/api:latest"],"port":8080}' required></textarea>
+                </label>
+                <label>
+                  路径注释 JSON
+                  <textarea id="techStackComments" name="line_comments" rows="8" spellcheck="false" placeholder='{"$.images[0]":"运行镜像","$.port":"服务端口"}'>{}</textarea>
+                </label>
+                <div class="form-actions tech-stack-actions">
+                  <button id="createTechStackButton" class="button button-primary" type="button">创建</button>
+                  <button id="saveTechStackButton" class="button button-secondary" type="button">保存</button>
+                  <button id="deleteTechStackButton" class="button button-quiet button-danger" type="button">删除</button>
+                  <button id="resetTechStackButton" class="button button-quiet" type="reset">重置</button>
+                </div>
               </form>
             </div>
-            <pre id="templateOutput" class="json-output tall">等待模板组合</pre>
-            <pre id="composePromptOutput" class="json-output tall">等待 Markdown 提示词</pre>
+
+            <div class="template-lower-grid">
+              <section class="compose-workbench" aria-labelledby="composeWorkbenchTitle">
+                <div class="inline-heading">
+                  <div>
+                    <h3 id="composeWorkbenchTitle">Compose 组合</h3>
+                    <p class="muted small">选择组件，定义依赖后生成 Docker Compose。</p>
+                  </div>
+                  <button id="copyComposeOutputButton" class="button button-quiet" type="button">复制结果</button>
+                </div>
+                <form id="templateForm" class="stack-form">
+                  <div>
+                    <span class="field-label">组件选择</span>
+                    <div id="templateComponents" class="component-list">
+                      <span class="muted small">连接后加载可组合组件</span>
+                    </div>
+                  </div>
+                  <label>
+                    依赖关系 JSON
+                    <textarea id="templateDependencies" rows="6" spellcheck="false">{}</textarea>
+                  </label>
+                  <button id="generateComposeButton" class="button button-primary" type="submit">生成 Compose</button>
+                </form>
+                <pre id="templateOutput" class="json-output tall" aria-live="polite">等待模板组合</pre>
+              </section>
+
+              <section class="compose-prompt-panel" aria-labelledby="composePromptTitle">
+                <div class="inline-heading">
+                  <div>
+                    <h3 id="composePromptTitle">生成提示词</h3>
+                    <p class="muted small">包含当前技术栈目录的 Markdown 上下文。</p>
+                  </div>
+                  <button id="copyComposePromptButton" class="button button-quiet" type="button">复制提示词</button>
+                </div>
+                <pre id="composePromptOutput" class="json-output tall" aria-live="polite">等待 Markdown 提示词</pre>
+              </section>
+            </div>
           </section>
 
           <section id="baseImagesSection" class="workspace-section last-section">
