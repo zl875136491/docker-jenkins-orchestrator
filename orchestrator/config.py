@@ -1,13 +1,17 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     worker_name: str = "local-worker"
+    worker_region: str = Field(
+        default="default",
+        validation_alias=AliasChoices("WORKER_REGION", "ORCHESTRATOR_WORKER_REGION", "worker_region"),
+    )
     worker_secret: str = "local-worker-secret"
     jwt_secret: str = "local-development-jwt-secret-change-me"
     jwt_expire_minutes: int = 60

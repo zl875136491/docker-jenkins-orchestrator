@@ -48,7 +48,7 @@ Content-Type: application/json
 | Compose 生成提示词 | `GET /api/v1/docker/compose_prompt` |
 | 基础镜像列表/同步 | `GET /api/v1/docker/base_image_list`、`POST /api/v1/docker/base_image_sync` |
 
-应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。
+应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。多 worker 部署时，每个 worker 在启动环境中使用 `WORKER_REGION` 标识所在区域，`app_access` 响应会在最外层返回 `region`。
 
 ### 技术栈记录
 

@@ -3,6 +3,7 @@ name: orchestrator-test
 x-orchestrator-runtime: &orchestrator-runtime
   ORCHESTRATOR_ENVIRONMENT: "production"
   ORCHESTRATOR_WORKER_NAME: "${ORCHESTRATOR_WORKER_NAME:?Run scripts/prepare_test_environment.py first}"
+  WORKER_REGION: "${WORKER_REGION:-beijing}"
   ORCHESTRATOR_WORKER_SECRET: "${ORCHESTRATOR_WORKER_SECRET:?Run scripts/prepare_test_environment.py first}"
   ORCHESTRATOR_JWT_SECRET: "${ORCHESTRATOR_JWT_SECRET:?Run scripts/prepare_test_environment.py first}"
   ORCHESTRATOR_JWT_EXPIRE_MINUTES: "${ORCHESTRATOR_JWT_EXPIRE_MINUTES:-60}"

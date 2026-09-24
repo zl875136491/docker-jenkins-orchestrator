@@ -299,6 +299,7 @@ class AppAccess(DomainModel):
     """Aggregated external access information for an application."""
 
     appid: str
+    region: str
     services: list[ServiceAccess] = Field(default_factory=list)
     access_available: bool = False
     access_urls: list[str] = Field(default_factory=list)

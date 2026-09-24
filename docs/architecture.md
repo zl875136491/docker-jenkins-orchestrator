@@ -75,6 +75,7 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 ```json
 {
   "appid": "test-demo-1",
+  "region": "beijing",
   "access_available": false,
   "access_urls": [],
   "services": [
@@ -154,6 +155,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 所有秘密由环境变量或 secret manager 注入，禁止将 `auth.txt` 内容提交到 Git。关键配置包括：
 
 - `ORCHESTRATOR_STORAGE_BACKEND=mongo`
+- `WORKER_REGION`（当前 worker 所在区域；`app_access` 响应会原样返回）
 - `ORCHESTRATOR_MONGODB_URL`、`ORCHESTRATOR_MONGODB_DATABASE`
 - `ORCHESTRATOR_CELERY_BROKER_URL=redis://redis:6379/0`
 - `ORCHESTRATOR_DATA_ENCRYPTION_KEY`

@@ -61,7 +61,8 @@ curl -H "Authorization: Bearer <token>" \
 ```
 
 It returns one entry per deployed service, including `build_id`, `published_ports`,
-`access_urls`, `access_available`, and `access_reason`.
+`access_urls`, `access_available`, and `access_reason`. The top-level `region` field
+identifies the worker region; the shared test environment uses `beijing`.
 Do not paste the dotenv file into tickets or commit it. For a deliberately
 loopback-only test run, pass `--api-bind-address 127.0.0.1` when preparing the
 environment.

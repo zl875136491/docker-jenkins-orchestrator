@@ -379,6 +379,7 @@ def create_app(
             app_reason = "服务没有配置可从外部访问的 TCP published 端口"
         return AppAccess(
             appid=app_id,
+            region=container.settings.worker_region,
             services=service_access,
             access_available=bool(access_urls),
             access_urls=access_urls,

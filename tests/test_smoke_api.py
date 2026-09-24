@@ -219,7 +219,7 @@ def test_build_history_requires_authentication_and_supports_filters_pagination_a
 
 
 def test_app_access_returns_published_ports_and_configured_urls() -> None:
-    settings = Settings(public_host="control.example.test", public_scheme="https")
+    settings = Settings(public_host="control.example.test", public_scheme="https", worker_region="beijing")
     access_app = create_app(settings=settings)
     access_client = TestClient(access_app)
     headers = {
@@ -261,6 +261,7 @@ def test_app_access_returns_published_ports_and_configured_urls() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["appid"] == appid
+    assert payload["region"] == "beijing"
     assert payload["access_available"] is True
     assert payload["access_urls"] == ["https://control.example.test:8080"]
     assert payload["services"][0]["published_ports"][0]["published_port"] == 8080

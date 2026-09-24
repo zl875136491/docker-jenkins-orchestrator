@@ -34,6 +34,7 @@ def test_compose_runtime_environment_enforces_mongo_celery_and_separate_queues()
     assert "ORCHESTRATOR_CELERY_BUILD_QUEUE" in environment
     assert "ORCHESTRATOR_CELERY_IMAGES_QUEUE" in environment
     assert "ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS" in environment
+    assert "WORKER_REGION" in environment
     assert "ORCHESTRATOR_JENKINS_USER" in worker_environment
     assert "ORCHESTRATOR_HARBOR_PASSWORD" in worker_environment
 
@@ -48,6 +49,13 @@ def test_test_compose_exposes_only_api_on_a_configurable_host_address() -> None:
     assert services["redis"]["ports"] == [
         "127.0.0.1:${ORCHESTRATOR_REDIS_HOST_PORT:-16379}:6379"
     ]
+    assert document["x-orchestrator-runtime"]["WORKER_REGION"] == "${WORKER_REGION:-beijing}"
+
+
+def test_worker_region_reads_unprefixed_environment_variable(monkeypatch) -> None:
+    monkeypatch.setenv("WORKER_REGION", "beijing")
+
+    assert Settings().worker_region == "beijing"
 
 
 def test_production_settings_accept_the_compose_service_endpoints() -> None:

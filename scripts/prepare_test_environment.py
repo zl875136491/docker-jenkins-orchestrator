@@ -126,6 +126,7 @@ def build_environment(auth: dict[str, dict[str, str]], args: argparse.Namespace)
     env = {
         "ORCHESTRATOR_ENVIRONMENT": "production",
         "ORCHESTRATOR_WORKER_NAME": worker_name,
+        "WORKER_REGION": args.worker_region,
         "ORCHESTRATOR_WORKER_SECRET": secrets.token_urlsafe(32),
         "ORCHESTRATOR_JWT_SECRET": secrets.token_urlsafe(48),
         "ORCHESTRATOR_STORAGE_BACKEND": "mongo",
@@ -176,6 +177,11 @@ def main() -> int:
     parser.add_argument("--auth-file", type=Path, default=Path(os.environ.get("ORCHESTRATOR_AUTH_FILE", DEFAULT_AUTH_FILE)))
     parser.add_argument("--runtime-dir", type=Path, default=Path(os.environ.get("ORCHESTRATOR_TEST_DATA_PATH", DEFAULT_RUNTIME_DIR)))
     parser.add_argument("--run-id", default=os.environ.get("ORCHESTRATOR_TEST_RUN_ID"))
+    parser.add_argument(
+        "--worker-region",
+        default=os.environ.get("WORKER_REGION", "beijing"),
+        help="region identifier returned by app_access (default: beijing)",
+    )
     parser.add_argument("--jenkins-host", default="10.17.158.156")
     parser.add_argument("--harbor-host", default="10.17.158.118")
     parser.add_argument("--jenkins-job", default=os.environ.get("ORCHESTRATOR_JENKINS_JOB_NAME"))

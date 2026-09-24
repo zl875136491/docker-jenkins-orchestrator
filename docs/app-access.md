@@ -44,6 +44,7 @@ type ServiceAccess = {
 
 type AppAccess = {
   appid: string;
+  region: string;              // 返回当前处理请求的 worker 区域，例如 beijing
   services: ServiceAccess[];
   access_available: boolean;
   access_urls: string[];
@@ -56,6 +57,7 @@ type AppAccess = {
 | 字段 | 主程序的处理方式 |
 |---|---|
 | `appid` | 校验它与请求的 `app_id` 一致，并作为应用详情数据的归属 ID。 |
+| `region` | 当前响应 worker 的区域标识，由启动环境变量 `WORKER_REGION` 提供；多 worker 部署时用于识别请求所在区域。 |
 | `access_available` | 应用级访问能力的唯一判定字段。为 `true` 时展示访问入口；为 `false` 时不展示“打开应用”操作。 |
 | `access_urls` | 应用级、已去重的可访问 URL 列表。直接作为链接的 `href` 使用，不要自行拼接主机名或端口。 |
 | `access_reason` | 应用无入口时的可展示原因；有入口时为 `null`。 |
