@@ -52,6 +52,7 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 | POST | `/oauth2/refresh` | 使用 refresh token 换发令牌 |
 | GET / POST | `/api/v1/jenkins/app_list`, `/api/v1/jenkins/app_create` | 列出、创建 user-app |
 | GET / PATCH | `/api/v1/jenkins/app_info/{app_id}` | 读取、更新 user-app |
+| POST | `/api/v1/jenkins/app_sync/{app_id}` | 按应用保存的 Git 分支同步最新 commit 与 Compose |
 | POST | `/api/v1/jenkins/build_create/{app_id}` | 创建并投递构建任务 |
 | GET | `/api/v1/jenkins/build_list` | 分页查询构建历史，可按 `app_id`、`status` 筛选 |
 | GET | `/api/v1/jenkins/build_info/{build_id}` | 查询任务和当前状态 |
@@ -96,7 +97,7 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 
 控制台的“运行资源”页面提供“访问入口”查询按钮，会将每个服务的端口和 URL 渲染为表格；没有入口时直接显示原因和 Compose 修复示例，原始 JSON 仍保留在下方供排障。
 
-创建应用时可以暂不填写 `compose`，但提交构建前必须由 conductor/用户角色提供且包含 `services` 的 Compose 文档。系统不会在请求缺少 Compose 时自动从项目 Git 查找 `docker-compose.yaml`、`docker-compose.yml` 或 `compose.yaml`；仓库仅用于 Jenkins checkout/build context。也可以先调用模板组合 API 生成 Compose，再保存到应用。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。
+创建应用时可以暂不填写 `compose`。配置 GitLab 后，系统先把分支解析为固定 commit SHA，再使用运行镜像内安装的 Git 对该仓库执行完整克隆（不做浅克隆/部分克隆），检出该 SHA，并在本地工作树中按 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml` 顺序查找根目录文件；根目录没有候选时才接受唯一的嵌套候选。仓库树枚举与文件读取完全基于克隆结果，不依赖 GitLab tree API 分页。也可以调用 `POST /api/v1/jenkins/app_sync/{app_id}` 重新拉取该分支的最新 commit 并更新 `app_info.compose`。提交构建前仍必须确保 Compose 包含 `services` 且适合目标环境；仓库也继续作为 Jenkins checkout/build context 使用。也可以先调用模板组合 API 生成 Compose，再保存到应用。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。
 
 ## 5. 构建状态机
 

@@ -1,5 +1,7 @@
 from pathlib import Path
+import shlex
 
+import pytest
 import yaml
 
 from orchestrator.config import Settings
@@ -7,6 +9,46 @@ from orchestrator.config import Settings
 
 COMPOSE_PATH = Path("docker-compose.yml")
 TEST_COMPOSE_PATH = Path("docker-compose.test.yml")
+
+
+def test_runtime_image_installs_and_configures_git_for_full_repository_clones() -> None:
+    dockerfile = Path("Dockerfile").read_text().replace("\\\n", " ")
+    install_command = next(
+        command for command in dockerfile.split("&&") if "apt-get install " in command
+    )
+
+    assert {"git", "ca-certificates"}.issubset(shlex.split(install_command))
+    assert "git config --system advice.detachedHead false" in dockerfile
+    assert "git config --system core.quotepath false" in dockerfile
+
+
+@pytest.mark.parametrize(
+    ("compose_path", "environment_key"),
+    [
+        (COMPOSE_PATH, "x-orchestrator-runtime-environment"),
+        (TEST_COMPOSE_PATH, "x-orchestrator-runtime"),
+    ],
+)
+def test_compose_passes_the_full_clone_timeout_to_runtime_services(
+    compose_path: Path, environment_key: str
+) -> None:
+    document = yaml.safe_load(compose_path.read_text())
+    setting_name = "ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS"
+    expected = "${ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS:-600}"
+
+    assert document[environment_key][setting_name] == expected
+    for service_name in ("api", "worker", "beat"):
+        assert document["services"][service_name]["environment"][setting_name] == expected
+
+
+@pytest.mark.parametrize("compose_path", [COMPOSE_PATH, TEST_COMPOSE_PATH])
+def test_compose_provides_gitlab_configuration_to_api_and_worker(compose_path: Path) -> None:
+    document = yaml.safe_load(compose_path.read_text())
+
+    for service_name in ("api", "worker"):
+        environment = document["services"][service_name]["environment"]
+        assert environment["ORCHESTRATOR_GITLAB_URL"] == "${ORCHESTRATOR_GITLAB_URL:-}"
+        assert environment["ORCHESTRATOR_GITLAB_TOKEN"] == "${ORCHESTRATOR_GITLAB_TOKEN:-}"
 
 
 def test_compose_runs_api_worker_beat_and_durable_dependencies() -> None:
@@ -80,3 +122,14 @@ def test_production_settings_enable_deployment_readiness_defaults() -> None:
 
     assert settings.deployment_readiness_timeout_seconds == 60
     assert settings.deployment_readiness_poll_interval_seconds == 1.0
+
+
+def test_settings_use_a_positive_full_clone_timeout() -> None:
+    assert Settings().git_clone_timeout_seconds == 600
+    assert Settings(git_clone_timeout_seconds=30).git_clone_timeout_seconds == 30
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_settings_reject_non_positive_full_clone_timeout(timeout: int) -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        Settings(git_clone_timeout_seconds=timeout)

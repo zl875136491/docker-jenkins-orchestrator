@@ -38,6 +38,12 @@ outbound address, rather than only to loopback. Read the advertised URL from
 Open `http://<test-host-address>:18080/ui/` and use the generated client
 credentials from `/opt/orchestrator-test/.env` with `POST /oauth2/token`. The UI uses same-origin API
 requests, so this URL exercises the frontend served by the test API container.
+On **应用配置**, a blank Compose on app creation requests repository discovery.
+For an existing app, **同步仓库 Compose** uses the saved repository and Git ref,
+shows the synchronization result and source commit, and refreshes the editor.
+Both actions require configured GitLab access and perform a full repository
+clone in the API runtime. Sync never automatically builds or deploys the app;
+submit a build explicitly afterward. See [the console workflow](webui-repository-sync.md).
 The preparation script also writes the advertised host to
 `ORCHESTRATOR_PUBLIC_HOST`, so the UI's **访问入口** view can turn published
 Swarm ports into links such as `http://10.32.12.110:18082`. A service record

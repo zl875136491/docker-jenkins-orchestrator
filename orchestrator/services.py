@@ -30,6 +30,7 @@ from orchestrator.repository import DuplicateAppError, DuplicateTechStackError, 
 from orchestrator.secrets import SecretBox
 from orchestrator.tasks import TaskDispatcher
 from orchestrator.templates import TemplateError
+from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepositoryRef
 
 
 class NotFoundError(LookupError):
@@ -57,9 +58,10 @@ ALLOWED_BUILD_TRANSITIONS: dict[BuildStatus, set[BuildStatus]] = {
 
 
 class ApplicationService:
-    def __init__(self, repository: Repository, secret_box: SecretBox) -> None:
+    def __init__(self, repository: Repository, secret_box: SecretBox, gitlab: GitLabAdapter | None = None) -> None:
         self.repository = repository
         self.secret_box = secret_box
+        self.gitlab = gitlab
 
     @staticmethod
     def _public(record: UserAppRecord) -> UserApp:
@@ -67,6 +69,15 @@ class ApplicationService:
 
     def create_app(self, request: UserAppCreate) -> UserApp:
         now = utc_now()
+        compose = request.compose
+        compose_source_file = None
+        compose_source_commit = None
+        if compose is None and self.gitlab is not None:
+            resolved = self.gitlab.validate_repository_ref(request.repository_url, request.git_ref)
+            discovered = self.gitlab.discover_compose(resolved)
+            compose = dict(discovered.compose)
+            compose_source_file = discovered.path
+            compose_source_commit = discovered.commit_sha
         record = UserAppRecord(
             appid=request.appid,
             name=request.name,
@@ -74,7 +85,9 @@ class ApplicationService:
             git_ref=request.git_ref,
             environment_ciphertext=self.secret_box.encrypt_environment(request.environment),
             environment_keys=sorted(request.environment),
-            compose=request.compose,
+            compose=compose,
+            compose_source_file=compose_source_file,
+            compose_source_commit=compose_source_commit,
             components=request.components,
             created_at=now,
             updated_at=now,
@@ -104,11 +117,46 @@ class ApplicationService:
             if environment is not None:
                 fields["environment_ciphertext"] = self.secret_box.encrypt_environment(environment)
                 fields["environment_keys"] = sorted(environment)
+        if "compose" in fields or "repository_url" in fields or "git_ref" in fields:
+            # A direct app-info edit becomes the new source of truth rather
+            # than claiming the document still mirrors a GitLab file.  A
+            # repository/ref edit also invalidates the old source metadata;
+            # the saved Compose remains usable until an explicit sync.
+            fields["compose_source_file"] = None
+            fields["compose_source_commit"] = None
         fields["updated_at"] = utc_now()
         updated = self.repository.update_app(appid, fields)
         if updated is None:
             raise NotFoundError("App not found")
         return self._public(updated)
+
+    def sync_app(self, appid: str) -> tuple[UserAppRecord, GitLabRepositoryRef, GitLabComposeDocument, bool, str | None]:
+        """Fetch the saved branch's latest Compose and persist it as app.compose."""
+
+        app = self.get_record(appid)
+        if self.gitlab is None:
+            raise GitLabUnavailableError("GitLab integration is not configured")
+        resolved = self.gitlab.validate_repository_ref(app.repository_url, app.git_ref)
+        discovered = self.gitlab.discover_compose(resolved)
+        compose = dict(discovered.compose)
+        changed = app.compose != compose
+        previous_commit_id = app.compose_source_commit
+        updated = self.repository.update_app(
+            appid,
+            {
+                "compose": compose,
+                "compose_source_file": discovered.path,
+                "compose_source_commit": discovered.commit_sha,
+                "updated_at": utc_now(),
+            },
+        )
+        if updated is None:
+            raise NotFoundError("App not found")
+        return updated, resolved, discovered, changed, previous_commit_id
+
+
+class GitLabUnavailableError(RuntimeError):
+    """GitLab-dependent application operation cannot run without configuration."""
 
 
 class TechStackService:

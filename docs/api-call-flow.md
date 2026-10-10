@@ -4,12 +4,14 @@
 
 1. `POST /oauth2/token` 使用 `client_id` 和 `client_secret` 获取 `access_token`、`refresh_token`。
 2. `GET /api/v1/jenkins/app_list` 选择应用，或 `POST /api/v1/jenkins/app_create` 创建应用。
+   配置 GitLab 且创建请求省略 `compose` 时，应用创建会按约定文件名自动导入仓库 Compose；已有应用可调用 `POST /api/v1/jenkins/app_sync/{app_id}` 同步保存分支的最新版本。
 3. 通过 `GET /api/v1/docker/tech_stack_list` 读取平台模板；必要时用技术栈 CRUD 更新模板，或调用 `GET /api/v1/docker/compose_prompt` 获取给用户模型的 Markdown 提示词。
 4. 使用 `POST /api/v1/docker/template_compose?format=json` 获取 Compose JSON 与完整路径注释，或使用 `?format=yaml` 获取带注释 YAML；也可以提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
-5. `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
-6. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
-7. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
-8. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
+5. 如果仓库 Compose 有更新，调用 `POST /api/v1/jenkins/app_sync/{app_id}`；它不需要请求体，默认同步创建应用时保存的 `git_ref`。
+6. 如需人工覆盖或调整 Compose，调用 `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
+7. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
+8. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
+9. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
 
 访问令牌过期时，调用 `POST /oauth2/refresh`，然后用新 access token 重试业务请求。`/api/me` 不再提供。
 
@@ -23,7 +25,7 @@ WebUI 调用 Control API；MongoDB 保存应用、构建、事件、镜像、服
 
 ## Compose 规则
 
-构建前必须保存有效的 `services` mapping。系统不会自动从 Git 查找 Compose。`ports` 才会申请外部入口，例如 `18082:3000` 表示期望宿主机 18082 转发到容器 3000；worker 会在部署前检查冲突并可能重新分配宿主机 published 端口，实际端口以 `app_access`/`published_ports` 为准。`expose` 仅供容器网络使用。服务必须真正监听 target port。
+构建前必须保存有效的 `services` mapping。GitLab 自动发现/同步会先把仓库完整克隆到本地，再基于解析出的固定 commit SHA 检出并搜索；运行镜像内必须有 Git 和 CA 证书，克隆超时由 `ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS` 控制。自动发现只识别 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml`，不会改写环境专属参数；发现多个嵌套候选时需要人工通过 `PATCH app_info` 选择或整理 Compose。`ports` 才会申请外部入口，例如 `18082:3000` 表示期望宿主机 18082 转发到容器 3000；worker 会在部署前检查冲突并可能重新分配宿主机 published 端口，实际端口以 `app_access`/`published_ports` 为准。`expose` 仅供容器网络使用。服务必须真正监听 target port。
 
 ## 排障顺序
 

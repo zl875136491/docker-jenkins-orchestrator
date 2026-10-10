@@ -124,6 +124,36 @@ def test_control_console_loads_existing_apps_for_context_selection() -> None:
     assert "loadAppChoices" in script.text
 
 
+def test_control_console_exposes_compose_discovery_and_repository_sync_results() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+
+    assert page.status_code == 200
+    assert script.status_code == 200
+    for element_id in (
+        "composeHelp",
+        "composeSourcePanel",
+        "composeSourceStatus",
+        "composeSourceFile",
+        "composeSourceCommit",
+        "syncAppButton",
+        "syncStatus",
+        "syncResultPanel",
+        "syncCommitId",
+        "syncPreviousCommitId",
+        "syncComposeChanged",
+        "syncCommitChanged",
+        "syncGitRef",
+        "syncComposeFile",
+        "syncUpdatedAt",
+        "appSyncOutput",
+        "buildCommit",
+        "serviceAccessRegion",
+    ):
+        assert f'id="{element_id}"' in page.text
+    assert "/api/v1/jenkins/app_sync/" in script.text
+
+
 def test_template_workspace_exposes_technology_stack_editor_and_compose_actions() -> None:
     page = client.get("/ui/")
     script = client.get("/ui/app.js")

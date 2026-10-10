@@ -22,6 +22,12 @@
     historyTimer: null,
     techStacks: [],
     selectedTechStackId: "",
+    loadedApp: null,
+    environmentDirty: false,
+    environmentBaseline: "{}",
+    appContextVersion: 0,
+    appOperation: null,
+    syncRefreshPendingAppid: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -229,10 +235,129 @@
     }
   }
 
+  function composeJson() {
+    const value = parsedJson($("compose").value, "Compose", true);
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+      throw new Error("Compose 必须是 JSON 对象；留空会在创建时自动发现，在更新时保留原值");
+    }
+    return value;
+  }
+
+  function setSyncStatus(message, tone = "") {
+    const target = $("syncStatus");
+    target.textContent = message;
+    target.className = `operation-status small ${tone ? `activity-${tone}` : "muted"}`;
+  }
+
+  function resetAppView() {
+    state.loadedApp = null;
+    state.syncRefreshPendingAppid = "";
+    state.environmentDirty = false;
+    state.environmentBaseline = "{}";
+    state.appContextVersion += 1;
+    $("environment").value = "{}";
+    $("environment").placeholder = "{}";
+    $("environmentHelp").textContent = "创建时使用此 JSON；读取应用只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。";
+    $("composeSourceStatus").textContent = "尚未读取当前应用，来源未确认。编辑器中的内容可能是未保存草稿。";
+    ["composeSourceFile", "composeSourceCommit", "composeSourceRef"].forEach((id) => { $(id).textContent = "--"; });
+    $("composeSourcePanel").removeAttribute("data-appid");
+    $("serviceAccessRegion").textContent = "--";
+    $("syncResultPanel").hidden = true;
+    pretty("appSyncOutput", "等待同步操作");
+    setSyncStatus("同步使用已保存的仓库和 Git 引用，覆盖已保存的 Compose；不会自动构建。");
+  }
+
+  function renderComposeSource(app) {
+    const hasCompose = app.compose !== null && app.compose !== undefined;
+    const fromRepository = Boolean(app.compose_source_file || app.compose_source_commit);
+    $("composeSourcePanel").dataset.appid = app.appid || "";
+    $("composeSourceStatus").textContent = !hasCompose
+      ? "当前应用没有已保存的 Compose；从仓库同步可发现并保存配置。"
+      : fromRepository
+        ? "仓库发现的 Compose（已保存）。编辑器修改在点击更新前不会改变此来源记录。"
+        : "手动配置的 Compose（无仓库来源元数据）；可同步为仓库中的配置。";
+    $("composeSourceRef").textContent = app.git_ref || "--";
+    $("composeSourceFile").textContent = app.compose_source_file || "--";
+    $("composeSourceCommit").textContent = app.compose_source_commit || "--";
+  }
+
+  function sameAppContext(appid, version) {
+    return state.appid === appid && $("appId").value.trim() === appid && state.appContextVersion === version;
+  }
+
+  function ensureAppIdle() {
+    if (state.appOperation) throw new Error("应用操作进行中，请等待完成后再操作");
+  }
+
+  function beginAppOperation(label, appid) {
+    ensureAppIdle();
+    state.appContextVersion += 1;
+    const operation = {
+      appid,
+      version: state.appContextVersion,
+      activeAppid: state.appid,
+      inputAppid: $("appId").value.trim(),
+      controls: [],
+      links: [],
+      timer: null,
+    };
+    state.appOperation = operation;
+    document.querySelectorAll("#appForm input, #appForm textarea, #appForm button, #appForm select, #appContextModal button, #appContextModal select, #buildForm input, #buildForm button, #connectForm input, #connectForm button, #templateForm button").forEach((control) => {
+      operation.controls.push([control, control.disabled]);
+      control.disabled = true;
+    });
+    ["disconnectButton", "syncAppButton"].forEach((id) => {
+      const control = $(id);
+      if (control && !operation.controls.some(([existing]) => existing === control)) {
+        operation.controls.push([control, control.disabled]);
+        control.disabled = true;
+      }
+    });
+    ["openAppContextModal", "openConnectionModal"].forEach((id) => {
+      const link = $(id);
+      if (!link) return;
+      operation.links.push([link, link.getAttribute("aria-disabled"), link.getAttribute("tabindex")]);
+      link.setAttribute("aria-disabled", "true");
+      link.setAttribute("tabindex", "-1");
+    });
+    $("appForm").setAttribute("aria-busy", "true");
+    $("composeSourcePanel").setAttribute("aria-busy", "true");
+    $("syncAppButton").textContent = label;
+    return operation;
+  }
+
+  function finishAppOperation(operation) {
+    if (state.appOperation !== operation) return;
+    window.clearInterval(operation.timer);
+    operation.controls.forEach(([control, disabled]) => { control.disabled = disabled; });
+    operation.links.forEach(([link, ariaDisabled, tabIndex]) => {
+      if (ariaDisabled === null) link.removeAttribute("aria-disabled");
+      else link.setAttribute("aria-disabled", ariaDisabled);
+      if (tabIndex === null) link.removeAttribute("tabindex");
+      else link.setAttribute("tabindex", tabIndex);
+    });
+    $("appForm").removeAttribute("aria-busy");
+    $("composeSourcePanel").removeAttribute("aria-busy");
+    $("syncAppButton").textContent = "同步仓库 Compose";
+    state.appOperation = null;
+  }
+
+  async function withAppOperation(label, appid, action) {
+    const operation = beginAppOperation(label, appid);
+    try {
+      return await action(operation);
+    } finally {
+      finishAppOperation(operation);
+    }
+  }
+
   function appidFromInput() {
     const value = $("appId").value.trim() || state.appid;
     if (!value) throw new Error("请先填写 App ID");
-    if (value !== state.appid) setCurrentApp("");
+    if (value !== state.appid) {
+      setCurrentApp("");
+      resetAppView();
+    }
     state.appid = value;
     localStorage.setItem(APP_KEY, value);
     $("appId").value = value;
@@ -242,6 +367,7 @@
   }
 
   function applyApp(app) {
+    if (state.appid !== app.appid) resetAppView();
     state.appid = app.appid || "";
     localStorage.setItem(APP_KEY, state.appid);
     setCurrentApp(app.name || "");
@@ -252,7 +378,19 @@
     $("repositoryUrl").value = app.repository_url || "";
     $("gitRef").value = app.git_ref || "main";
     $("components").value = (app.components || []).join(",");
-    $("compose").value = app.compose ? JSON.stringify(app.compose, null, 2) : "";
+    $("compose").value = app.compose !== null && app.compose !== undefined ? JSON.stringify(app.compose, null, 2) : "";
+    state.loadedApp = JSON.parse(JSON.stringify(app));
+    state.environmentDirty = false;
+    state.environmentBaseline = "";
+    $("environment").value = "";
+    $("environment").placeholder = "留空保留已有环境变量；填写完整 JSON 可替换";
+    const keys = (app.environment_keys || []).join(", ") || "无";
+    $("environmentHelp").textContent = `已保存的变量名：${keys}。API 不返回密钥值；未修改或留空不会替换原值。填写完整 JSON 会替换全部环境变量，明确填写 {} 会清空它们。`;
+    renderComposeSource(app);
+    if (state.syncRefreshPendingAppid === app.appid) {
+      state.syncRefreshPendingAppid = "";
+      setSyncStatus("仓库同步成功，并已重新读取应用配置和来源。未触发构建，确认后请显式提交构建。", "success");
+    }
   }
 
   async function loadAppChoices() {
@@ -278,11 +416,16 @@
   }
 
   async function selectContextApp() {
+    ensureAppIdle();
     const appid = $("contextAppSelect").value.trim();
     if (!appid) throw new Error("请先选择已有应用");
-    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
-    applyApp(value);
-    return value;
+    return withAppOperation("读取应用中…", appid, async (operation) => {
+      const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
+      if (state.appContextVersion !== operation.version || $("contextAppSelect").value !== appid
+        || state.appid !== operation.activeAppid || $("appId").value.trim() !== operation.inputAppid) return null;
+      applyApp(value);
+      return value;
+    });
   }
 
   function applyBuild(build) {
@@ -294,6 +437,7 @@
     $("buildStatus").className = `status-pill ${statusClass(build.status)}`;
     $("jenkinsBuild").textContent = build.jenkins_build_number ?? "--";
     $("celeryTask").textContent = build.celery_task_id || "--";
+    $("buildCommit").textContent = build.git_commit_sha || "--";
   }
 
   async function refreshAccessToken() {
@@ -360,6 +504,7 @@
   async function withFeedback(action, outputId) {
     try {
       const value = await action();
+      if (value === null || value === undefined) return null;
       if (outputId) pretty(outputId, value);
       setActivity("请求完成", "success");
       return value;
@@ -387,47 +532,160 @@
     return payload;
   }
 
-  function appPayload() {
+  function sameJson(left, right) {
+    if (left === right) return true;
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index] && sameJson(left[key], right[key]));
+  }
+
+  function appPayload({ patch = false } = {}) {
     const appid = appidFromInput();
     const components = $("components").value.split(",").map((item) => item.trim()).filter(Boolean);
-    return {
+    const payload = {
       appid,
       name: $("appName").value.trim(),
       repository_url: $("repositoryUrl").value.trim(),
       git_ref: $("gitRef").value.trim() || "main",
-      environment: parsedJson($("environment").value, "环境变量", false),
-      compose: parsedJson($("compose").value, "Compose", true) ?? null,
       components,
     };
+    const environmentText = $("environment").value;
+    if (!patch || (environmentText.trim() && (state.environmentDirty || environmentText !== state.environmentBaseline))) {
+      const environment = parsedJson(environmentText.trim() ? environmentText : "{}", "环境变量", false);
+      if (!environment || typeof environment !== "object" || Array.isArray(environment)) {
+        throw new Error("环境变量必须是 JSON 对象；明确填写 {} 可清空已有变量");
+      }
+      payload.environment = environment;
+    }
+    const compose = composeJson();
+    if (compose !== undefined) payload.compose = compose;
+    if (patch && state.loadedApp?.appid === appid) {
+      ["name", "repository_url", "git_ref", "components", "compose"].forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(payload, key) && sameJson(payload[key], state.loadedApp[key])) {
+          delete payload[key];
+        }
+      });
+    }
+    return payload;
   }
 
   async function createApp() {
-    const value = await request("/api/v1/jenkins/app_create", { method: "POST", body: appPayload() });
-    applyApp(value);
-    pretty("appOutput", value);
-    return value;
+    ensureAppIdle();
+    const payload = appPayload();
+    return withAppOperation("创建应用中…", payload.appid, async (operation) => {
+      const value = await request("/api/v1/jenkins/app_create", { method: "POST", body: payload });
+      if (!sameAppContext(payload.appid, operation.version)) return null;
+      applyApp(value);
+      pretty("appOutput", value);
+      return value;
+    });
   }
 
   async function getApp() {
+    ensureAppIdle();
     const appid = appidFromInput();
-    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
-    applyApp(value);
-    pretty("appOutput", value);
-    return value;
+    return withAppOperation("读取应用中…", appid, async (operation) => {
+      const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
+      if (!sameAppContext(appid, operation.version)) return null;
+      applyApp(value);
+      pretty("appOutput", value);
+      return value;
+    });
   }
 
   async function patchApp() {
-    const payload = appPayload();
+    ensureAppIdle();
+    const payload = appPayload({ patch: true });
     const appid = payload.appid;
     delete payload.appid;
-    const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`, { method: "PATCH", body: payload });
-    applyApp(value);
-    pretty("appOutput", value);
-    return value;
+    return withAppOperation("更新应用中…", appid, async (operation) => {
+      const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`, { method: "PATCH", body: payload });
+      if (!sameAppContext(appid, operation.version)) return null;
+      applyApp(value);
+      pretty("appOutput", value);
+      return value;
+    });
+  }
+
+  function renderSyncResult(result) {
+    $("syncResultPanel").hidden = false;
+    $("syncComposeChanged").textContent = result.compose_changed ? "已变更" : "未变更";
+    $("syncCommitChanged").textContent = result.commit_changed ? "已变更" : "未变更";
+    $("syncGitRef").textContent = result.git_ref || "--";
+    $("syncComposeFile").textContent = result.compose_file || "--";
+    $("syncCommitId").textContent = result.commit_id || "--";
+    $("syncPreviousCommitId").textContent = result.previous_commit_id || "无之前的仓库 Commit";
+    $("syncUpdatedAt").textContent = formatDate(result.updated_at);
+    pretty("appSyncOutput", result);
+  }
+
+  async function syncApp() {
+    ensureAppIdle();
+    const appid = appidFromInput();
+    const saved = state.loadedApp?.appid === appid ? state.loadedApp : null;
+    const refDescription = saved ? `已保存的 Git 引用 ${saved.git_ref}` : "服务端已保存的 Git 引用";
+    if (!window.confirm(`从应用 ${appid} 的已保存 GitLab 仓库（${refDescription}）同步 Compose？\n\n这会完整克隆仓库并覆盖应用已保存的 Compose，包括手动配置。成功后重新读取应用会替换编辑器草稿，以及尚未保存的仓库地址、Git 引用和其他表单修改；当前编辑器的仓库和引用不会用于同步。\n\n此操作不会自动触发构建。`)) return null;
+    return withAppOperation("同步中，请稍候…", appid, async (operation) => {
+      const started = Date.now();
+      const showProgress = () => {
+        if (!sameAppContext(appid, operation.version)) return;
+        const seconds = Math.floor((Date.now() - started) / 1000);
+        setSyncStatus(`正在完整克隆仓库并同步 ${appid}（${refDescription}），已等待 ${seconds} 秒。大仓库可能需要 600 秒或更久，请勿重复提交；不会自动构建。`);
+      };
+      $("syncResultPanel").hidden = true;
+      ["syncComposeChanged", "syncCommitChanged", "syncGitRef", "syncComposeFile", "syncCommitId", "syncPreviousCommitId", "syncUpdatedAt"].forEach((id) => { $(id).textContent = "--"; });
+      pretty("appSyncOutput", "正在同步仓库，请稍候…");
+      showProgress();
+      setActivity(`正在同步应用 ${appid}，请稍候`);
+      operation.timer = window.setInterval(showProgress, 1000);
+      let result;
+      try {
+        result = await request(`/api/v1/jenkins/app_sync/${encodeURIComponent(appid)}`, { method: "POST" });
+      } catch (error) {
+        window.clearInterval(operation.timer);
+        if (sameAppContext(appid, operation.version)) {
+          $("syncResultPanel").hidden = false;
+          pretty("appSyncOutput", { error: errorMessage(error), ...(error instanceof ApiError ? { status: error.status, response: error.payload } : {}) });
+          setSyncStatus(`同步请求失败：${errorMessage(error)}。未替换编辑器和当前来源显示；若网络中断，服务端可能已完成操作，可先点击“读取应用”确认。`, "error");
+          setActivity(`应用同步失败：${errorMessage(error)}`, "error");
+        }
+        return null;
+      }
+      window.clearInterval(operation.timer);
+      if (!sameAppContext(appid, operation.version)) return null;
+      renderSyncResult(result);
+      state.syncRefreshPendingAppid = appid;
+      setSyncStatus("仓库同步成功，正在重新读取应用以确认已保存的 Compose 和来源…");
+      try {
+        const app = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
+        if (!sameAppContext(appid, operation.version)) return null;
+        applyApp(app);
+        pretty("appOutput", app);
+      } catch (error) {
+        if (sameAppContext(appid, operation.version)) {
+          setSyncStatus(`仓库同步成功，但应用刷新失败（读取应用失败）：${errorMessage(error)}。编辑器和来源仍是同步前的显示；下方保留完整同步响应，请点击“读取应用”重试刷新，无需再次同步。未触发构建。`, "error");
+          setActivity("仓库同步成功，但应用刷新失败；请重试读取应用", "error");
+        }
+        return result;
+      }
+      const changes = !result.compose_changed && !result.commit_changed
+        ? "Compose 和 Commit 均未更改"
+        : `Compose ${result.compose_changed ? "已更改" : "未更改"}，Commit ${result.commit_changed ? "已更改" : "未更改"}`;
+      setSyncStatus(`仓库同步成功：${changes}。已重新读取保存的配置；未自动触发构建，确认后请显式提交构建。`, "success");
+      setActivity(`仓库同步成功：${changes}；未触发构建`, "success");
+      return result;
+    });
   }
 
   async function createBuild() {
+    ensureAppIdle();
     const appid = appidFromInput();
+    if (state.syncRefreshPendingAppid === appid) {
+      throw new Error("仓库同步已成功，但应用配置尚未重新读取。请先点击“读取应用”成功刷新配置和来源，再提交构建。");
+    }
     const gitRef = $("buildGitRef").value.trim();
     const body = gitRef ? { git_ref: gitRef } : {};
     const value = await request(`/api/v1/jenkins/build_create/${encodeURIComponent(appid)}`, { method: "POST", body });
@@ -568,6 +826,7 @@
 
   function renderServiceAccess(value) {
     const services = accessServices(value);
+    $("serviceAccessRegion").textContent = value?.region || "--";
     const body = $("serviceAccessTableBody");
     const table = $("serviceAccessTable");
     const empty = $("serviceAccessEmpty");
@@ -706,6 +965,7 @@
 
   async function loadResource(resource) {
     const appid = appidFromInput();
+    const version = state.appContextVersion;
     const labels = { events: "事件", images: "用户镜像", services: "Docker Services", access: "访问入口", alerts: "告警" };
     const resourcePath = {
       events: "app_events",
@@ -715,6 +975,7 @@
       alerts: "app_alerts",
     }[resource];
     const value = await request(`/api/v1/jenkins/${resourcePath}/${encodeURIComponent(appid)}`);
+    if (!sameAppContext(appid, version)) return null;
     $("resourceTitle").textContent = labels[resource] || resource;
     $("resourceTimestamp").textContent = new Date().toLocaleTimeString();
     pretty("resourceOutput", value);
@@ -975,6 +1236,9 @@
   }
 
   async function composeTemplate() {
+    ensureAppIdle();
+    const appid = state.appid;
+    const version = state.appContextVersion;
     const components = selectedTemplateComponents();
     if (!components.length) throw new Error("请至少选择一个模板组件");
     const dependencies = parsedJson($("templateDependencies")?.value || "{}", "依赖关系", false);
@@ -987,7 +1251,7 @@
       body: { components, dependencies },
     });
     if ($("templateOutput")) pretty("templateOutput", value);
-    if (format === "json" && $("compose")) {
+    if (format === "json" && $("compose") && !state.appOperation && sameAppContext(appid, version)) {
       const document = value?.json_data || value;
       $("compose").value = JSON.stringify(document, null, 2);
     }
@@ -1052,6 +1316,7 @@
       withFeedback(connect, null);
     });
     $("disconnectButton").addEventListener("click", () => {
+      if (state.appOperation) return;
       state.token = "";
       state.refreshToken = "";
       localStorage.removeItem(TOKEN_KEY);
@@ -1065,7 +1330,13 @@
       $("metricHealth").textContent = value.status || "ok";
       return value;
     }, null));
+    ["openAppContextModal", "openConnectionModal"].forEach((id) => {
+      $(id).addEventListener("click", (event) => {
+        if (state.appOperation) event.preventDefault();
+      });
+    });
     $("openAppContextModal").addEventListener("click", () => {
+      if (state.appOperation) return;
       if (state.token) withFeedback(() => loadAppChoices(), null);
     });
     $("refreshContextAppsButton").addEventListener("click", () => withFeedback(loadAppChoices, null));
@@ -1080,11 +1351,23 @@
       if (selector) selector.value = "";
       state.appid = event.target.value.trim();
       if (state.appid) localStorage.setItem(APP_KEY, state.appid);
-      if (state.appid !== previous) setCurrentApp("");
+      else localStorage.removeItem(APP_KEY);
+      if (state.appid !== previous) {
+        setCurrentApp("");
+        resetAppView();
+      }
     });
+    $("environment").addEventListener("input", () => { state.environmentDirty = true; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
     $("getAppButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
     $("patchAppButton").addEventListener("click", () => withFeedback(patchApp, "appOutput"));
+    $("syncAppButton").addEventListener("click", () => {
+      if (state.appOperation) return;
+      syncApp().catch((error) => {
+        const message = notifyError(error);
+        setActivity(message, "error");
+      });
+    });
     $("buildForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createBuild, "buildOutput"); });
     $("buildQueryForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(getBuild, "buildOutput"); });
     $("pollBuildButton").addEventListener("click", () => withFeedback(getBuild, "buildOutput"));

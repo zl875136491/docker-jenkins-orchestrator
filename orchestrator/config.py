@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     external_request_timeout_seconds: int = 30
     public_host: str | None = None
     public_scheme: Literal["http", "https"] = "http"
+    git_clone_timeout_seconds: int = Field(default=600, gt=0)
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")
 

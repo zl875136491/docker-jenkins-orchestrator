@@ -6,6 +6,12 @@ from main import create_app
 from main import app
 from orchestrator.config import Settings
 from orchestrator.models import DeploymentService, PublishedPort
+from orchestrator.gitlab import (
+    GitLabComposeDocument,
+    GitLabComposeInvalidError,
+    GitLabProject,
+    GitLabRepositoryRef,
+)
 
 
 client = TestClient(app)
@@ -61,6 +67,27 @@ def auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+class FakeGitLab:
+    def __init__(self, *, commit_sha: str = "a" * 40, compose: dict | None = None) -> None:
+        self.commit_sha = commit_sha
+        self.compose = compose or {"services": {"web": {"image": "example/web:1"}}}
+        self.refs: list[tuple[str, str]] = []
+        self.discovered: list[str] = []
+
+    def validate_repository_ref(self, repository_url: str, git_ref: str) -> GitLabRepositoryRef:
+        self.refs.append((repository_url, git_ref))
+        return GitLabRepositoryRef(
+            project=GitLabProject(project_id=23, path_with_namespace="group/demo"),
+            git_ref=git_ref,
+            commit_sha=self.commit_sha,
+            repository_url=repository_url,
+        )
+
+    def discover_compose(self, ref: GitLabRepositoryRef) -> GitLabComposeDocument:
+        self.discovered.append(ref.commit_sha)
+        return GitLabComposeDocument("compose.yaml", self.compose, ref.commit_sha)
+
+
 def test_app_build_lifecycle_smoke() -> None:
     headers = auth_headers()
     app_response = client.post(
@@ -85,6 +112,188 @@ def test_app_build_lifecycle_smoke() -> None:
     app_document = client.get("/api/v1/jenkins/app_info/demo-app", headers=headers).json()
     assert app_document["environment_keys"] == ["DATABASE_URL"]
     assert "mongodb://mongodb/demo" not in str(app_document)
+
+
+def test_create_app_discovers_compose_when_gitlab_is_configured() -> None:
+    headers = auth_headers()
+    applications = app.state.container.applications
+    previous_gitlab = applications.gitlab
+    fake_gitlab = FakeGitLab(commit_sha="b" * 40)
+    applications.gitlab = fake_gitlab
+    appid = f"discovery-{uuid4().hex}"
+    try:
+        response = client.post(
+            "/api/v1/jenkins/app_create",
+            headers=headers,
+            json={
+                "appid": appid,
+                "name": "Discovery",
+                "repository_url": "https://git.example/group/demo.git",
+                "git_ref": "release/1.2",
+            },
+        )
+        assert response.status_code == 201
+        payload = response.json()
+        assert payload["git_ref"] == "release/1.2"
+        assert payload["compose"] == fake_gitlab.compose
+        assert payload["compose_source_file"] == "compose.yaml"
+        assert payload["compose_source_commit"] == "b" * 40
+        assert fake_gitlab.refs == [("https://git.example/group/demo.git", "release/1.2")]
+        assert fake_gitlab.discovered == ["b" * 40]
+
+        explicit_compose = {"services": {"web": {"image": "example/explicit:1"}}}
+        explicit = client.post(
+            "/api/v1/jenkins/app_create",
+            headers=headers,
+            json={
+                "appid": f"{appid}-explicit",
+                "name": "Explicit Compose",
+                "repository_url": "https://git.example/group/demo.git",
+                "compose": explicit_compose,
+            },
+        )
+        assert explicit.status_code == 201
+        assert explicit.json()["compose"] == explicit_compose
+        assert explicit.json()["compose_source_file"] is None
+        assert fake_gitlab.refs == [("https://git.example/group/demo.git", "release/1.2")]
+    finally:
+        applications.gitlab = previous_gitlab
+
+
+def test_manual_repository_or_ref_update_invalidates_compose_source_metadata() -> None:
+    headers = auth_headers()
+    applications = app.state.container.applications
+    previous_gitlab = applications.gitlab
+    applications.gitlab = FakeGitLab(commit_sha="e" * 40)
+    appid = f"source-invalidation-{uuid4().hex}"
+    try:
+        created = client.post(
+            "/api/v1/jenkins/app_create",
+            headers=headers,
+            json={
+                "appid": appid,
+                "name": "Source invalidation",
+                "repository_url": "https://git.example/group/source-invalidation.git",
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["compose_source_commit"] == "e" * 40
+
+        updated = client.patch(
+            f"/api/v1/jenkins/app_info/{appid}",
+            headers=headers,
+            json={"git_ref": "release/next"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["git_ref"] == "release/next"
+        assert updated.json()["compose"] == applications.gitlab.compose
+        assert updated.json()["compose_source_file"] is None
+        assert updated.json()["compose_source_commit"] is None
+    finally:
+        applications.gitlab = previous_gitlab
+
+
+def test_app_sync_uses_saved_ref_updates_compose_and_reports_changes() -> None:
+    headers = auth_headers()
+    applications = app.state.container.applications
+    previous_gitlab = applications.gitlab
+    appid = f"sync-{uuid4().hex}"
+    original_compose = {"services": {"web": {"image": "example/web:old"}}}
+    create_response = client.post(
+        "/api/v1/jenkins/app_create",
+        headers=headers,
+        json={
+            "appid": appid,
+            "name": "Sync",
+            "repository_url": "https://git.example/group/sync.git",
+            "git_ref": "release/stable",
+            "compose": original_compose,
+        },
+    )
+    assert create_response.status_code == 201
+    fake_gitlab = FakeGitLab(commit_sha="c" * 40, compose={"services": {"web": {"image": "example/web:new"}}})
+    applications.gitlab = fake_gitlab
+    try:
+        response = client.post(f"/api/v1/jenkins/app_sync/{appid}", headers=headers)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["appid"] == appid
+        assert payload["git_ref"] == "release/stable"
+        assert payload["commit_id"] == "c" * 40
+        assert payload["previous_commit_id"] is None
+        assert payload["commit_changed"] is True
+        assert payload["compose_file"] == "compose.yaml"
+        assert payload["compose_changed"] is True
+        assert payload["compose"] == fake_gitlab.compose
+        assert fake_gitlab.refs == [("https://git.example/group/sync.git", "release/stable")]
+
+        stable = client.post(f"/api/v1/jenkins/app_sync/{appid}", headers=headers)
+        assert stable.status_code == 200
+        assert stable.json()["commit_changed"] is False
+        assert stable.json()["compose_changed"] is False
+    finally:
+        applications.gitlab = previous_gitlab
+
+
+def test_app_sync_requires_gitlab_and_existing_app() -> None:
+    headers = auth_headers()
+    applications = app.state.container.applications
+    previous_gitlab = applications.gitlab
+    applications.gitlab = None
+    try:
+        unavailable = client.post("/api/v1/jenkins/app_sync/missing", headers=headers)
+        assert unavailable.status_code == 404
+
+        appid = f"sync-unconfigured-{uuid4().hex}"
+        created = client.post(
+            "/api/v1/jenkins/app_create",
+            headers=headers,
+            json={"appid": appid, "name": "No GitLab", "repository_url": "https://git.example/demo.git"},
+        )
+        assert created.status_code == 201
+        response = client.post(f"/api/v1/jenkins/app_sync/{appid}", headers=headers)
+        assert response.status_code == 503
+        assert response.json()["detail"] == "GitLab integration is not configured"
+    finally:
+        applications.gitlab = previous_gitlab
+
+
+def test_app_sync_failure_does_not_modify_saved_compose_or_source_metadata() -> None:
+    headers = auth_headers()
+    applications = app.state.container.applications
+    previous_gitlab = applications.gitlab
+    appid = f"sync-failure-{uuid4().hex}"
+    original_compose = {"services": {"web": {"image": "example/web:stable"}}}
+    applications.gitlab = FakeGitLab(commit_sha="d" * 40, compose=original_compose)
+    created = client.post(
+        "/api/v1/jenkins/app_create",
+        headers=headers,
+        json={
+            "appid": appid,
+            "name": "Sync failure",
+            "repository_url": "https://git.example/group/sync-failure.git",
+        },
+    )
+    assert created.status_code == 201
+    before = client.get(f"/api/v1/jenkins/app_info/{appid}", headers=headers).json()
+    assert before["compose_source_file"] == "compose.yaml"
+    assert before["compose_source_commit"] == "d" * 40
+
+    class FailingGitLab(FakeGitLab):
+        def discover_compose(self, ref: GitLabRepositoryRef) -> GitLabComposeDocument:
+            raise GitLabComposeInvalidError("Docker Compose file contains invalid YAML")
+
+    applications.gitlab = FailingGitLab()
+    try:
+        response = client.post(f"/api/v1/jenkins/app_sync/{appid}", headers=headers)
+        assert response.status_code == 422
+        after = client.get(f"/api/v1/jenkins/app_info/{appid}", headers=headers).json()
+        assert after["compose"] == before["compose"]
+        assert after["compose_source_file"] == before["compose_source_file"]
+        assert after["compose_source_commit"] == before["compose_source_commit"]
+        assert after["updated_at"] == before["updated_at"]
+    finally:
+        applications.gitlab = previous_gitlab
 
 
 def test_app_list_requires_authentication_and_returns_existing_apps() -> None:

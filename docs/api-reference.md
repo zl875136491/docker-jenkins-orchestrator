@@ -38,6 +38,7 @@ Content-Type: application/json
 | 创建应用 | `POST /api/v1/jenkins/app_create` |
 | 应用列表 | `GET /api/v1/jenkins/app_list` |
 | 应用详情/更新 | `GET/PATCH /api/v1/jenkins/app_info/{app_id}` |
+| 同步 GitLab 仓库与 Compose | `POST /api/v1/jenkins/app_sync/{app_id}` |
 | 创建构建 | `POST /api/v1/jenkins/build_create/{app_id}` |
 | 构建历史 | `GET /api/v1/jenkins/build_list?app_id=<id>&page=1&page_size=20` |
 | 构建详情 | `GET /api/v1/jenkins/build_info/{build_id}` |
@@ -49,6 +50,41 @@ Content-Type: application/json
 | 基础镜像列表/同步 | `GET /api/v1/docker/base_image_list`、`POST /api/v1/docker/base_image_sync` |
 
 应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。多 worker 部署时，每个 worker 在启动环境中使用 `WORKER_REGION` 标识所在区域，`app_access` 响应会在最外层返回 `region`。
+
+### GitLab Compose 自动发现与仓库同步
+
+配置 `ORCHESTRATOR_GITLAB_URL` 和 `ORCHESTRATOR_GITLAB_TOKEN` 后，创建应用时若没有提交 `compose`，服务端会先校验请求中的 `git_ref`（省略时为 `main`）并解析出固定 commit SHA，然后用 Git 对仓库执行完整克隆（不使用浅克隆、部分克隆或 GitLab tree/raw API），检出该 SHA 后在本地工作树中搜索 Compose 文件。运行镜像已安装 Git 和 CA 证书；克隆超时由 `ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS` 控制，默认 `600` 秒。候选文件名按 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml` 的主流/兼容命名规则识别；仓库根目录按该顺序优先选择，根目录没有候选时才接受唯一的嵌套候选，嵌套目录存在多个候选时返回歧义错误。文件必须是有效 YAML 对象并包含非空 `services`。如果创建请求显式提供 `compose`，则保留显式值，不从仓库覆盖。
+
+扫描前会校验 Git 克隆不是 shallow/partial repository，并校验实际 checkout 的完整 SHA 与解析出的 commit 一致。Git 缺失、克隆失败、超时或检测到不完整克隆时返回 `502`，不会退回仓库树/文件 API，也不会把失败误报为“仓库没有 Compose”；同步失败不会改写已有 `app_info.compose` 或来源信息。凭据仅通过 Git 子进程配置传入，不写入克隆 URL 或日志，且认证的目标必须与已配置 GitLab 的 scheme/host/port 一致。
+
+同步使用应用当前保存的仓库 URL 和 `git_ref`，无需请求体或 query 参数：
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/jenkins/app_sync/<app_id>
+```
+
+路径中的 `app_id` 是唯一业务入参；成功返回 HTTP `200`，响应体是同步结果。此操作只更新仓库同步元数据和 Compose，不会自动触发构建。
+
+成功响应示例：
+
+```json
+{
+  "appid": "demo-app",
+  "git_ref": "main",
+  "commit_id": "0123456789abcdef0123456789abcdef01234567",
+  "previous_commit_id": "abcdef0123456789abcdef0123456789abcdef01",
+  "commit_changed": true,
+  "compose_file": "docker-compose.yml",
+  "compose_changed": true,
+  "compose": {"services": {"web": {"image": "example/web:1"}}},
+  "updated_at": "2026-10-09T08:00:00Z"
+}
+```
+
+同步会把发现的文档写入 `app_info.compose`，即后续构建使用的 Compose；`compose_changed` 比较新旧 Compose JSON，`commit_changed` 比较本次与此前记录的来源 commit。首次建立来源记录时 `previous_commit_id` 为 `null`，`commit_changed` 返回 `true`。同步成功后可通过 `GET /api/v1/jenkins/app_info/{app_id}` 查看最新 Compose 与来源元数据 `compose_source_file`、`compose_source_commit`。如果用户通过 `PATCH app_info` 修改 Compose、仓库地址或分支，来源元数据会清空，下一次同步仍会按 GitLab 结果更新。
+
+请在构建前检查仓库 Compose 是否依赖本机 `env_file`、bind mount、`build` context、固定宿主机资源或环境专属密钥；自动发现只负责识别和导入，不会猜测或改写项目专属部署参数。错误状态包括：`404` 应用不存在、`422` 分支或 Compose 文件缺失/歧义/格式错误、`502` GitLab 请求失败、`503` 未配置 GitLab。
 
 ### 技术栈记录
 

@@ -17,8 +17,16 @@ from pydantic import BaseModel, Field
 
 from orchestrator.config import Settings, get_settings
 from orchestrator.container import ApplicationContainer, create_container
+from orchestrator.gitlab import (
+    GitLabComposeAmbiguousError,
+    GitLabComposeInvalidError,
+    GitLabComposeNotFoundError,
+    GitLabError,
+    GitLabNotFoundError,
+)
 from orchestrator.models import (
     AppAccess,
+    AppSyncResult,
     BuildCreate,
     BuildHistoryPage,
     BuildJob,
@@ -33,7 +41,7 @@ from orchestrator.models import (
     UserAppUpdate,
 )
 from orchestrator.repository import DuplicateAppError, DuplicateTechStackError
-from orchestrator.services import BuildInputError, NotFoundError
+from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFoundError
 from orchestrator.templates import TemplateError
 
 bearer = HTTPBearer(auto_error=False)
@@ -206,6 +214,7 @@ def create_app(
             "roles": ["webui", "control_api", "mongodb", "redis_celery", "worker", "jenkins", "harbor", "docker_swarm"],
             "call_sequence": [
                 "POST /oauth2/token", "GET /api/v1/jenkins/app_list", "POST /api/v1/jenkins/app_create or PATCH /api/v1/jenkins/app_info/{app_id}",
+                "POST /api/v1/jenkins/app_sync/{app_id}",
                 "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
                 "GET /api/v1/jenkins/app_events/{app_id}", "GET /api/v1/jenkins/app_images/{app_id}",
                 "GET /api/v1/jenkins/app_services/{app_id}", "GET /api/v1/jenkins/app_access/{app_id}", "GET /api/v1/jenkins/app_alerts/{app_id}",
@@ -214,7 +223,8 @@ def create_app(
             "build_statuses": [status.value for status in BuildStatus],
             "compose_rules": {
                 "required_before_build": True,
-                "git_auto_discovery": False,
+                "git_auto_discovery": container.applications.gitlab is not None,
+                "git_auto_discovery_scope": "app_create_when_compose_is_omitted",
                 "external_access_requires_ports": True,
                 "expose_is_external": False,
                 "published_ports_reassigned_on_conflict": True,
@@ -265,6 +275,12 @@ def create_app(
             return container.applications.create_app(request)
         except DuplicateAppError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="appid already exists") from exc
+        except (GitLabComposeNotFoundError, GitLabComposeAmbiguousError, GitLabComposeInvalidError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except GitLabNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except GitLabError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     @api.get("/api/v1/jenkins/app_list", response_model=list[UserApp])
     def list_user_apps(_: dict = Depends(require_token)) -> list[UserApp]:
@@ -283,6 +299,33 @@ def create_app(
             return container.applications.update_app(app_id, request)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
+
+    @api.post("/api/v1/jenkins/app_sync/{app_id}", response_model=AppSyncResult)
+    def sync_user_app(app_id: str, _: dict = Depends(require_token)) -> AppSyncResult:
+        """Synchronize the saved Git ref and update the app's Compose document."""
+        try:
+            updated, resolved, discovered, compose_changed, previous_commit_id = container.applications.sync_app(app_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
+        except GitLabUnavailableError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        except (GitLabComposeNotFoundError, GitLabComposeAmbiguousError, GitLabComposeInvalidError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except GitLabNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except GitLabError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        return AppSyncResult(
+            appid=updated.appid,
+            git_ref=updated.git_ref,
+            commit_id=resolved.commit_sha,
+            compose_file=discovered.path,
+            compose_changed=compose_changed,
+            commit_changed=previous_commit_id != resolved.commit_sha,
+            previous_commit_id=previous_commit_id,
+            compose=updated.compose or {},
+            updated_at=updated.updated_at,
+        )
 
     @api.post("/api/v1/jenkins/build_create/{app_id}", response_model=BuildJob, status_code=status.HTTP_202_ACCEPTED)
     def create_build(app_id: str, request: BuildCreate, _: dict = Depends(require_token)) -> BuildJob:

@@ -116,6 +116,8 @@ class UserAppRecord(DomainModel):
     environment_ciphertext: str
     environment_keys: list[str] = Field(default_factory=list)
     compose: dict[str, Any] | None = None
+    compose_source_file: str | None = None
+    compose_source_commit: str | None = None
     components: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -128,6 +130,8 @@ class UserApp(DomainModel):
     git_ref: str
     environment_keys: list[str] = Field(default_factory=list)
     compose: dict[str, Any] | None = None
+    compose_source_file: str | None = None
+    compose_source_commit: str | None = None
     components: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -135,6 +139,20 @@ class UserApp(DomainModel):
     @classmethod
     def from_record(cls, record: UserAppRecord) -> "UserApp":
         return cls(**record.model_dump(exclude={"environment_ciphertext"}))
+
+
+class AppSyncResult(DomainModel):
+    """Outcome of synchronizing the saved Git ref into its Compose document."""
+
+    appid: str
+    git_ref: str
+    commit_id: str
+    compose_file: str
+    compose_changed: bool
+    commit_changed: bool
+    previous_commit_id: str | None = None
+    compose: dict[str, Any]
+    updated_at: datetime
 
 
 class BuildCreate(DomainModel):

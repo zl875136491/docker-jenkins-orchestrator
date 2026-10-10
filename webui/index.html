@@ -155,18 +155,44 @@
               </label>
               <label class="span-2">
                 环境变量 JSON
-                <textarea id="environment" name="environment" rows="5" spellcheck="false">{}</textarea>
+                <textarea id="environment" name="environment" rows="5" spellcheck="false" aria-describedby="environmentHelp">{}</textarea>
+                <span id="environmentHelp" class="field-help">创建时使用此 JSON；读取应用只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。</span>
               </label>
               <label class="span-2">
                 Docker Compose JSON
-                <textarea id="compose" name="compose" rows="10" spellcheck="false" placeholder='{"services":{"api":{"image":"example/api:latest"}}}'></textarea>
+                <textarea id="compose" name="compose" rows="10" spellcheck="false" aria-describedby="composeHelp" placeholder='创建时留空可从 GitLab 仓库自动发现，或填写 {"services":{"api":{"image":"example/api:latest"}}}'></textarea>
+                <span id="composeHelp" class="field-help">创建时留空将省略 compose，完整克隆 GitLab 仓库到控制端后本地发现标准文件：compose.yaml、compose.yml、docker-compose.yml、docker-compose.yaml（根目录按此顺序优先；没有根目录文件时仅接受唯一的嵌套候选）。缺失、多候选或无效 Compose 会明确报错。填写 JSON（包括 {}）则按手动配置提交；更新时留空会保留已保存的 Compose。</span>
               </label>
               <div class="form-actions span-2">
                 <button class="button button-primary" type="submit">创建应用</button>
                 <button id="getAppButton" class="button button-secondary" type="button">读取应用</button>
                 <button id="patchAppButton" class="button button-quiet" type="button">更新应用</button>
+                <button id="syncAppButton" class="button button-secondary" type="button" aria-describedby="syncStatus">同步仓库 Compose</button>
               </div>
             </form>
+            <p id="syncStatus" class="operation-status muted small" role="status" aria-live="polite">同步使用已保存的仓库和 Git 引用，覆盖已保存的 Compose；不会自动构建。</p>
+            <section id="composeSourcePanel" class="compose-source-panel" aria-labelledby="composeSourceTitle">
+              <h3 id="composeSourceTitle">已保存的 Compose 来源</h3>
+              <p id="composeSourceStatus" class="muted small">尚未读取当前应用，来源未确认。</p>
+              <dl class="metadata-grid">
+                <div><dt>保存的 Git 引用</dt><dd id="composeSourceRef">--</dd></div>
+                <div><dt>来源文件</dt><dd id="composeSourceFile">--</dd></div>
+                <div class="metadata-wide"><dt>完整 Commit</dt><dd id="composeSourceCommit" class="commit-value">--</dd></div>
+              </dl>
+            </section>
+            <section id="syncResultPanel" class="sync-result-panel" aria-labelledby="syncResultTitle" hidden>
+              <h3 id="syncResultTitle">最近一次仓库同步</h3>
+              <dl class="metadata-grid">
+                <div><dt>Compose 内容</dt><dd id="syncComposeChanged">--</dd></div>
+                <div><dt>Commit</dt><dd id="syncCommitChanged">--</dd></div>
+                <div><dt>保存的 Git 引用</dt><dd id="syncGitRef">--</dd></div>
+                <div><dt>发现的文件</dt><dd id="syncComposeFile">--</dd></div>
+                <div class="metadata-wide"><dt>当前完整 Commit</dt><dd id="syncCommitId" class="commit-value">--</dd></div>
+                <div class="metadata-wide"><dt>之前的完整 Commit</dt><dd id="syncPreviousCommitId" class="commit-value">--</dd></div>
+                <div class="metadata-wide"><dt>应用更新时间</dt><dd id="syncUpdatedAt">--</dd></div>
+              </dl>
+              <pre id="appSyncOutput" class="json-output" aria-label="同步接口完整响应">等待同步操作</pre>
+            </section>
             <pre id="appOutput" class="json-output" aria-live="polite">等待应用操作</pre>
           </section>
 
@@ -194,6 +220,7 @@
                 <button class="button button-secondary" type="submit">查询构建</button>
               </form>
             </div>
+            <p class="muted small">仓库同步只更新应用配置，不会自动触发构建。确认配置后在此显式提交构建；构建记录会显示实际使用的 git_commit_sha。</p>
             <div class="build-summary">
               <div>
                 <span class="metric-label">状态</span>
@@ -206,6 +233,10 @@
               <div>
                 <span class="metric-label">Celery task</span>
                 <strong id="celeryTask">--</strong>
+              </div>
+              <div class="build-commit">
+                <span class="metric-label">Git commit SHA</span>
+                <strong id="buildCommit" class="commit-value">--</strong>
               </div>
               <button id="pollBuildButton" class="button button-quiet" type="button">再次查询</button>
             </div>
@@ -338,6 +369,7 @@
                 <div>
                   <h3 id="serviceAccessTitle">服务访问入口</h3>
                   <p id="serviceAccessSummary" class="muted small">查询后显示已发布端口和可访问 URL。</p>
+                  <p class="muted small">工作节点区域：<strong id="serviceAccessRegion">--</strong></p>
                 </div>
                 <button id="refreshAccessButton" class="button button-quiet" type="button">刷新入口</button>
               </div>

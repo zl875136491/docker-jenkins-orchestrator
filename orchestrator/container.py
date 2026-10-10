@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.config import Settings
+from orchestrator.gitlab import GitLabHttpAdapter
 from orchestrator.repository import InMemoryRepository, MongoRepository, Repository
 from orchestrator.secrets import SecretBox
 from orchestrator.services import ApplicationService, BuildService, TechStackService
@@ -49,6 +50,8 @@ def create_container(
     if catalog is None:
         catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
     applications = ApplicationService(repository, secret_box)
+    if settings.gitlab_url and settings.gitlab_token:
+        applications.gitlab = GitLabHttpAdapter.from_settings(settings)
     tech_stacks = TechStackService(repository, catalog)
     return ApplicationContainer(
         settings=settings,
