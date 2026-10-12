@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from orchestrator.adapters import AdapterError
 from orchestrator.gitlab import HttpResponse, HttpTransport, UrllibHttpTransport
+from orchestrator.naming import NamingError, registry_from_image_repository, validate_image_repository
 
 
 class JenkinsError(AdapterError):
@@ -54,6 +55,10 @@ class JenkinsBuildRequest:
     def __post_init__(self) -> None:
         for name in ("appid", "repository_url", "git_ref", "image_repository"):
             _require_nonempty(getattr(self, name), name)
+        try:
+            validate_image_repository(self.image_repository)
+        except NamingError as exc:
+            raise ValueError(str(exc)) from exc
         if not isinstance(self.environment, Mapping) or not all(
             isinstance(key, str) and isinstance(value, str) for key, value in self.environment.items()
         ):
@@ -87,6 +92,7 @@ class JenkinsBuildRequest:
             "ENVIRONMENT_JSON": environment,
             "COMPOSE_JSON": compose,
             "IMAGE_REPOSITORY": self.image_repository,
+            "HARBOR_REGISTRY": registry_from_image_repository(self.image_repository),
         }
 
 

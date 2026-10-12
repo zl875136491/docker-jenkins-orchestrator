@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
+from orchestrator.naming import managed_volume_name
 
 
 _SERVER_IMAGE = "ghcr.io/immich-app/immich-server:release@sha256:" + "a" * 64
@@ -217,7 +218,7 @@ def test_immich_delivery_maps_digest_images_bind_volumes_port_and_runtime_fields
 
     machine_learning_image, machine_learning_kwargs = created["immich-machine-learning"]
     assert machine_learning_image == _ML_IMAGE
-    assert machine_learning_kwargs["mounts"] == ["model-cache:/cache"]
+    assert machine_learning_kwargs["mounts"] == [f"{managed_volume_name('immich', 'model-cache')}:/cache"]
     assert machine_learning_kwargs["restart_policy"] == {"Condition": "any"}
     assert machine_learning_kwargs["healthcheck"] == {
         "Test": ["CMD", "curl", "-f", "http://localhost:3003/"],

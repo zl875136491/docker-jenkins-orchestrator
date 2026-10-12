@@ -12,6 +12,7 @@ from typing import Any, Callable, Literal
 
 from orchestrator.adapters import AdapterError
 from orchestrator.models import DeploymentService, PublishedPort as PublishedPortModel
+from orchestrator.naming import NamingError, bounded_resource_name, external_namespace, managed_volume_name
 
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -72,6 +73,9 @@ _SUPPORTED_DEPLOY_FIELDS = {"mode", "replicas", "restart_policy"}
 _DEPENDENCY_CONDITIONS = {"service_started", "service_healthy"}
 _SUPPORTED_TOP_LEVEL_FIELDS = {"version", "name", "services", "volumes"}
 _MAX_DOCKER_NAME_LENGTH = 63
+_APPID_LABEL = "io.docker-jenkins-orchestrator.appid"
+_NAMESPACE_LABEL = "io.docker-jenkins-orchestrator.namespace"
+_COMPOSE_SERVICE_LABEL = "io.docker-jenkins-orchestrator.compose-service"
 
 
 class DockerServiceError(AdapterError):
@@ -218,35 +222,44 @@ class DockerSwarmAdapter:
         # used to be checked while the deployment loop was already under way.
         self.validate_compose(compose)
         services = self._compose_services(compose)
-        volume_sources = self._volume_sources(compose)
+        self._validate_unique_deployment_service_names(appid, namespace, services)
+        volume_sources = self._volume_sources(compose, namespace)
+        shared_volume_aliases = self._shared_volume_aliases(compose)
         client = self._client()
-        reserved_ports = self._occupied_published_ports(client, set(self._service_name(namespace, name) for name in services))
-        network_name, network_target, network_created = self._ensure_network(client, namespace)
+        reserved_ports = self._occupied_published_ports(
+            client,
+            {self._deployment_service_name(appid, namespace, name, definition) for name, definition in services.items()},
+        )
+        network_name, network_target, network_created = self._ensure_network(client, appid, namespace)
 
         deployments: list[ServiceDeployment] = []
-        created_service_names: list[str] = []
+        created_services: list[ServiceDeployment] = []
         try:
             for compose_name in self._deployment_order(services):
                 definition = services[compose_name]
                 deployment = self._deploy_one(
                     client,
+                    appid,
                     namespace,
                     compose_name,
                     definition,
                     network_target,
                     volume_sources,
                     reserved_ports,
+                    shared_volume_aliases,
                 )
                 if deployment.action == "created":
-                    created_service_names.append(deployment.service_name)
+                    created_services.append(deployment)
                 self._wait_for_service_ready(client, deployment.service_name)
                 deployments.append(deployment)
-            self._cleanup_stale_services(client, namespace, {item.service_name for item in deployments})
+            self._cleanup_stale_services(client, appid, namespace, {item.service_name for item in deployments})
         except Exception:
             # A failed rollout must leave the previous service set intact.  In
             # particular, updated services belong to the previous revision and
             # must not be removed as part of this deployment's rollback.
-            self._rollback_deployment(client, network_name, network_created, created_service_names)
+            self._rollback_deployment(
+                client, appid, namespace, network_name, network_target, network_created, created_services
+            )
             raise
         return SwarmDeployment(appid=appid, network_name=network_name, services=tuple(deployments))
 
@@ -263,11 +276,26 @@ class DockerSwarmAdapter:
         self._validate_compose_features({service_name: service})
         self._validate_service_name(service_name)
         self._validate_service_image(service_name, service)
+        compose = {"services": {service_name: service}}
+        volume_sources = self._volume_sources(compose, namespace)
         client = self._client()
-        _, network_target, _ = self._ensure_network(client, namespace)
-        reserved_ports = self._occupied_published_ports(client, {self._service_name(namespace, service_name)})
-        deployment = self._deploy_one(client, namespace, service_name, service, network_target, {}, reserved_ports)
-        self._wait_for_service_ready(client, deployment.service_name)
+        reserved_ports = self._occupied_published_ports(
+            client, {self._deployment_service_name(appid, namespace, service_name, service)}
+        )
+        network_name, network_target, network_created = self._ensure_network(client, appid, namespace)
+        created_services: list[ServiceDeployment] = []
+        try:
+            deployment = self._deploy_one(
+                client, appid, namespace, service_name, service, network_target, volume_sources, reserved_ports, set()
+            )
+            if deployment.action == "created":
+                created_services.append(deployment)
+            self._wait_for_service_ready(client, deployment.service_name)
+        except Exception:
+            self._rollback_deployment(
+                client, appid, namespace, network_name, network_target, network_created, created_services
+            )
+            raise
         return deployment
 
     def _wait_for_service_ready(self, client: Any, service_name: str) -> None:
@@ -391,8 +419,8 @@ class DockerSwarmAdapter:
             return docker.DockerClient(base_url=base_url)
         return docker.from_env()
 
-    def _ensure_network(self, client: Any, appid: str) -> tuple[str, str, bool]:
-        name = self._network_name(appid)
+    def _ensure_network(self, client: Any, appid: str, namespace: str) -> tuple[str, str, bool]:
+        name = self._network_name(namespace)
         created = False
         try:
             network = client.networks.get(name)
@@ -406,22 +434,27 @@ class DockerSwarmAdapter:
                     name,
                     driver="overlay",
                     attachable=True,
-                    labels={"io.docker-jenkins-orchestrator.appid": appid},
+                    labels={_APPID_LABEL: appid, _NAMESPACE_LABEL: namespace},
                 )
                 created = True
             except Exception as create_exc:
                 raise DockerServiceError(
                     f"Unable to create Docker network {name}: {self._safe_error_detail(create_exc)}"
                 ) from create_exc
+        if not created:
+            self._assert_resource_owner(network, appid, namespace, kind="network", name=name)
         identifier = self._object_id(network) or name
         return name, identifier, created
 
     def _rollback_deployment(
         self,
         client: Any,
+        appid: str,
+        namespace: str,
         network_name: str,
+        network_id: str,
         network_created: bool,
-        created_service_names: Sequence[str],
+        created_services: Sequence[ServiceDeployment],
     ) -> None:
         """Remove only resources created by the failed deployment attempt."""
 
@@ -429,14 +462,26 @@ class DockerSwarmAdapter:
         get_service = getattr(services_api, "get", None)
         all_created_removed = True
         if not callable(get_service):
-            all_created_removed = not created_service_names
+            all_created_removed = not created_services
         else:
-            for service_name in reversed(created_service_names):
+            for deployment in reversed(created_services):
                 try:
-                    service = get_service(service_name)
+                    # Docker object IDs, unlike names, cannot be reassigned to
+                    # a replacement resource between rollout and rollback.
+                    service = get_service(deployment.service_id)
                 except Exception as exc:
                     if self._is_not_found(exc):
                         continue
+                    all_created_removed = False
+                    continue
+                if self._object_id(service) != deployment.service_id:
+                    all_created_removed = False
+                    continue
+                try:
+                    self._assert_resource_owner(
+                        service, appid, namespace, kind="service", name=deployment.service_name
+                    )
+                except DockerServiceError:
                     all_created_removed = False
                     continue
                 remove = getattr(service, "remove", None)
@@ -450,7 +495,7 @@ class DockerSwarmAdapter:
 
         if not network_created or not all_created_removed:
             return
-        if self._network_has_other_services(client, network_name, set(created_service_names)):
+        if self._network_has_other_services(client, network_name, {item.service_id for item in created_services}):
             return
 
         networks_api = getattr(client, "networks", None)
@@ -458,7 +503,10 @@ class DockerSwarmAdapter:
         if not callable(get_network):
             return
         try:
-            network = get_network(network_name)
+            network = get_network(network_id)
+            if self._object_id(network) != network_id:
+                return
+            self._assert_resource_owner(network, appid, namespace, kind="network", name=network_name)
             remove = getattr(network, "remove", None)
             if callable(remove):
                 remove()
@@ -471,7 +519,7 @@ class DockerSwarmAdapter:
         self,
         client: Any,
         network_name: str,
-        removed_service_names: set[str],
+        removed_service_ids: set[str],
     ) -> bool:
         """Return whether a service other than this rollout still uses a network."""
 
@@ -490,7 +538,7 @@ class DockerSwarmAdapter:
             if not isinstance(existing_services, Sequence) or isinstance(existing_services, (str, bytes)):
                 return True
             return any(
-                (name := self._service_name_from_object(service)) not in removed_service_names
+                self._object_id(service) not in removed_service_ids
                 for service in existing_services
             )
 
@@ -516,7 +564,9 @@ class DockerSwarmAdapter:
                 return True
         return False
 
-    def _cleanup_stale_services(self, client: Any, appid: str, desired_names: set[str]) -> None:
+    def _cleanup_stale_services(
+        self, client: Any, appid: str, namespace: str, desired_names: set[str]
+    ) -> None:
         """Remove services from an earlier Compose revision that disappeared.
 
         Reconciliation happens only after all desired services have been
@@ -533,22 +583,41 @@ class DockerSwarmAdapter:
             return
         try:
             existing_services = list_services(
-                filters={"label": f"io.docker-jenkins-orchestrator.appid={appid}"}
+                filters={"label": f"{_APPID_LABEL}={appid}"}
             )
         except Exception as exc:
             raise DockerServiceError(
                 f"Unable to list Docker services for app {appid}: {self._safe_error_detail(exc)}"
             ) from exc
+        stale_services: list[tuple[Any, str]] = []
         for service in existing_services:
             name = self._service_name_from_object(service)
             if not name or name in desired_names:
                 continue
+            # A pre-upgrade uppercase app may have been deployed under a
+            # lowercase label. Never infer its owner from that legacy name.
+            self._assert_resource_owner(service, appid, namespace, kind="service", name=name)
+            stale_services.append((service, name))
+        # Validate every candidate before removing any previous-revision
+        # service, and refresh by immutable ID immediately before removal.
+        get_service = getattr(services_api, "get", None)
+        for service, name in stale_services:
             try:
+                identifier = self._object_id(service)
+                if not identifier:
+                    raise DockerServiceError(f"Docker service {name} has no immutable ID; refusing stale cleanup")
+                if callable(get_service):
+                    service = get_service(identifier)
+                    if self._object_id(service) != identifier:
+                        raise DockerServiceError(f"Docker service {name} identity changed; refusing stale cleanup")
+                    self._assert_resource_owner(service, appid, namespace, kind="service", name=name)
                 remove = getattr(service, "remove", None)
                 if not callable(remove):
                     raise RuntimeError("service remove operation is unavailable")
                 remove()
             except Exception as exc:
+                if self._is_not_found(exc):
+                    continue
                 raise DockerServiceError(
                     f"Unable to remove stale Docker service {name}: {self._safe_error_detail(exc)}"
                 ) from exc
@@ -574,23 +643,99 @@ class DockerSwarmAdapter:
         return None
 
     @classmethod
-    def _volume_sources(cls, compose: Mapping[str, Any]) -> dict[str, str]:
+    def _validate_unique_deployment_service_names(
+        cls, appid: str, namespace: str, services: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Reject distinct Compose services that resolve to one Swarm name."""
+
+        compose_names_by_docker_name: dict[str, str] = {}
+        for compose_name, definition in services.items():
+            docker_name = cls._deployment_service_name(appid, namespace, compose_name, definition)
+            previous_compose_name = compose_names_by_docker_name.get(docker_name)
+            if previous_compose_name is not None:
+                raise DockerServiceError(
+                    f"Compose services {previous_compose_name} and {compose_name} map to the same "
+                    f"Docker service name {docker_name}"
+                )
+            compose_names_by_docker_name[docker_name] = compose_name
+
+    @classmethod
+    def _volume_sources(cls, compose: Mapping[str, Any], namespace: str) -> dict[str, str]:
+        """Scope ordinary named volumes, retaining explicit shared names.
+
+        ``external`` and ``name`` are deliberate Compose sharing boundaries.
+        Default physical names encode the complete namespace/alias pair so
+        hyphenated app IDs and aliases cannot accidentally share a volume.
+        App-bound templates declare final physical names explicitly; generic
+        template aliases are isolated here just like any other implicit alias.
+        """
+
         raw_volumes = compose.get("volumes")
-        if not isinstance(raw_volumes, Mapping):
-            return {}
         sources: dict[str, str] = {}
-        for alias, definition in raw_volumes.items():
+        implicit_aliases: dict[str, str] = {}
+        for alias, definition in raw_volumes.items() if isinstance(raw_volumes, Mapping) else ():
             if not isinstance(alias, str) or not alias:
                 continue
-            if not isinstance(definition, Mapping):
-                sources[alias] = alias
-                continue
-            configured_name = definition.get("name")
+            config = definition if isinstance(definition, Mapping) else {}
+            configured_name = config.get("name")
             if isinstance(configured_name, str) and configured_name.strip():
                 sources[alias] = configured_name.strip()
-            else:
+            elif config.get("external") is True:
                 sources[alias] = alias
+            else:
+                sources[alias] = cls._managed_volume_name(namespace, alias)
+                implicit_aliases[alias] = sources[alias]
+
+        # The adapter has historically accepted named mounts without a
+        # top-level declaration (including deploy_one). They still require
+        # isolation; absolute bind paths retain their explicit semantics.
+        services = cls._compose_services(compose)
+        for definition in services.values():
+            raw_mounts = definition.get("volumes")
+            if not isinstance(raw_mounts, Sequence) or isinstance(raw_mounts, (str, bytes)):
+                continue
+            for mount in raw_mounts:
+                source: Any = None
+                if isinstance(mount, str):
+                    parts = mount.split(":")
+                    if len(parts) in {2, 3} and not parts[0].startswith(("/", ".", "~")):
+                        source = parts[0]
+                elif isinstance(mount, Mapping) and mount.get("type", "volume") == "volume":
+                    source = mount.get("source")
+                if isinstance(source, str) and source and source not in sources:
+                    sources[source] = cls._managed_volume_name(namespace, source)
+                    implicit_aliases[source] = sources[source]
+
+        implicit_aliases_by_physical_name: dict[str, str] = {}
+        for alias, physical_name in implicit_aliases.items():
+            previous_alias = implicit_aliases_by_physical_name.get(physical_name)
+            if previous_alias is not None and previous_alias != alias:
+                raise DockerServiceError(
+                    f"Compose volumes {previous_alias} and {alias} map to the same managed Docker volume "
+                    f"name {physical_name}"
+                )
+            implicit_aliases_by_physical_name[physical_name] = alias
         return sources
+
+    @staticmethod
+    def _managed_volume_name(namespace: str, alias: str) -> str:
+        try:
+            return managed_volume_name(namespace, alias)
+        except NamingError as exc:
+            raise DockerServiceError("Compose named volume is invalid for managed Docker volume naming") from exc
+
+    @staticmethod
+    def _shared_volume_aliases(compose: Mapping[str, Any]) -> set[str]:
+        volumes = compose.get("volumes")
+        if not isinstance(volumes, Mapping):
+            return set()
+        return {
+            alias
+            for alias, definition in volumes.items()
+            if isinstance(alias, str)
+            and isinstance(definition, Mapping)
+            and (definition.get("external") is True or "name" in definition)
+        }
 
     @classmethod
     def _deployment_order(cls, services: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -636,11 +781,13 @@ class DockerSwarmAdapter:
         self,
         client: Any,
         appid: str,
+        namespace: str,
         compose_name: str,
         definition: Mapping[str, Any],
         network_target: str,
         volume_sources: Mapping[str, str],
         reserved_ports: set[tuple[int, str, str]],
+        shared_volume_aliases: set[str],
     ) -> ServiceDeployment:
         if not isinstance(compose_name, str) or not _NAME_PATTERN.fullmatch(compose_name):
             raise DockerServiceError("Compose service name is invalid")
@@ -650,7 +797,7 @@ class DockerSwarmAdapter:
         if not isinstance(image, str) or not image.strip():
             raise DockerServiceError("Compose service must define an image")
 
-        name = self._service_name(appid, compose_name)
+        name = self._deployment_service_name(appid, namespace, compose_name, definition)
         ports = self._allocate_ports(
             self._ports(definition.get("ports")),
             reserved_ports,
@@ -661,7 +808,7 @@ class DockerSwarmAdapter:
             for port in ports
             if port.published_port is not None
         )
-        kwargs = self._service_kwargs(appid, compose_name, definition, network_target, ports, volume_sources)
+        kwargs = self._service_kwargs(appid, namespace, compose_name, definition, network_target, ports, volume_sources)
 
         try:
             existing = client.services.get(name)
@@ -671,6 +818,15 @@ class DockerSwarmAdapter:
                     f"Unable to inspect Docker service {name}: {self._safe_error_detail(exc)}"
                 ) from exc
             existing = None
+
+        if existing is not None:
+            self._assert_resource_owner(existing, appid, namespace, kind="service", name=name)
+            # Template-generated volume ``name`` values carry final physical
+            # names, but do not authorize silently rebinding historical data.
+            template_component = self._template_component(appid, namespace, compose_name, definition)
+            self._assert_volume_rebinding_safe(
+                existing, definition, volume_sources, set() if template_component else shared_volume_aliases, name
+            )
 
         try:
             if existing is None:
@@ -700,13 +856,14 @@ class DockerSwarmAdapter:
     def _service_kwargs(
         self,
         appid: str,
+        namespace: str,
         compose_name: str,
         definition: Mapping[str, Any],
         network_target: str,
         ports: list[PublishedPort],
         volume_sources: Mapping[str, str],
     ) -> dict[str, Any]:
-        labels = self._labels(appid, compose_name, definition.get("labels"))
+        labels = self._labels(appid, compose_name, definition.get("labels"), namespace=namespace)
         kwargs: dict[str, Any] = {
             "env": self._environment(definition.get("environment")),
             "labels": labels,
@@ -1048,48 +1205,190 @@ class DockerSwarmAdapter:
 
     @staticmethod
     def _namespace(appid: str) -> str:
-        if not isinstance(appid, str) or not _NAME_PATTERN.fullmatch(appid):
-            raise DockerServiceError("Application ID is invalid for Docker service deployment")
-        return appid.lower()
+        try:
+            return external_namespace(appid)
+        except (TypeError, ValueError) as exc:
+            raise DockerServiceError("Application ID is invalid for Docker service deployment") from exc
 
-    def _network_name(self, appid: str) -> str:
-        raw = f"{self.network_name}-{appid}"
+    def _network_name(self, namespace: str) -> str:
+        raw = f"{self.network_name}-{namespace}"
         if len(raw) <= _MAX_DOCKER_NAME_LENGTH:
             return raw
-        digest = sha256(appid.encode("utf-8")).hexdigest()[:10]
+        if namespace.startswith("appid-v1-"):
+            return bounded_resource_name(raw, max_length=_MAX_DOCKER_NAME_LENGTH)
+        # Keep the historical long canonical name shape (base + namespace
+        # prefix + hash) while ensuring the complete hash remains present.
+        digest = sha256(namespace.encode("utf-8")).hexdigest()[:10]
         prefix_budget = _MAX_DOCKER_NAME_LENGTH - len(self.network_name) - len(digest) - 2
-        prefix = appid[: max(1, prefix_budget)]
-        return f"{self.network_name}-{prefix}-{digest}"[:_MAX_DOCKER_NAME_LENGTH]
+        if prefix_budget > 0:
+            return f"{self.network_name}-{namespace[:prefix_budget]}-{digest}"
+        return bounded_resource_name(raw, max_length=_MAX_DOCKER_NAME_LENGTH)
 
     @staticmethod
-    def _service_name(appid: str, compose_name: str) -> str:
-        prefix = f"{appid}-"
+    def _service_name(namespace: str, compose_name: str) -> str:
+        prefix = f"{namespace}-"
         raw = compose_name if compose_name.lower().startswith(prefix.lower()) else f"{prefix}{compose_name}"
         if len(raw) <= _MAX_DOCKER_NAME_LENGTH:
             return raw
-        digest = sha256(f"{appid}:{compose_name}".encode("utf-8")).hexdigest()[:10]
+        if namespace.startswith("appid-v1-"):
+            return bounded_resource_name(raw, max_length=_MAX_DOCKER_NAME_LENGTH)
+        # Preserve the previous service shortening contract for existing
+        # canonical apps; unlike the old final slice this keeps the digest
+        # complete even when the compose name is unusually long.
+        digest = sha256(f"{namespace}:{compose_name}".encode("utf-8")).hexdigest()[:10]
         suffix = f"-{digest}-{compose_name}"
         prefix_budget = _MAX_DOCKER_NAME_LENGTH - len(suffix)
         if prefix_budget > 0:
-            return f"{appid[:prefix_budget]}{suffix}"
+            return f"{namespace[:prefix_budget]}{suffix}"
         compose_budget = max(1, _MAX_DOCKER_NAME_LENGTH - len(digest) - 2)
         return f"{digest}-{compose_name[:compose_budget]}"[:_MAX_DOCKER_NAME_LENGTH]
 
+    @classmethod
+    def _deployment_service_name(
+        cls, appid: str, namespace: str, compose_name: str, definition: Mapping[str, Any]
+    ) -> str:
+        component = cls._template_component(appid, namespace, compose_name, definition)
+        if component is None:
+            return cls._service_name(namespace, compose_name)
+        if namespace.startswith("appid-v1-"):
+            # Recomputed from the full namespace, not guessed from a truncated
+            # string prefix. Encoded names have no pre-upgrade resources.
+            return compose_name
+        # Canonical template names may now be bounded in the artifact. Rebuild
+        # their previous raw Compose key so existing long Swarm names survive.
+        return cls._service_name(namespace, f"{namespace}-{component}")
+
     @staticmethod
-    def _labels(appid: str, compose_name: str, raw: Any) -> dict[str, str]:
-        labels = {
-            "io.docker-jenkins-orchestrator.appid": appid,
-            "io.docker-jenkins-orchestrator.compose-service": compose_name,
-        }
-        if raw is None:
-            return labels
-        if not isinstance(raw, Mapping):
+    def _template_component(
+        appid: str, namespace: str, compose_name: str, definition: Mapping[str, Any]
+    ) -> str | None:
+        labels = definition.get("labels")
+        if not isinstance(labels, Mapping):
+            return None
+        component = labels.get("io.docker-jenkins-orchestrator.component")
+        if (
+            labels.get(_APPID_LABEL) != appid
+            or labels.get(_NAMESPACE_LABEL) != namespace
+            or not isinstance(component, str)
+            or _NAME_PATTERN.fullmatch(component) is None
+        ):
+            return None
+        expected = bounded_resource_name(namespace, component)
+        return component if compose_name == expected else None
+
+    @classmethod
+    def _labels(
+        cls, appid: str, compose_name: str, raw: Any, *, namespace: str | None = None
+    ) -> dict[str, str]:
+        if raw is not None and not isinstance(raw, Mapping):
             raise DockerServiceError("Compose labels must be a mapping")
-        for key, value in raw.items():
+        labels: dict[str, str] = {}
+        for key, value in raw.items() if isinstance(raw, Mapping) else ():
             if not isinstance(key, str) or not key or value is None:
                 raise DockerServiceError("Compose labels are invalid")
             labels[key] = str(value).lower() if isinstance(value, bool) else str(value)
+        # Managed ownership and service-discovery labels always take
+        # precedence over user-supplied labels, including rendered templates.
+        labels.update(
+            {
+                _APPID_LABEL: appid,
+                _NAMESPACE_LABEL: namespace if namespace is not None else cls._namespace(appid),
+                _COMPOSE_SERVICE_LABEL: compose_name,
+            }
+        )
         return labels
+
+    @staticmethod
+    def _resource_labels(resource: Any) -> Mapping[str, Any]:
+        attrs = getattr(resource, "attrs", None)
+        if not isinstance(attrs, Mapping) and isinstance(resource, Mapping):
+            attrs = resource
+        if not isinstance(attrs, Mapping):
+            return {}
+        spec = attrs.get("Spec")
+        labels = spec.get("Labels") if isinstance(spec, Mapping) else attrs.get("Labels")
+        return labels if isinstance(labels, Mapping) else {}
+
+    @classmethod
+    def _assert_resource_owner(
+        cls, resource: Any, appid: str, namespace: str, *, kind: str, name: str
+    ) -> None:
+        labels = cls._resource_labels(resource)
+        recorded_namespace = labels.get(_NAMESPACE_LABEL)
+        # The old adapter lowercased appid before persisting ownership labels:
+        # a legacy "foo" label could therefore belong to either Foo or foo.
+        # Neither a canonical name nor that label alone proves the raw owner.
+        # Require both labels for every resource, including canonical apps.
+        if labels.get(_APPID_LABEL) == appid and recorded_namespace == namespace:
+            return
+        raise DockerServiceError(
+            f"Docker {kind} {name} ownership could not be verified for app {appid}; "
+            "refusing to reuse or remove it. Verify the original owner and migrate legacy resources explicitly"
+        )
+
+    @classmethod
+    def _assert_volume_rebinding_safe(
+        cls,
+        service: Any,
+        definition: Mapping[str, Any],
+        volume_sources: Mapping[str, str],
+        shared_aliases: set[str],
+        service_name: str,
+    ) -> None:
+        """Never silently switch an existing unscoped volume to an empty one."""
+
+        attrs = getattr(service, "attrs", None)
+        spec = attrs.get("Spec") if isinstance(attrs, Mapping) else None
+        task = spec.get("TaskTemplate") if isinstance(spec, Mapping) else None
+        container = task.get("ContainerSpec") if isinstance(task, Mapping) else None
+        existing_mounts = container.get("Mounts", []) if isinstance(container, Mapping) else None
+        desired_raw = definition.get("volumes")
+        desired_named = False
+        if isinstance(desired_raw, Sequence) and not isinstance(desired_raw, (str, bytes)):
+            for mount in desired_raw:
+                if isinstance(mount, str):
+                    parts = mount.split(":")
+                    desired_named = desired_named or (
+                        len(parts) in {2, 3}
+                        and not parts[0].startswith(("/", ".", "~"))
+                        and parts[0] in volume_sources
+                        and parts[0] not in shared_aliases
+                    )
+                elif isinstance(mount, Mapping):
+                    desired_named = desired_named or (
+                        mount.get("type", "volume") == "volume"
+                        and isinstance(mount.get("source"), str)
+                        and mount.get("source") in volume_sources
+                        and mount.get("source") not in shared_aliases
+                    )
+        if desired_named and (
+            not isinstance(existing_mounts, Sequence) or isinstance(existing_mounts, (str, bytes))
+        ):
+            raise DockerServiceError(
+                f"Docker service {service_name} volume ownership could not be inspected; "
+                "refusing to rebind historical data automatically"
+            )
+        if not isinstance(existing_mounts, Sequence) or isinstance(existing_mounts, (str, bytes)):
+            return
+        existing_sources = {
+            mount.get("Target"): mount.get("Source")
+            for mount in existing_mounts
+            if isinstance(mount, Mapping) and mount.get("Type") == "volume"
+        }
+        original_mounts = cls._mounts(definition.get("volumes"))
+        desired_mounts = cls._mounts(definition.get("volumes"), volume_sources)
+        for original, desired in zip(original_mounts, desired_mounts):
+            original_source = original.split(":", 1)[0]
+            if original_source in shared_aliases or original_source not in volume_sources:
+                continue
+            desired_source, target = desired.split(":")[:2]
+            existing_source = existing_sources.get(target)
+            if existing_source is not None and existing_source != desired_source:
+                raise DockerServiceError(
+                    f"Docker service {service_name} uses an existing differently named volume at {target}; "
+                    "refusing to rebind historical data automatically. Preserve it with an explicit Compose "
+                    "volume name/external declaration or migrate the data explicitly"
+                )
 
     @staticmethod
     def _environment(raw: Any) -> list[str]:

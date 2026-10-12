@@ -6,6 +6,8 @@
   const APP_KEY = "orchestrator.control.appid";
   const APP_NAME_KEY = "orchestrator.control.appname";
   const TOAST_TIMEOUT_MS = 5000;
+  const BUILD_POLL_INTERVAL_MS = 5000;
+  const BUILD_POLL_MAX_RETRY_MS = 30000;
   const notifiedErrors = new WeakSet();
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
@@ -14,7 +16,15 @@
     appName: localStorage.getItem(APP_NAME_KEY) || "",
     activeSection: "appSection",
     buildId: "",
+    buildAppid: "",
     latestBuild: null,
+    buildPollTimer: null,
+    buildPollController: null,
+    buildPollGeneration: 0,
+    buildPollFailures: 0,
+    buildLastRefreshedAt: "",
+    buildCreateOperation: null,
+    historyDetailOperation: null,
     historyPage: 1,
     historyPageSize: 20,
     historyTotal: 0,
@@ -250,6 +260,9 @@
   }
 
   function resetAppView() {
+    stopBuildCreation();
+    stopBuildPolling("应用已切换，自动查询已停止。", "muted");
+    resetBuildView();
     state.loadedApp = null;
     state.syncRefreshPendingAppid = "";
     state.environmentDirty = false;
@@ -340,6 +353,7 @@
     $("composeSourcePanel").removeAttribute("aria-busy");
     $("syncAppButton").textContent = "同步仓库 Compose";
     state.appOperation = null;
+    updateBuildSubmitState();
   }
 
   async function withAppOperation(label, appid, action) {
@@ -428,8 +442,9 @@
     });
   }
 
-  function applyBuild(build) {
+  function applyBuild(build, appid = build.appid || state.buildAppid || state.appid) {
     state.buildId = build.build_id || state.buildId;
+    state.buildAppid = appid;
     state.latestBuild = build;
     $("buildId").value = state.buildId;
     $("metricBuild").textContent = build.status || "--";
@@ -440,18 +455,192 @@
     $("buildCommit").textContent = build.git_commit_sha || "--";
   }
 
-  async function refreshAccessToken() {
+  function resetBuildView({ keepInput = false } = {}) {
+    stopHistoryDetailLoading();
+    state.latestBuild = null;
+    state.buildAppid = "";
+    state.buildLastRefreshedAt = "";
+    state.buildId = keepInput ? $("buildId").value.trim() : "";
+    if (!keepInput) $("buildId").value = "";
+    ["metricBuild", "buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => { $(id).textContent = "--"; });
+    $("buildStatus").className = "status-pill neutral";
+    $("historyDetailPanel").hidden = true;
+    pretty("buildOutput", "尚未查询当前构建。");
+  }
+
+  function markBuildStale(label = "未刷新") {
+    if (!state.latestBuild) return;
+    const status = state.latestBuild.status || "未知";
+    $("metricBuild").textContent = `${status}（${label}）`;
+    $("buildStatus").textContent = `${status}（${label}）`;
+  }
+
+  function isTerminalBuild(build) {
+    return ["succeeded", "failed", "cancelled"].includes(String(build?.status || "").toLowerCase());
+  }
+
+  function validateBuildResponse(build, buildId, appid) {
+    if (build?.build_id !== buildId) throw new Error("返回的 Build ID 与查询不匹配");
+    if (Object.prototype.hasOwnProperty.call(build, "appid")) {
+      if (typeof build.appid !== "string" || !build.appid.trim() || (appid !== undefined && build.appid !== appid)) {
+        throw new Error("返回的 App ID 与查询上下文不匹配");
+      }
+      return build.appid;
+    }
+    return appid;
+  }
+
+  function updateBuildSubmitState() {
+    const form = $("buildForm");
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = Boolean(state.buildCreateOperation || state.appOperation);
+    button.textContent = state.buildCreateOperation ? "提交中，请稍候…" : "提交构建";
+    if (state.buildCreateOperation) form.setAttribute("aria-busy", "true");
+    else form.removeAttribute("aria-busy");
+  }
+
+  function stopBuildCreation() {
+    const operation = state.buildCreateOperation;
+    if (!operation) return;
+    state.buildCreateOperation = null;
+    operation.controller.abort();
+    updateBuildSubmitState();
+  }
+
+  function setBuildPollStatus(message, tone = "muted") {
+    const target = $("buildPollStatus");
+    if (!target) return;
+    target.textContent = message;
+    target.className = `operation-status small ${tone === "muted" ? "muted" : `activity-${tone}`}`;
+  }
+
+  function stopBuildPolling(message = "自动状态查询已停止。", tone = "muted") {
+    state.buildPollGeneration += 1;
+    if (state.buildPollTimer !== null) {
+      window.clearTimeout(state.buildPollTimer);
+      state.buildPollTimer = null;
+    }
+    const controller = state.buildPollController;
+    state.buildPollController = null;
+    if (controller) controller.abort();
+    setBuildPollStatus(message, tone);
+    return state.buildPollGeneration;
+  }
+
+  function buildContextMatches(generation, buildId, appContext, appInput, { inspect = false } = {}) {
+    return generation === state.buildPollGeneration
+      && Boolean(state.token)
+      && state.appid === appContext
+      && $("appId").value.trim() === appInput
+      && (inspect
+        ? $("historyDetailTitle").textContent === `任务详情：${buildId}`
+        : $("buildId").value.trim() === buildId);
+  }
+
+  function scheduleBuildPoll(generation, buildId, appContext, appInput, delay, expectedAppid = appInput || appContext) {
+    if (generation !== state.buildPollGeneration || !state.token) return;
+    state.buildPollTimer = window.setTimeout(
+      () => pollBuildStatus(generation, buildId, appContext, appInput, expectedAppid),
+      delay,
+    );
+  }
+
+  async function pollBuildStatus(generation, buildId, appContext, appInput, expectedAppid) {
+    if (!buildContextMatches(generation, buildId, appContext, appInput)) return;
+    const appContextVersion = state.appContextVersion;
+    state.buildPollTimer = null;
+    const controller = new AbortController();
+    state.buildPollController = controller;
+    try {
+      const value = await request(
+        `/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`,
+        { signal: controller.signal },
+        true,
+        true,
+      );
+      if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion) return;
+      validateBuildResponse(value, buildId, expectedAppid);
+      state.buildPollFailures = 0;
+      applyBuild(value, expectedAppid);
+      pretty("buildOutput", value);
+      const refreshedAt = new Date().toLocaleTimeString();
+      state.buildLastRefreshedAt = refreshedAt;
+      if (!$("historyDetailPanel").hidden && $("historyDetailTitle").textContent === `任务详情：${buildId}`) {
+        pretty("historyDetailBuild", value);
+        if (historyDetailContextMatches(state.historyDetailOperation)) {
+          state.historyDetailOperation.buildPending = false;
+          state.historyDetailOperation.buildError = "";
+          updateHistoryDetailStatus(state.historyDetailOperation);
+        }
+      }
+      if (isTerminalBuild(value)) {
+        stopBuildPolling(`最近刷新：${refreshedAt}；终态 ${value.status}，自动查询已停止。${value.error ? ` 原因：${value.error}` : ""}`, value.status === "succeeded" ? "success" : "error");
+      } else {
+        setBuildPollStatus(`最近刷新：${refreshedAt}；当前状态 ${value.status || "未知"}，约 5 秒后再次查询。`);
+        scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, expectedAppid);
+      }
+    } catch (error) {
+      if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion) return;
+      if (!state.token || (error instanceof ApiError && [401, 403].includes(error.status))) {
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+        return;
+      }
+      state.buildPollFailures += 1;
+      const retryIn = Math.min(BUILD_POLL_INTERVAL_MS * (2 ** (state.buildPollFailures - 1)), BUILD_POLL_MAX_RETRY_MS);
+      const reason = errorMessage(error);
+      markBuildStale();
+      if (historyDetailContextMatches(state.historyDetailOperation)) {
+        state.historyDetailOperation.buildError = reason;
+        updateHistoryDetailStatus(state.historyDetailOperation);
+      }
+      setBuildPollStatus(`状态未刷新（${reason}）；${state.buildLastRefreshedAt ? `最近刷新：${state.buildLastRefreshedAt}` : "尚未取得实时查询结果"}。下方仍是上次结果，约 ${Math.round(retryIn / 1000)} 秒后重试，也可点击“再次查询”。`, "error");
+      scheduleBuildPoll(generation, buildId, appContext, appInput, retryIn, expectedAppid);
+    } finally {
+      if (state.buildPollController === controller) state.buildPollController = null;
+    }
+  }
+
+  function startBuildPolling(build, { accepted = false, inspect = false, appid = $("appId").value.trim() || state.appid } = {}) {
+    const generation = stopBuildPolling("准备查询构建状态...");
+    if (!accepted) state.buildLastRefreshedAt = new Date().toLocaleTimeString();
+    if (isTerminalBuild(build)) {
+      setBuildPollStatus(`最近刷新：${state.buildLastRefreshedAt}；状态 ${build.status} 为终态，自动查询已停止。${build.error ? ` 原因：${build.error}` : ""}`, build.status === "succeeded" ? "success" : "error");
+      return;
+    }
+    if (!state.token) {
+      setBuildPollStatus("未登录，无法自动查询构建状态。", "error");
+      return;
+    }
+    const buildId = build.build_id;
+    const appContext = state.appid;
+    const appInput = $("appId").value.trim();
+    state.buildPollFailures = 0;
+    if (accepted) {
+      state.buildLastRefreshedAt = "";
+      markBuildStale("受理回执");
+      setBuildPollStatus("HTTP 202 仅表示任务已受理，不代表构建完成；当前显示受理快照，约 5 秒后查询最新状态。", "success");
+    } else if (inspect) {
+      setBuildPollStatus(`最近刷新：${state.buildLastRefreshedAt}；任务详情已加载，约 5 秒后再次查询状态。`, "muted");
+    } else {
+      setBuildPollStatus(`最近刷新：${state.buildLastRefreshedAt}；约 5 秒后再次查询状态。`, "muted");
+    }
+    scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, appid);
+  }
+
+  async function refreshAccessToken(signal) {
     if (!state.refreshToken) throw new Error("没有可用的刷新令牌");
     const response = await fetch("/oauth2/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: state.refreshToken }),
+      signal,
     });
     const text = await response.text();
     let payload = null;
     if (text) {
       try { payload = JSON.parse(text); } catch { payload = text; }
     }
+    if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
     if (!response.ok) throw new ApiError(response.status, payload);
     state.token = payload.access_token;
     state.refreshToken = payload.refresh_token || state.refreshToken;
@@ -460,7 +649,7 @@
     return payload;
   }
 
-  async function request(path, options = {}, allowRefresh = true) {
+  async function request(path, options = {}, allowRefresh = true, quiet = false) {
     try {
       const headers = new Headers(options.headers || {});
       const requestOptions = { ...options };
@@ -475,28 +664,34 @@
       if (text) {
         try { payload = JSON.parse(text); } catch { payload = text; }
       }
+      if (options.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
       if (!response.ok) {
         if (response.status === 401 && allowRefresh && !path.startsWith("/oauth2/") && state.refreshToken) {
           try {
-            await refreshAccessToken();
-            return request(path, options, false);
+            await refreshAccessToken(options.signal);
+            return request(path, options, false, quiet);
           } catch {
             // Fall through and report the original unauthorized response.
           }
         }
+        if (options.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
         if (response.status === 401 && !path.startsWith("/oauth2/")) {
           state.token = "";
           state.refreshToken = "";
           localStorage.removeItem(TOKEN_KEY);
           localStorage.removeItem(REFRESH_TOKEN_KEY);
           stopHistoryPolling();
+          stopBuildCreation();
+          stopHistoryDetailLoading();
+          markBuildStale();
+          stopBuildPolling("访问令牌失效，自动查询已停止，请重新连接。", "error");
           setSession(false, "访问令牌已失效，请重新连接。");
         }
         throw new ApiError(response.status, payload);
       }
       return payload;
     } catch (error) {
-      notifyError(error);
+      if (!quiet && error?.name !== "AbortError") notifyError(error);
       throw error;
     }
   }
@@ -681,6 +876,7 @@
   }
 
   async function createBuild() {
+    if (state.buildCreateOperation) return null;
     ensureAppIdle();
     const appid = appidFromInput();
     if (state.syncRefreshPendingAppid === appid) {
@@ -688,21 +884,75 @@
     }
     const gitRef = $("buildGitRef").value.trim();
     const body = gitRef ? { git_ref: gitRef } : {};
-    const value = await request(`/api/v1/jenkins/build_create/${encodeURIComponent(appid)}`, { method: "POST", body });
-    applyBuild(value);
-    pretty("buildOutput", value);
-    loadHistory({ resetPage: true, silent: true }).catch(() => {});
-    return value;
+    const generation = stopBuildPolling("正在提交构建请求...");
+    resetBuildView();
+    const appContext = state.appid;
+    const appInput = $("appId").value.trim();
+    const appContextVersion = state.appContextVersion;
+    const controller = new AbortController();
+    const operation = { appid, controller };
+    state.buildCreateOperation = operation;
+    updateBuildSubmitState();
+    try {
+      const value = await request(`/api/v1/jenkins/build_create/${encodeURIComponent(appid)}`, { method: "POST", body, signal: controller.signal }, true, true);
+      if (state.buildCreateOperation !== operation || generation !== state.buildPollGeneration || !state.token || state.appid !== appContext || $("appId").value.trim() !== appInput || state.appContextVersion !== appContextVersion) return null;
+      if (value?.appid !== appid) throw new Error("返回的 App ID 与提交不匹配");
+      applyBuild(value, appid);
+      pretty("buildOutput", value);
+      startBuildPolling(value, { accepted: true, appid });
+      loadHistory({ resetPage: true, silent: true }).catch(() => {});
+      return value;
+    } catch (error) {
+      if (state.buildCreateOperation !== operation || generation !== state.buildPollGeneration || state.appContextVersion !== appContextVersion || error?.name === "AbortError") return null;
+      setBuildPollStatus(`提交请求失败：${errorMessage(error)}；未收到受理回执。`, "error");
+      throw error;
+    } finally {
+      if (state.buildCreateOperation === operation) {
+        state.buildCreateOperation = null;
+        updateBuildSubmitState();
+      }
+    }
   }
 
   async function getBuild() {
     const buildId = $("buildId").value.trim() || state.buildId;
     if (!buildId) throw new Error("请先填写 Build ID");
+    if (state.buildPollController && state.buildId === buildId) return null;
     state.buildId = buildId;
-    const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`);
-    applyBuild(value);
-    pretty("buildOutput", value);
-    return value;
+    const generation = stopBuildPolling("正在查询最新构建状态...");
+    const appContext = state.appid;
+    const appInput = $("appId").value.trim();
+    const appContextVersion = state.appContextVersion;
+    const expectedAppid = historyDetailContextMatches(state.historyDetailOperation)
+      ? state.historyDetailOperation.appid
+      : state.latestBuild?.build_id === buildId ? state.buildAppid : undefined;
+    const fallbackAppid = appInput || appContext;
+    const controller = new AbortController();
+    state.buildPollController = controller;
+    try {
+      const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`, { signal: controller.signal }, true, true);
+      if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion) return null;
+      // A new free-form ID can belong to another app. Bind its validated
+      // owner once; all later queries/polls must keep that identity.
+      const buildAppid = validateBuildResponse(value, buildId, expectedAppid) ?? fallbackAppid;
+      applyBuild(value, buildAppid);
+      pretty("buildOutput", value);
+      startBuildPolling(value, { appid: buildAppid });
+      return value;
+    } catch (error) {
+      if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion || error?.name === "AbortError") return null;
+      markBuildStale();
+      if (error instanceof ApiError && [401, 403].includes(error.status)) {
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+        return null;
+      }
+      state.buildPollFailures = 1;
+      setBuildPollStatus(`状态未刷新（${errorMessage(error)}）；约 5 秒后重试，也可点击“再次查询”。下方不是当前实时状态。`, "error");
+      scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, expectedAppid ?? fallbackAppid);
+      return null;
+    } finally {
+      if (state.buildPollController === controller) state.buildPollController = null;
+    }
   }
 
   function historyPageCount() {
@@ -904,10 +1154,87 @@
     return value.filter((item) => !item?.build_id || item.build_id === buildId);
   }
 
+  function stopHistoryDetailLoading() {
+    const operation = state.historyDetailOperation;
+    state.historyDetailOperation = null;
+    if (operation) operation.controller.abort();
+  }
+
+  function historyDetailContextMatches(operation) {
+    return Boolean(operation)
+      && state.historyDetailOperation === operation
+      && Boolean(state.token)
+      && state.appid === operation.appContext
+      && state.appContextVersion === operation.appContextVersion
+      && $("appId").value.trim() === operation.appInput
+      && $("buildId").value.trim() === operation.buildId
+      && !$("historyDetailPanel").hidden
+      && $("historyDetailTitle").textContent === `任务详情：${operation.buildId}`;
+  }
+
+  function updateHistoryDetailStatus(operation) {
+    if (!historyDetailContextMatches(operation)) return;
+    const buildStatus = operation.buildPending
+      ? "正在加载构建状态"
+      : operation.buildError
+        ? `构建状态未刷新（${operation.buildError}）`
+        : `构建状态已刷新：${state.buildLastRefreshedAt}`;
+    const resourcesStatus = operation.resourcePending
+      ? `关联资源仍在加载（${operation.resourcePending} 个）`
+      : operation.resourceFailures
+        ? `关联资源已加载，${operation.resourceFailures} 个接口返回失败`
+        : "关联资源已加载";
+    $("historyDetailStatus").textContent = `${buildStatus}；${resourcesStatus}。`;
+  }
+
+  async function loadHistoryDetailResources(operation) {
+    const resources = [
+      ["events", "historyDetailEvents"],
+      ["images", "historyDetailImages"],
+      ["services", "historyDetailServices"],
+      ["alerts", "historyDetailAlerts"],
+    ];
+    await Promise.allSettled(resources.map(async ([resource, target]) => {
+      let result;
+      try {
+        const value = await request(`/api/v1/jenkins/app_${resource}/${encodeURIComponent(operation.appid)}`, { signal: operation.controller.signal }, true, true);
+        result = { status: "fulfilled", value: resourcesForBuild(value, operation.buildId) };
+      } catch (reason) {
+        result = { status: "rejected", reason };
+      }
+      if (!historyDetailContextMatches(operation)) return;
+      renderDetailResult(target, result);
+      operation.resourcePending -= 1;
+      if (result.status === "rejected") operation.resourceFailures += 1;
+      updateHistoryDetailStatus(operation);
+    }));
+  }
+
   async function inspectBuild(buildId, appid) {
     if (!buildId) throw new Error("缺少 Build ID");
     const selectedAppid = appid || state.appid || $("historyAppId").value.trim();
     if (!selectedAppid) throw new Error("该任务没有可用的 App ID");
+    const generation = stopBuildPolling("正在加载任务详情...");
+    resetBuildView();
+    const appContext = state.appid;
+    const appInput = $("appId").value.trim();
+    const controller = new AbortController();
+    state.buildPollController = controller;
+    const operation = {
+      buildId,
+      appid: selectedAppid,
+      appContext,
+      appInput,
+      appContextVersion: state.appContextVersion,
+      controller: new AbortController(),
+      buildPending: true,
+      buildError: "",
+      resourcePending: 4,
+      resourceFailures: 0,
+    };
+    state.historyDetailOperation = operation;
+    state.buildId = buildId;
+    $("buildId").value = buildId;
     $("historyDetailPanel").hidden = false;
     $("historyDetailTitle").textContent = `任务详情：${buildId}`;
     $("historyDetailMeta").textContent = `App ID：${selectedAppid}`;
@@ -916,33 +1243,39 @@
       $(id).textContent = "加载中...";
     });
 
-    const results = await Promise.allSettled([
-      request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`),
-      request(`/api/v1/jenkins/app_events/${encodeURIComponent(selectedAppid)}`),
-      request(`/api/v1/jenkins/app_images/${encodeURIComponent(selectedAppid)}`),
-      request(`/api/v1/jenkins/app_services/${encodeURIComponent(selectedAppid)}`),
-      request(`/api/v1/jenkins/app_alerts/${encodeURIComponent(selectedAppid)}`),
-    ]);
-    const [buildResult, eventsResult, imagesResult, servicesResult, alertsResult] = results;
-    renderDetailResult("historyDetailBuild", buildResult);
-    renderDetailResult("historyDetailEvents", eventsResult.status === "fulfilled"
-      ? { ...eventsResult, value: resourcesForBuild(eventsResult.value, buildId) }
-      : eventsResult);
-    renderDetailResult("historyDetailImages", imagesResult.status === "fulfilled"
-      ? { ...imagesResult, value: resourcesForBuild(imagesResult.value, buildId) }
-      : imagesResult);
-    renderDetailResult("historyDetailServices", servicesResult.status === "fulfilled"
-      ? { ...servicesResult, value: resourcesForBuild(servicesResult.value, buildId) }
-      : servicesResult);
-    renderDetailResult("historyDetailAlerts", alertsResult.status === "fulfilled"
-      ? { ...alertsResult, value: resourcesForBuild(alertsResult.value, buildId) }
-      : alertsResult);
-    if (buildResult.status === "fulfilled") applyBuild(buildResult.value);
-    const failed = results.filter((result) => result.status === "rejected").length;
-    $("historyDetailStatus").textContent = failed
-      ? `详情已加载，${failed} 个关联接口返回失败。`
-      : `详情已更新：${new Date().toLocaleTimeString()}`;
-    return buildResult.status === "fulfilled" ? buildResult.value : null;
+    // Resource requests have their own lifetime: starting/stopping the build
+    // poll must not delay them or allow them to reapply an old BuildJob.
+    loadHistoryDetailResources(operation);
+    try {
+      const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`, { signal: controller.signal }, true, true);
+      if (!buildContextMatches(generation, buildId, appContext, appInput, { inspect: true }) || !historyDetailContextMatches(operation)) return null;
+      validateBuildResponse(value, buildId, selectedAppid);
+      operation.buildPending = false;
+      renderDetailResult("historyDetailBuild", { status: "fulfilled", value });
+      applyBuild(value, selectedAppid);
+      pretty("buildOutput", value);
+      if (state.buildPollController === controller) state.buildPollController = null;
+      startBuildPolling(value, { inspect: true, appid: selectedAppid });
+      updateHistoryDetailStatus(operation);
+      return value;
+    } catch (error) {
+      if (!buildContextMatches(generation, buildId, appContext, appInput, { inspect: true }) || !historyDetailContextMatches(operation) || error?.name === "AbortError") return null;
+      operation.buildPending = false;
+      operation.buildError = errorMessage(error);
+      renderDetailResult("historyDetailBuild", { status: "rejected", reason: error });
+      markBuildStale();
+      setBuildPollStatus(`状态未刷新（${errorMessage(error)}）；约 5 秒后重试。`, "error");
+      if (error instanceof ApiError && [401, 403].includes(error.status)) {
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+      } else {
+        state.buildPollFailures = 1;
+        scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, selectedAppid);
+      }
+      updateHistoryDetailStatus(operation);
+      return null;
+    } finally {
+      if (state.buildPollController === controller) state.buildPollController = null;
+    }
   }
 
   function stopHistoryPolling() {
@@ -1322,6 +1655,10 @@
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(REFRESH_TOKEN_KEY);
       stopHistoryPolling();
+      stopBuildCreation();
+      stopHistoryDetailLoading();
+      markBuildStale();
+      stopBuildPolling("已退出登录，自动查询已停止。", "muted");
       setSession(false, "已清除当前浏览器中的访问令牌。");
       setActivity("已退出", "success");
     });
@@ -1357,6 +1694,11 @@
         resetAppView();
       }
     });
+    $("buildId").addEventListener("input", (event) => {
+      if (event.target.value.trim() === state.buildId) return;
+      stopBuildPolling("Build ID 已更改；查询旧构建已停止，请查询新 ID。", "muted");
+      resetBuildView({ keepInput: true });
+    });
     $("environment").addEventListener("input", () => { state.environmentDirty = true; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
     $("getAppButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
@@ -1390,6 +1732,7 @@
     $("historyAutoRefresh").addEventListener("change", updateHistoryPolling);
     $("historyDetailCloseButton").addEventListener("click", () => {
       $("historyDetailPanel").hidden = true;
+      stopHistoryDetailLoading();
     });
     document.querySelectorAll(".resource-button").forEach((button) => {
       button.addEventListener("click", () => withFeedback(() => loadResource(button.dataset.resource), "resourceOutput"));
@@ -1460,5 +1803,11 @@
   rememberSection();
   setSession(Boolean(state.token));
   setCurrentApp(state.appid ? state.appName : "");
+  window.addEventListener("pagehide", () => {
+    stopHistoryPolling();
+    stopBuildCreation();
+    stopHistoryDetailLoading();
+    stopBuildPolling("页面已关闭，自动查询已停止。", "muted");
+  });
   restoreSession();
 })();

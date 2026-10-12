@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,7 @@ from orchestrator.jenkins import (
     JenkinsResultArtifact,
 )
 from orchestrator.models import BaseImage, BuildCreate, BuildStatus, UserAppCreate, UserImage, utc_now
+from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
 
 
@@ -228,6 +230,91 @@ def test_start_build_triggers_jenkins_and_schedules_the_first_poll() -> None:
     assert gitlab.calls == [("https://git.example/demo.git", "main")]
 
 
+def test_start_build_preserves_raw_appid_but_encodes_external_image_repository() -> None:
+    jenkins = FakeJenkins([])
+    harness = make_harness(jenkins=jenkins)
+    appid = "APP-20261010-1FDF7D6A"
+    build = queue_build(harness, appid)
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    assert result == {"build_id": build.build_id, "status": "building"}
+    request = jenkins.requests[0]
+    assert request.appid == appid
+    assert request.image_repository == (
+        "harbor.example/apps/appid-v1-4150502d32303236313031302d3146444637443641"
+    )
+
+
+def test_image_repository_rejects_harbor_url_path_query_and_invalid_project() -> None:
+    harness = make_harness()
+    for harbor_url in ("harbor.example/path", "harbor.example?query=1", "harbor.example#fragment"):
+        harness.runtime.settings.harbor_url = harbor_url
+        with pytest.raises(BuildInputError, match="Harbor registry URL|IMAGE_REPOSITORY"):
+            harness.runtime._image_repository("demo")
+
+    harness.runtime.settings.harbor_url = "harbor.example:5000"
+    harness.runtime.settings.harbor_project = "Apps"
+    with pytest.raises(BuildInputError, match="Harbor project"):
+        harness.runtime._image_repository("demo")
+
+
+@pytest.mark.parametrize(
+    ("harbor_url", "registry"),
+    [
+        ("harbor.example:5000", "harbor.example:5000"),
+        ("https://Harbor.EXAMPLE:5000/", "Harbor.EXAMPLE:5000"),
+        ("http://localhost:5000", "localhost:5000"),
+        ("http://[::1]:5000/", "[::1]:5000"),
+    ],
+)
+def test_image_repository_accepts_explicit_registry_ports(harbor_url: str, registry: str) -> None:
+    harness = make_harness()
+    harness.runtime.settings.harbor_url = harbor_url
+    assert harness.runtime._image_repository("demo-app") == f"{registry}/apps/demo-app"
+
+
+@pytest.mark.parametrize(
+    "harbor_url",
+    [
+        "https://user:password@harbor.example",
+        "https://harbor.example/path",
+        "https://harbor.example?",
+        "https://harbor.example#",
+        "harbor",
+        "https://harbor.example:bad",
+        "https://harbor.example:65536",
+        "https://[bad]",
+        "ftp://harbor.example",
+    ],
+)
+def test_image_repository_rejects_invalid_harbor_urls_as_build_input_errors(harbor_url: str) -> None:
+    harness = make_harness()
+    harness.runtime.settings.harbor_url = harbor_url
+    with pytest.raises(BuildInputError):
+        harness.runtime._image_repository("demo")
+
+
+@pytest.mark.parametrize("project", ["", "Apps", "apps_", "apps___a", "apps/nested", "a" * 255])
+def test_image_repository_rejects_invalid_or_overlong_projects(project: str) -> None:
+    harness = make_harness()
+    harness.runtime.settings.harbor_project = project
+    with pytest.raises(BuildInputError):
+        harness.runtime._image_repository("demo")
+
+
+def test_invalid_registry_fails_build_before_triggering_jenkins() -> None:
+    jenkins = FakeJenkins([])
+    harness = make_harness(jenkins=jenkins)
+    harness.runtime.settings.harbor_project = "Apps"
+    build = queue_build(harness)
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert jenkins.requests == []
+
+
 def test_pending_queue_then_success_persists_artifact_images_and_swarm_services() -> None:
     artifact = successful_artifact()
     jenkins = FakeJenkins(
@@ -296,6 +383,112 @@ def test_artifact_cannot_drop_source_published_ports() -> None:
     assert "changed ports" in stored.error
     assert docker_services.calls == []
     assert harness.container.repository.list_services("demo") == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing-declarations",
+        "missing-name",
+        "changed-name",
+        "missing-external",
+        "changed-external",
+        "missing-mounts",
+        "changed-source",
+        "changed-target",
+        "changed-mode",
+        "added-bind",
+    ],
+)
+def test_artifact_cannot_change_source_volume_contract_before_deployment(change: str) -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"]["volumes"] = ["data:/data"]
+    source["volumes"] = {"data": {"external": True, "name": "shared-data"}}
+    artifact_compose = deepcopy(source)
+    artifact_compose["services"]["api"]["image"] = "harbor.example/apps/demo:build-43"
+    if change == "missing-declarations":
+        artifact_compose.pop("volumes")
+    elif change == "missing-name":
+        artifact_compose["volumes"]["data"].pop("name")
+    elif change == "changed-name":
+        artifact_compose["volumes"]["data"]["name"] = "other-data"
+    elif change == "missing-external":
+        artifact_compose["volumes"]["data"].pop("external")
+    elif change == "changed-external":
+        artifact_compose["volumes"]["data"]["external"] = False
+    elif change == "missing-mounts":
+        artifact_compose["services"]["api"].pop("volumes")
+    else:
+        artifact_compose["services"]["api"]["volumes"] = {
+            "changed-source": ["other-data:/data"],
+            "changed-target": ["data:/other-data"],
+            "changed-mode": ["data:/data:ro"],
+            "added-bind": ["data:/data", "/srv/other:/other-data"],
+        }[change]
+    artifact = JenkinsResultArtifact(
+        images=("harbor.example/apps/demo:build-43",),
+        compose=artifact_compose,
+        _payload={"images": ["harbor.example/apps/demo:build-43"], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=93)],
+        build=JenkinsBuild(number=93, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness)
+    harness.container.repository.update_app("demo", {"compose": source})
+
+    harness.runtime.start_build(build.build_id, task_id="start-task")
+    result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    stored = harness.container.repository.get_build(build.build_id)
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert stored is not None
+    assert stored.error is not None and "volumes" in stored.error
+    assert docker_services.calls == []
+    assert harness.container.repository.list_user_images("demo") == []
+    assert harness.container.repository.list_services("demo") == []
+    assert len(harness.container.repository.list_alerts("demo")) == 1
+
+
+@pytest.mark.parametrize("appid", ["demo", "Foo"])
+@pytest.mark.parametrize("bound_template", [False, True])
+def test_artifact_preserves_template_volume_identity_and_raw_owner(appid: str, bound_template: bool) -> None:
+    harness = make_harness()
+    source = harness.container.catalog.compose(["mongodb"], appid=appid if bound_template else None)
+    artifact_compose = deepcopy(source)
+    image = f"{harness.runtime._image_repository(appid)}:build-43"
+    for definition in artifact_compose["services"].values():
+        definition["image"] = image
+    artifact = JenkinsResultArtifact(
+        images=(image,),
+        compose=artifact_compose,
+        _payload={"images": [image], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=94)],
+        build=JenkinsBuild(number=94, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    docker_services = FakeDockerServices(replace(successful_deployment(), appid=appid))
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness, appid=appid)
+    harness.container.repository.update_app(appid, {"compose": source})
+
+    harness.runtime.start_build(build.build_id, task_id="start-task")
+    result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    assert result == {"build_id": build.build_id, "status": "succeeded"}
+    assert jenkins.requests[0].appid == appid
+    assert jenkins.requests[0].compose == source
+    assert docker_services.calls == [(appid, artifact_compose)]
+    assert docker_services.calls[0][1]["volumes"] == source["volumes"]
+    records = harness.container.repository.list_services(appid)
+    assert len(records) == 1
+    assert records[0].appid == appid
+    assert records[0].build_id == build.build_id
 
 
 class OpenConnection:

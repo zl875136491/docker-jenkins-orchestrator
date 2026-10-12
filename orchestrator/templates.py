@@ -11,6 +11,15 @@ from typing import Any
 
 import yaml
 
+from orchestrator.naming import (
+    NamingError,
+    bounded_resource_name,
+    external_namespace,
+    managed_volume_name,
+    template_volume_alias,
+    validate_appid,
+)
+
 
 class TemplateError(ValueError):
     """Raised when a template catalog or compose request is invalid."""
@@ -112,6 +121,9 @@ class TemplateCatalog:
         ``environment`` is injected into every selected service.  Per-service
         values supplied through ``service_environment`` take precedence.  The
         plural spelling is accepted as an alias for integrations that use it.
+        In catalog environment and connection templates, ``{appid}`` refers
+        to the original business identifier, ``{namespace}`` to its full
+        external namespace, and ``{host}`` to the final service name.
 
         Dependency values normally remain lists for compatibility with the
         original API.  Pass ``dependency_conditions=True`` to produce long
@@ -125,6 +137,7 @@ class TemplateCatalog:
             raise TemplateError("dependency_conditions must be a boolean")
         selected = self._validate_selection(components)
         namespace = self._validate_appid(appid)
+        resource_namespace = bounded_resource_name(namespace) if namespace else None
         global_environment = self._normalize_environment(environment, "environment")
         overrides = self._normalize_service_environments(
             selected,
@@ -156,20 +169,23 @@ class TemplateCatalog:
             if component["restart"]:
                 service["restart"] = component["restart"]
 
-            rendered_volumes, declared_volumes = self._render_volumes(component, service_name)
+            rendered_volumes, declared_volumes = self._render_volumes(component, name, namespace)
             if rendered_volumes:
                 service["volumes"] = rendered_volumes
                 volumes.update(declared_volumes)
 
             service_environment_values = self._render_environment_values(
                 component["environment"],
-                appid=namespace or "",
+                appid=appid or "",
+                namespace=namespace or "",
                 component=name,
                 host=service_name,
                 port=component["ports"][0],
             )
             service_environment_values.update(
-                self._internal_connection_environment(namespace, normalized_dependencies[name], service_names)
+                self._internal_connection_environment(
+                    appid, namespace, normalized_dependencies[name], service_names
+                )
             )
             service_environment_values.update(global_environment)
             service_environment_values.update(overrides.get(name, {}))
@@ -190,15 +206,16 @@ class TemplateCatalog:
 
             if namespace:
                 service["labels"] = {
-                    "io.docker-jenkins-orchestrator.appid": namespace,
+                    "io.docker-jenkins-orchestrator.appid": appid,
+                    "io.docker-jenkins-orchestrator.namespace": namespace,
                     "io.docker-jenkins-orchestrator.component": name,
                 }
             services[service_name] = service
 
         document: dict[str, Any] = {"version": "3.9", "services": services}
-        if namespace:
+        if resource_namespace:
             # Compose uses the project name to isolate its default network.
-            document = {"name": namespace, **document}
+            document = {"name": resource_namespace, **document}
         if volumes:
             document["volumes"] = self._ordered_mapping(volumes)
 
@@ -502,6 +519,10 @@ class TemplateCatalog:
             source, target = volume.get("source"), volume.get("target")
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target.startswith("/"):
                 raise TemplateError(f"Component {name} volume requires source and absolute target")
+            try:
+                template_volume_alias(name, source)
+            except NamingError as exc:
+                raise TemplateError(f"Component {name} volume requires a valid named source") from exc
             volumes.append({"source": source, "target": target})
 
         command = component.get("command")
@@ -550,9 +571,10 @@ class TemplateCatalog:
     def _validate_appid(appid: str | None) -> str | None:
         if appid is None:
             return None
-        if not isinstance(appid, str) or not _APPID_PATTERN.fullmatch(appid):
-            raise TemplateError("appid must contain only letters, numbers, underscores, and hyphens")
-        return appid.lower()
+        try:
+            return external_namespace(validate_appid(appid))
+        except NamingError as exc:
+            raise TemplateError(str(exc)) from exc
 
     def _normalize_service_environments(
         self,
@@ -663,6 +685,7 @@ class TemplateCatalog:
     def _internal_connection_environment(
         self,
         appid: str | None,
+        namespace: str | None,
         dependencies: Mapping[str, dict[str, Any] | None],
         service_names: Mapping[str, str],
     ) -> dict[str, str]:
@@ -678,6 +701,7 @@ class TemplateCatalog:
                 self._render_environment_values(
                     templates,
                     appid=appid or "",
+                    namespace=namespace or "",
                     component=dependency,
                     host=host,
                     port=component["ports"][0],
@@ -712,18 +736,25 @@ class TemplateCatalog:
 
     @staticmethod
     def _service_name(component: str, namespace: str | None) -> str:
-        return f"{namespace}-{component}" if namespace else component
+        return bounded_resource_name(namespace, component) if namespace else component
 
     @staticmethod
     def _render_volumes(
-        component: Mapping[str, Any], service_name: str
+        component: Mapping[str, Any], component_name: str, namespace: str | None
     ) -> tuple[list[str], dict[str, dict[str, Any]]]:
         rendered: list[str] = []
         declared: dict[str, dict[str, Any]] = {}
         for volume in component["volumes"]:
-            volume_name = f"{service_name}-{volume['source']}"
+            try:
+                alias = template_volume_alias(component_name, volume["source"])
+                volume_name = managed_volume_name(namespace, alias) if namespace else alias
+            except NamingError as exc:
+                raise TemplateError(str(exc)) from exc
             rendered.append(f"{volume_name}:{volume['target']}")
-            declared[volume_name] = {}
+            # Only an app-bound template can declare a final physical name.
+            # Generic templates must leave the volume implicit so deployment
+            # still adds the actual application's ownership boundary.
+            declared[volume_name] = {"name": volume_name} if namespace else {}
         return rendered, declared
 
     @staticmethod

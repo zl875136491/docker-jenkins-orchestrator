@@ -114,6 +114,36 @@ def test_app_build_lifecycle_smoke() -> None:
     assert "mongodb://mongodb/demo" not in str(app_document)
 
 
+def test_appid_identity_remains_case_sensitive_in_app_and_build_apis() -> None:
+    headers = auth_headers()
+    suffix = uuid4().hex
+    upper, lower = f"Foo-{suffix}", f"foo-{suffix}"
+    for appid in (upper, lower):
+        payload = {
+            "appid": appid,
+            "name": appid,
+            "repository_url": f"https://git.example/{appid}.git",
+            "compose": {"services": {"api": {"image": "example/demo:1"}}},
+        }
+        response = client.post("/api/v1/jenkins/app_create", headers=headers, json=payload)
+        assert response.status_code == 201
+        assert response.json()["appid"] == appid
+        assert client.post("/api/v1/jenkins/app_create", headers=headers, json=payload).status_code == 409
+
+        build = client.post(f"/api/v1/jenkins/build_create/{appid}", headers=headers, json={})
+        assert build.status_code == 202
+        assert build.json()["appid"] == appid
+        stored = client.get(f"/api/v1/jenkins/build_info/{build.json()['build_id']}", headers=headers)
+        assert stored.json()["appid"] == appid
+
+    updated = client.patch(
+        f"/api/v1/jenkins/app_info/{upper}", headers=headers, json={"appid": lower, "name": "Upper application"}
+    )
+    assert updated.json()["appid"] == upper
+    assert client.get(f"/api/v1/jenkins/app_info/{lower}", headers=headers).json()["name"] == lower
+    assert client.get(f"/api/v1/jenkins/app_info/FOO-{suffix}", headers=headers).status_code == 404
+
+
 def test_create_app_discovers_compose_when_gitlab_is_configured() -> None:
     headers = auth_headers()
     applications = app.state.container.applications

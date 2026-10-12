@@ -305,6 +305,48 @@ def editor_json(console: Console) -> dict[str, Any]:
     return json.loads(console.page.locator("#compose").input_value())
 
 
+def pause_clock(page: Any) -> None:
+    """Drive polling timers in virtual time, without waiting five real seconds."""
+
+    page.clock.install(time="2026-10-12T00:00:00Z")
+    page.clock.pause_at("2026-10-12T00:00:00.100Z")
+
+
+def build_record(build_id: str, status: str, *, appid: str = "alpha") -> dict[str, Any]:
+    return {
+        "build_id": build_id,
+        "appid": appid,
+        "status": status,
+        "git_ref": "master",
+        "git_commit_sha": None if status == "queued" else NEW_COMMIT,
+        "jenkins_build_number": None if status == "queued" else 45,
+        "celery_task_id": "mock-celery-task",
+        "error": "Jenkins build finished with FAILURE" if status == "failed" else None,
+    }
+
+
+def build_query(console: Console, build_id: str) -> None:
+    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator("#buildId").fill(build_id)
+    console.page.locator('#buildQueryForm button[type="submit"]').click()
+
+
+def history_query(console: Console, record: dict[str, Any]) -> None:
+    console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [record], "page": 1, "page_size": 20, "total": 1})
+    for resource in ("events", "images", "services", "alerts"):
+        console.api.overrides.setdefault(("GET", f"/api/v1/jenkins/app_{resource}/{record['appid']}"), Reply([]))
+    console.page.locator('a[href="#historySection"]').click()
+    console.page.locator("#historyRefreshButton").click()
+    expect(console.page.locator(".history-detail-button")).to_have_count(1)
+    console.page.locator(".history-detail-button").click()
+
+
+def submit_build_event(console: Console) -> None:
+    """Bypass disabled buttons to exercise the synchronous submission guard."""
+
+    console.page.locator("#buildForm").dispatch_event("submit")
+
+
 def test_blank_compose_is_omitted_and_discovery_populates_editor(console: Console) -> None:
     console.fill_app()
     console.page.locator('#appForm button[type="submit"]').click()
@@ -461,7 +503,7 @@ def test_sync_success_with_refresh_failure_keeps_draft_and_reports_both_outcomes
     assert not console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")
     console.page.locator('a[href="#buildSection"]').click()
     console.page.locator('#buildForm button[type="submit"]').click()
-    expect(console.page.locator("#buildStatus")).to_have_text("queued")
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
     assert len(console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")) == 1
 
 
@@ -539,6 +581,509 @@ def test_build_query_displays_immutable_commit(console: Console) -> None:
     expect(console.page.locator("#buildCommit")).to_have_text(NEW_COMMIT)
     expect(console.page.locator("#buildStatus")).to_have_text("failed")
     assert not any("/build_create/" in item.path for item in console.api.calls)
+
+
+@pytest.mark.parametrize("failure", ["api", "transport"])
+def test_build_submission_is_mutually_exclusive_and_recovers_after_failure(console: Console, failure: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    key = ("POST", "/api/v1/jenkins/build_create/alpha")
+    console.api.paused.add(key)
+    console.page.locator('a[href="#buildSection"]').click()
+    button = console.page.locator('#buildForm button[type="submit"]')
+    button.click()
+    expect(button).to_be_disabled()
+    expect(console.page.locator("#buildForm")).to_have_attribute("aria-busy", "true")
+    submit_build_event(console)
+    submit_build_event(console)
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == 1
+    assert len(console.api.pending) == 1
+    assert not any("/build_info/" in call.path for call in console.api.calls)
+
+    console.api.paused.remove(key)
+    if failure == "api":
+        console.api.release(reply=Reply({"detail": "Submission unavailable"}, 503))
+    else:
+        route, _ = console.api.pending.pop(0)
+        route.abort("failed")
+    expect(button).to_be_enabled()
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("未收到受理回执")
+    expect(console.page.locator("#buildForm")).not_to_have_attribute("aria-busy", "true")
+    button.click()
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
+    expect(button).to_be_enabled()
+    assert len(console.api.matching(*key)) == 2
+
+
+def test_querying_another_build_does_not_cancel_or_unlock_pending_submission(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    key = ("POST", "/api/v1/jenkins/build_create/alpha")
+    console.api.paused.add(key)
+    console.page.locator('a[href="#buildSection"]').click()
+    button = console.page.locator('#buildForm button[type="submit"]')
+    button.click()
+    expect(button).to_be_disabled()
+    build_query(console, "other-build")
+    expect(console.page.locator("#buildStatus")).to_have_text("failed")
+    submit_build_event(console)
+    assert len(console.api.matching(*key)) == 1
+    console.api.paused.remove(key)
+    console.api.release()
+    expect(button).to_be_enabled()
+    expect(console.page.locator("#buildId")).to_have_value("other-build")
+    expect(console.page.locator("#buildStatus")).to_have_text("failed")
+
+
+def test_old_submission_cleanup_cannot_unlock_new_context_submission(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    old_key = ("POST", "/api/v1/jenkins/build_create/alpha")
+    new_key = ("POST", "/api/v1/jenkins/build_create/beta")
+    console.api.paused.update([old_key, new_key])
+    console.page.locator('a[href="#buildSection"]').click()
+    button = console.page.locator('#buildForm button[type="submit"]')
+    button.click()
+    expect(button).to_be_disabled()
+    console.page.locator('a[href="#appSection"]').click()
+    console.load_app("beta")
+    console.page.locator('a[href="#buildSection"]').click()
+    expect(button).to_be_enabled()
+    button.click()
+    expect(button).to_be_disabled()
+    console.page.wait_for_timeout(10)
+    assert len(console.api.pending) == 2
+    console.api.paused.remove(old_key)
+    console.api.release()
+    submit_build_event(console)
+    expect(button).to_be_disabled()
+    assert len(console.api.matching(*new_key)) == 1
+    console.api.paused.remove(new_key)
+    console.api.release()
+    expect(button).to_be_enabled()
+    expect(console.page.locator("#buildOutput")).to_contain_text('"appid": "beta"')
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
+
+
+@pytest.mark.parametrize("entry", ["manual", "poll", "history"])
+@pytest.mark.parametrize("mismatch", ["build", "app", "null-app"])
+def test_build_info_identity_mismatch_never_overwrites_selected_build(console: Console, entry: str, mismatch: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "expected-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    wrong_record = build_record("unexpected-build" if mismatch == "build" else build_id, "failed", appid="beta" if mismatch == "app" else "alpha")
+    if mismatch == "null-app":
+        wrong_record["appid"] = None
+    known_owner = entry == "poll" or (entry == "manual" and mismatch == "app")
+    if known_owner:
+        console.api.overrides[key] = Reply(build_record(build_id, "building"))
+        build_query(console, build_id)
+        expect(console.page.locator("#buildStatus")).to_have_text("building")
+    console.api.overrides[key] = Reply(wrong_record)
+    if entry == "history":
+        history_query(console, build_record(build_id, "building"))
+        expect(console.page.locator("#historyDetailBuild")).to_contain_text("与查询")
+    elif entry == "manual":
+        build_query(console, build_id)
+    else:
+        console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("与查询")
+    expect(console.page.locator("#buildId")).to_have_value(build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）" if known_owner else "--")
+    expect(console.page.locator("#buildOutput")).not_to_contain_text("unexpected-build")
+    expect(console.page.locator("#buildOutput")).not_to_contain_text('"appid": "beta"')
+    expect(console.page.locator("#buildOutput")).not_to_contain_text('"status": "failed"')
+    console.api.overrides[key] = Reply(build_record(build_id, "succeeded"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    if entry == "history":
+        expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "succeeded"')
+
+
+@pytest.mark.parametrize("entry", ["manual", "history"])
+def test_build_info_without_appid_uses_requested_context_for_followup_polls(console: Console, entry: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "legacy-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    record = build_record(build_id, "building")
+    record.pop("appid")
+    console.api.overrides[key] = Reply(record)
+    if entry == "history":
+        history_query(console, build_record(build_id, "building"))
+    else:
+        build_query(console, build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    terminal = build_record(build_id, "succeeded")
+    terminal.pop("appid")
+    console.api.overrides[key] = Reply(terminal)
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == 2
+
+
+def test_direct_build_query_can_inspect_other_app_and_pins_owner_for_manual_refresh(console: Console) -> None:
+    console.load_app("alpha")
+    pause_clock(console.page)
+    build_id = "beta-direct-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    console.api.overrides[key] = Reply(build_record(build_id, "building", appid="beta"))
+    build_query(console, build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    expect(console.page.locator("#buildOutput")).to_contain_text('"appid": "beta"')
+    expect(console.page.locator("#appId")).to_have_value("alpha")
+    console.api.overrides[key] = Reply(build_record(build_id, "failed", appid="alpha"))
+    console.page.locator("#pollBuildButton").click()
+    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("App ID 与查询上下文不匹配")
+    expect(console.page.locator("#buildOutput")).to_contain_text('"appid": "beta"')
+    console.api.overrides[key] = Reply(build_record(build_id, "succeeded", appid="beta"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    expect(console.page.locator("#appId")).to_have_value("alpha")
+
+
+def test_submission_cleanup_preserves_concurrent_app_operation_button_state(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    create_key = ("POST", "/api/v1/jenkins/build_create/alpha")
+    app_key = ("GET", "/api/v1/jenkins/app_info/alpha")
+    console.api.paused.update([create_key, app_key])
+    console.page.locator('a[href="#buildSection"]').click()
+    button = console.page.locator('#buildForm button[type="submit"]')
+    button.click()
+    expect(button).to_be_disabled()
+    console.page.locator('a[href="#appSection"]').click()
+    console.page.locator("#getAppButton").click()
+    expect(console.page.locator("#getAppButton")).to_be_disabled()
+    console.api.paused.remove(create_key)
+    console.api.release(reply=Reply({"detail": "Submission unavailable"}, 503))
+    expect(console.page.locator("#buildForm")).not_to_have_attribute("aria-busy", "true")
+    expect(button).to_be_disabled()
+    console.api.paused.remove(app_key)
+    console.api.release()
+    expect(console.page.locator("#getAppButton")).to_be_enabled()
+    expect(button).to_be_enabled()
+
+
+@pytest.mark.parametrize("terminal", ["failed", "succeeded", "cancelled"])
+def test_submitted_build_polls_until_terminal_without_history_refresh(console: Console, terminal: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "mock-submitted-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    replies = [Reply(build_record(build_id, "building")), Reply(build_record(build_id, terminal))]
+    console.api.overrides[key] = lambda call: replies.pop(0)
+    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator('#buildForm button[type="submit"]').click()
+
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("HTTP 202 仅表示任务已受理")
+    assert not console.api.matching(*key)
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("最近刷新")
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text(terminal)
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("自动查询已停止")
+    expect(console.page.locator("#buildCommit")).to_have_text(NEW_COMMIT)
+    expect(console.page.locator("#jenkinsBuild")).to_have_text("45")
+    if terminal == "failed":
+        expect(console.page.locator("#buildPollStatus")).to_contain_text("Jenkins build finished with FAILURE")
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == 2
+    assert len(console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")) == 1
+
+
+def test_manual_queries_do_not_overlap_automatic_poll(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "active-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    console.api.overrides[key] = Reply(build_record(build_id, "building"))
+    build_query(console, build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    console.api.paused.add(key)
+    console.page.clock.run_for(5000)
+    console.page.wait_for_timeout(10)
+    assert len(console.api.pending) == 1
+    console.page.locator("#pollBuildButton").click()
+    console.page.locator("#pollBuildButton").click()
+    console.page.clock.run_for(15000)
+    assert len(console.api.matching(*key)) == 2
+    console.api.paused.remove(key)
+    console.api.release(reply=Reply(build_record(build_id, "succeeded")))
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+
+
+@pytest.mark.parametrize("change", ["app", "build"])
+def test_late_build_response_cannot_overwrite_new_context(console: Console, change: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    old_id = "old-build"
+    old_key = ("GET", f"/api/v1/jenkins/build_info/{old_id}")
+    console.api.overrides[old_key] = Reply(build_record(old_id, "building"))
+    build_query(console, old_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    console.api.paused.add(old_key)
+    console.page.clock.run_for(5000)
+    console.page.wait_for_timeout(10)
+    assert len(console.api.pending) == 1
+    if change == "app":
+        console.page.locator('a[href="#appSection"]').click()
+        console.load_app("beta")
+    new_id = "new-build"
+    new_appid = "beta" if change == "app" else "alpha"
+    new_key = ("GET", f"/api/v1/jenkins/build_info/{new_id}")
+    console.api.overrides[new_key] = Reply(build_record(new_id, "succeeded", appid=new_appid))
+    build_query(console, new_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    console.api.paused.remove(old_key)
+    console.api.release(reply=Reply(build_record(old_id, "failed")))
+    console.page.clock.run_for(60000)
+    expect(console.page.locator("#buildId")).to_have_value(new_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    expect(console.page.locator("#buildOutput")).to_contain_text(f'"build_id": "{new_id}"')
+    assert len(console.api.matching(*old_key)) == 2
+    assert len(console.api.matching(*new_key)) == 1
+
+
+def test_late_create_receipt_is_ignored_after_app_switch(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    key = ("POST", "/api/v1/jenkins/build_create/alpha")
+    console.api.paused.add(key)
+    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator('#buildForm button[type="submit"]').click()
+    console.page.wait_for_timeout(10)
+    assert len(console.api.pending) == 1
+    console.page.locator('a[href="#appSection"]').click()
+    console.load_app("beta")
+    console.api.paused.remove(key)
+    console.api.release()
+    console.page.clock.run_for(60000)
+    expect(console.page.locator("#buildId")).to_have_value("")
+    expect(console.page.locator("#buildOutput")).not_to_contain_text("mock-submitted-build")
+    assert not any("/build_info/" in call.path for call in console.api.calls)
+
+
+def test_poll_errors_are_stale_quiet_and_retry_with_backoff(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    key = ("GET", "/api/v1/jenkins/build_info/mock-submitted-build")
+    replies = [Reply({"detail": "Temporary upstream failure"}, 503)] * 2 + [Reply(build_record("mock-submitted-build", "succeeded"))]
+    console.api.overrides[key] = lambda call: replies.pop(0)
+    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator('#buildForm button[type="submit"]').click()
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("queued（未刷新）")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("尚未取得实时查询结果")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("Temporary upstream failure")
+    expect(console.page.locator("#toastRegion .toast")).to_have_count(0)
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("10 秒后重试")
+    console.page.clock.run_for(9999)
+    assert len(console.api.matching(*key)) == 2
+    console.page.clock.run_for(1)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    expect(console.page.locator("#toastRegion .toast")).to_have_count(0)
+    assert len(console.api.matching(*key)) == 3
+
+
+def test_transport_failure_keeps_last_status_and_recovers_without_toast(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "network-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    console.api.overrides[key] = Reply(build_record(build_id, "building"))
+    build_query(console, build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    pattern = f"**{key[1]}"
+    console.page.route(pattern, lambda route: route.abort("failed"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("无法连接控制端")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("最近刷新")
+    expect(console.page.locator("#toastRegion .toast")).to_have_count(0)
+    console.page.unroute(pattern)
+    console.api.overrides[key] = Reply(build_record(build_id, "succeeded"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+
+
+def test_history_inspection_tracks_build_separately_from_list_refresh(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "history-build"
+    record = build_record(build_id, "building")
+    console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [record], "page": 1, "page_size": 20, "total": 1})
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    console.api.overrides[key] = Reply(record)
+    for resource in ("events", "images", "services", "alerts"):
+        console.api.overrides[("GET", f"/api/v1/jenkins/app_{resource}/alpha")] = Reply([])
+    console.page.locator('a[href="#historySection"]').click()
+    console.page.locator("#historyRefreshButton").click()
+    expect(console.page.locator(".history-detail-button")).to_have_count(1)
+    console.page.locator(".history-detail-button").click()
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "building"')
+    console.api.overrides[key] = Reply(build_record(build_id, "failed"))
+    list_count = len(console.api.matching("GET", "/api/v1/jenkins/build_list"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "failed"')
+    expect(console.page.locator("#buildStatus")).to_have_text("failed")
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == 2
+    assert len(console.api.matching("GET", "/api/v1/jenkins/build_list")) == list_count
+
+
+@pytest.mark.parametrize("resource_reply", ["success", "failure"])
+def test_slow_history_resources_do_not_delay_polls_or_overwrite_terminal_status(console: Console, resource_reply: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "slow-resource-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    images_key = ("GET", "/api/v1/jenkins/app_images/alpha")
+    console.api.overrides[key] = Reply(build_record(build_id, "building"))
+    console.api.paused.add(images_key)
+    history_query(console, build_record(build_id, "building"))
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "building"')
+    expect(console.page.locator("#historyDetailEvents")).to_have_text("[]")
+    expect(console.page.locator("#historyDetailImages")).to_have_text("加载中...")
+    expect(console.page.locator("#historyDetailStatus")).to_contain_text("关联资源仍在加载（1 个）")
+    assert len(console.api.pending) == 1
+    console.api.overrides[key] = Reply(build_record(build_id, "failed"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("failed")
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "failed"')
+    latest_build = console.page.locator("#historyDetailBuild").text_content()
+    latest_output = console.page.locator("#buildOutput").text_content()
+    latest_poll_status = console.page.locator("#buildPollStatus").text_content()
+    latest_refresh = console.page.locator("#historyDetailStatus").text_content().split("；", 1)[0]
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == 2
+    console.api.paused.remove(images_key)
+    reply = Reply([{ "build_id": build_id, "tag": "late-image"}, {"build_id": "other-build", "tag": "not-selected"}]) if resource_reply == "success" else Reply({"detail": "Images unavailable"}, 503)
+    console.api.release(reply=reply)
+    if resource_reply == "success":
+        expect(console.page.locator("#historyDetailImages")).to_contain_text("late-image")
+        expect(console.page.locator("#historyDetailImages")).not_to_contain_text("not-selected")
+    else:
+        expect(console.page.locator("#historyDetailImages")).to_contain_text("Images unavailable")
+        expect(console.page.locator("#historyDetailStatus")).to_contain_text("1 个接口返回失败")
+    expect(console.page.locator("#historyDetailStatus")).to_contain_text(latest_refresh)
+    expect(console.page.locator("#historyDetailStatus")).not_to_contain_text("仍在加载")
+    expect(console.page.locator("#historyDetailBuild")).to_have_text(latest_build)
+    expect(console.page.locator("#buildOutput")).to_have_text(latest_output)
+    expect(console.page.locator("#buildPollStatus")).to_have_text(latest_poll_status)
+    expect(console.page.locator("#buildStatus")).to_have_text("failed")
+    assert len(console.api.matching(*key)) == 2
+
+
+def test_late_history_resources_cannot_overwrite_new_inspection(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    old_id = "old-history-build"
+    new_id = "new-history-build"
+    images_key = ("GET", "/api/v1/jenkins/app_images/alpha")
+    console.api.overrides[("GET", f"/api/v1/jenkins/build_info/{old_id}")] = Reply(build_record(old_id, "building"))
+    console.api.paused.add(images_key)
+    history_query(console, build_record(old_id, "building"))
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    expect(console.page.locator("#historyDetailImages")).to_have_text("加载中...")
+    console.api.paused.remove(images_key)
+    console.api.overrides[images_key] = Reply([{"build_id": new_id, "tag": "new-image"}])
+    console.api.overrides[("GET", f"/api/v1/jenkins/build_info/{new_id}")] = Reply(build_record(new_id, "succeeded"))
+    history_query(console, build_record(new_id, "succeeded"))
+    expect(console.page.locator("#historyDetailImages")).to_contain_text("new-image")
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    console.api.release(reply=Reply([{"build_id": old_id, "tag": "old-image"}]))
+    console.page.clock.run_for(60000)
+    expect(console.page.locator("#historyDetailImages")).to_contain_text("new-image")
+    expect(console.page.locator("#historyDetailImages")).not_to_contain_text("old-image")
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text(f'"build_id": "{new_id}"')
+    expect(console.page.locator("#buildId")).to_have_value(new_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+
+
+def test_late_history_build_response_cannot_overwrite_new_inspection(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    old_id = "delayed-history-build"
+    old_key = ("GET", f"/api/v1/jenkins/build_info/{old_id}")
+    console.api.paused.add(old_key)
+    history_query(console, build_record(old_id, "building"))
+    expect(console.page.locator("#historyDetailEvents")).to_have_text("[]")
+    expect(console.page.locator("#historyDetailBuild")).to_have_text("加载中...")
+    new_id = "current-history-build"
+    console.api.overrides[("GET", f"/api/v1/jenkins/build_info/{new_id}")] = Reply(build_record(new_id, "succeeded"))
+    history_query(console, build_record(new_id, "succeeded"))
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    console.api.paused.remove(old_key)
+    console.api.release(reply=Reply(build_record(old_id, "failed")))
+    console.page.clock.run_for(60000)
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text(f'"build_id": "{new_id}"')
+    expect(console.page.locator("#historyDetailBuild")).not_to_contain_text(old_id)
+    expect(console.page.locator("#buildId")).to_have_value(new_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    assert len(console.api.matching(*old_key)) == 1
+
+
+def test_history_build_owner_is_independent_of_active_app_and_preserved_for_polls(console: Console) -> None:
+    console.load_app("alpha")
+    pause_clock(console.page)
+    build_id = "beta-history-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    record = build_record(build_id, "building", appid="beta")
+    console.api.overrides[key] = Reply(record)
+    history_query(console, record)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    expect(console.page.locator("#historyDetailMeta")).to_have_text("App ID：beta")
+    expect(console.page.locator("#appId")).to_have_value("alpha")
+    console.api.overrides[key] = Reply(build_record(build_id, "failed", appid="alpha"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("App ID 与查询上下文不匹配")
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"appid": "beta"')
+    console.api.overrides[key] = Reply(build_record(build_id, "succeeded", appid="beta"))
+    console.page.clock.run_for(5000)
+    expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
+    expect(console.page.locator("#historyDetailBuild")).to_contain_text('"appid": "beta"')
+    expect(console.page.locator("#appId")).to_have_value("alpha")
+
+
+@pytest.mark.parametrize("end", ["logout", "unauthorized", "pagehide"])
+def test_build_poll_stops_for_session_or_page_end(console: Console, end: str) -> None:
+    console.load_app()
+    pause_clock(console.page)
+    build_id = "active-build"
+    key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
+    console.api.overrides[key] = Reply(build_record(build_id, "building"))
+    build_query(console, build_id)
+    expect(console.page.locator("#buildStatus")).to_have_text("building")
+    if end == "logout":
+        console.api.paused.add(key)
+        console.page.clock.run_for(5000)
+        console.page.wait_for_timeout(10)
+        assert len(console.api.pending) == 1
+        console.page.locator("#disconnectButton").click()
+        expect(console.page.locator("#sessionStatus")).to_have_text("未连接")
+        console.api.release(reply=Reply(build_record(build_id, "failed")))
+    elif end == "unauthorized":
+        console.api.overrides[key] = Reply({"detail": "Invalid token"}, 401)
+        console.page.clock.run_for(5000)
+        expect(console.page.locator("#sessionStatus")).to_have_text("未连接")
+        expect(console.page.locator("#buildPollStatus")).to_contain_text("访问令牌失效")
+    else:
+        console.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    count = len(console.api.matching(*key))
+    console.page.clock.run_for(60000)
+    assert len(console.api.matching(*key)) == count
+    expect(console.page.locator("#buildStatus")).not_to_have_text("failed")
 
 
 def test_access_region_is_populated_has_legacy_fallback_and_resets_with_app_context(console: Console) -> None:

@@ -154,6 +154,47 @@ def test_control_console_exposes_compose_discovery_and_repository_sync_results()
     assert "/api/v1/jenkins/app_sync/" in script.text
 
 
+def test_build_workspace_distinguishes_receipt_and_automatic_status_queries() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    assert 'id="buildPollStatus"' in page.text
+    assert "HTTP 202 仅表示任务已受理" in page.text
+    assert "约每 5 秒自动查询" in page.text
+    assert "const BUILD_POLL_INTERVAL_MS = 5000" in script.text
+    assert 'window.addEventListener("pagehide"' in script.text
+    assert "状态未刷新" in script.text
+
+
+def test_build_requests_share_identity_validation_and_keep_submission_separate_from_polling() -> None:
+    script = client.get("/ui/app.js").text
+    create = re.search(r"async function createBuild\(\) \{(.*?)\n  async function getBuild", script, flags=re.DOTALL)
+    assert create is not None
+    assert "if (state.buildCreateOperation) return null;" in create.group(1)
+    assert create.group(1).index("state.buildCreateOperation = operation") < create.group(1).index("await request")
+    assert "state.buildPollController = controller" not in create.group(1)
+    assert "state.buildCreateOperation === operation" in create.group(1)
+    assert 'form.setAttribute("aria-busy", "true")' in script
+    assert 'Object.prototype.hasOwnProperty.call(build, "appid")' in script
+    assert "appid !== undefined && build.appid !== appid" in script
+    assert "state.latestBuild?.build_id === buildId ? state.buildAppid : undefined" in script
+    assert "validateBuildResponse(value, buildId, expectedAppid)" in script
+    assert "validateBuildResponse(value, buildId, selectedAppid)" in script
+
+
+def test_history_inspection_does_not_wait_for_or_reapply_build_status_from_resources() -> None:
+    script = client.get("/ui/app.js").text
+    inspect = re.search(r"async function inspectBuild\(buildId, appid\) \{(.*?)\n  function stopHistoryPolling", script, flags=re.DOTALL)
+    assert inspect is not None
+    source = inspect.group(1)
+    assert source.index("loadHistoryDetailResources(operation);") < source.index("await request")
+    assert "Promise.allSettled" not in source
+    assert "startBuildPolling(value, { inspect: true, appid: selectedAppid })" in source
+    resources = re.search(r"async function loadHistoryDetailResources\(operation\) \{(.*?)\n  async function inspectBuild", script, flags=re.DOTALL)
+    assert resources is not None
+    assert "historyDetailContextMatches(operation)" in resources.group(1)
+    assert "applyBuild(" not in resources.group(1)
+
+
 def test_template_workspace_exposes_technology_stack_editor_and_compose_actions() -> None:
     page = client.get("/ui/")
     script = client.get("/ui/app.js")

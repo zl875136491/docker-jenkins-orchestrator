@@ -8,6 +8,8 @@ import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from pydantic import model_validator
 
+from orchestrator.naming import APPID_MAX_LENGTH, NamingError, validate_appid
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -58,13 +60,21 @@ class EventLevel(str, Enum):
 
 
 class UserAppCreate(DomainModel):
-    appid: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    appid: str = Field(min_length=1, max_length=APPID_MAX_LENGTH)
     name: str = Field(min_length=1, max_length=128)
     repository_url: str = Field(min_length=3, max_length=2048)
     git_ref: str = Field(default="main", min_length=1, max_length=256)
     environment: dict[str, str] = Field(default_factory=dict)
     compose: dict[str, Any] | None = None
     components: list[str] = Field(default_factory=list)
+
+    @field_validator("appid")
+    @classmethod
+    def appid_is_valid(cls, value: str) -> str:
+        try:
+            return validate_appid(value)
+        except NamingError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("repository_url")
     @classmethod

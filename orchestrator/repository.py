@@ -30,6 +30,16 @@ class DuplicateTechStackError(RepositoryError):
     pass
 
 
+def _app_update_fields(appid: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Keep the business identity immutable without modifying caller fields."""
+
+    if "appid" in fields and fields["appid"] != appid:
+        raise ValueError("appid is immutable")
+    updates = dict(fields)
+    updates.pop("appid", None)
+    return updates
+
+
 class Repository(Protocol):
     def ensure_indexes(self) -> None: ...
     def close(self) -> None: ...
@@ -110,11 +120,12 @@ class InMemoryRepository:
             return [self._copy(app) for app in values]
 
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
+        updates = _app_update_fields(appid, fields)
         with self._lock:
             existing = self.apps.get(appid)
             if existing is None:
                 return None
-            updated = existing.model_copy(update=fields, deep=True)
+            updated = existing.model_copy(update=updates, deep=True)
             self.apps[appid] = updated
             return self._copy(updated)
 
@@ -320,10 +331,11 @@ class MongoRepository:
         return [self._model(UserAppRecord, document) for document in documents]
 
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None:
+        updates = _app_update_fields(appid, fields)
         from pymongo import ReturnDocument
 
         document = self.apps.find_one_and_update(
-            {"appid": appid}, {"$set": fields}, return_document=ReturnDocument.AFTER
+            {"appid": appid}, {"$set": updates}, return_document=ReturnDocument.AFTER
         )
         return self._model(UserAppRecord, document)
 

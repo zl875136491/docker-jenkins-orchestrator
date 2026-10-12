@@ -98,6 +98,7 @@ def test_trigger_poll_build_and_fetch_result_artifact() -> None:
         "ENVIRONMENT_JSON": ['{"MODE":"production","TOKEN":"do-not-log"}'],
         "COMPOSE_JSON": ['{"services":{"api":{"environment":{"TOKEN":"do-not-log"},"image":"example/orders"}}}'],
         "IMAGE_REPOSITORY": ["harbor.example/apps/orders"],
+        "HARBOR_REGISTRY": ["harbor.example"],
     }
     assert transport.calls[1]["headers"]["Jenkins-Crumb"] == "crumb-value"
     assert transport.calls[1]["headers"]["Authorization"].startswith("Basic ")

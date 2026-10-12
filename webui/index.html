@@ -202,7 +202,7 @@
                 <p class="eyebrow">02 / PIPELINE</p>
                 <h2>构建任务</h2>
               </div>
-              <span class="section-note">提交任务并轮询 Jenkins 状态</span>
+              <span class="section-note">提交任务后自动查询控制端构建状态</span>
             </div>
             <div class="split-panel">
               <form id="buildForm" class="stack-form">
@@ -220,7 +220,7 @@
                 <button class="button button-secondary" type="submit">查询构建</button>
               </form>
             </div>
-            <p class="muted small">仓库同步只更新应用配置，不会自动触发构建。确认配置后在此显式提交构建；构建记录会显示实际使用的 git_commit_sha。</p>
+            <p class="muted small">仓库同步只更新应用配置，不会自动触发构建。提交后 HTTP 202 仅表示任务已受理，不代表构建完成；当前构建状态约每 5 秒自动查询，终态后停止。构建记录会显示实际使用的 git_commit_sha。</p>
             <div class="build-summary">
               <div>
                 <span class="metric-label">状态</span>
@@ -240,6 +240,7 @@
               </div>
               <button id="pollBuildButton" class="button button-quiet" type="button">再次查询</button>
             </div>
+            <p id="buildPollStatus" class="operation-status small muted" role="status" aria-live="polite">尚无构建状态查询。</p>
             <pre id="buildOutput" class="json-output" aria-live="polite">等待构建操作</pre>
           </section>
 

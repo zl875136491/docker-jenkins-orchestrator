@@ -22,6 +22,7 @@ from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
 from orchestrator.gitlab import GitLabError, GitLabHttpAdapter
 from orchestrator.jenkins import JenkinsBuildRequest, JenkinsBuildState, JenkinsError, JenkinsHttpAdapter
 from orchestrator.models import BaseImage, BuildJob, BuildStatus, EventLevel, UserAppRecord, UserImage, utc_now
+from orchestrator.naming import NamingError, external_namespace, is_docker_repository_component, validate_image_repository
 from orchestrator.registry import DockerRegistrySynchronizer, RegistrySyncError
 from orchestrator.services import BuildInputError, BuildService, NotFoundError
 from orchestrator.templates import TemplateCatalog, TemplateError
@@ -443,11 +444,33 @@ class WorkerRuntime:
     def _image_repository(self, appid: str) -> str:
         if not self.settings.harbor_url:
             raise BuildInputError("Harbor registry URL is required for builds")
-        raw = self.settings.harbor_url.strip().rstrip("/")
-        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-        if not parsed.netloc or parsed.username or parsed.password or parsed.path not in {"", "/"}:
+        raw = self.settings.harbor_url.strip()
+        try:
+            parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+            # Accessing ``port`` makes urlsplit reject malformed ports such as
+            # ``harbor.example:bad`` instead of allowing them to reach Docker.
+            parsed.port
+        except ValueError as exc:
+            raise BuildInputError("Harbor registry URL is invalid") from exc
+        if (
+            not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or "?" in raw
+            or "#" in raw
+            or (parsed.scheme and parsed.scheme not in {"http", "https"})
+        ):
             raise BuildInputError("Harbor registry URL is invalid")
-        return f"{parsed.netloc}/{self.settings.harbor_project}/{appid}"
+        if not is_docker_repository_component(self.settings.harbor_project):
+            raise BuildInputError("Harbor project must be a lowercase Docker repository component")
+        try:
+            repository = f"{parsed.netloc}/{self.settings.harbor_project}/{external_namespace(appid)}"
+            return validate_image_repository(repository)
+        except NamingError as exc:
+            raise BuildInputError(str(exc)) from exc
 
     @staticmethod
     def _validate_source_compose(compose: Any) -> None:
@@ -474,13 +497,13 @@ class WorkerRuntime:
 
     @staticmethod
     def _validate_artifact_topology(source_compose: Any, artifact_compose: Any) -> None:
-        """Ensure Jenkins cannot silently remove a service or published port.
+        """Ensure Jenkins preserves service, port, and persistence contracts.
 
         Jenkins is allowed to replace images and normalize other build-time
         fields, but the final deployment contract must retain the user-facing
-        service topology and every declared port mapping. A missing mapping
-        otherwise looks like a successful deployment while making the app
-        unreachable from outside Swarm.
+        service topology, every declared port mapping, and the original volume
+        declarations. Losing a volume's explicit name/external metadata would
+        otherwise silently switch an existing database to a new empty volume.
         """
 
         WorkerRuntime._validate_source_compose(source_compose)
@@ -488,6 +511,15 @@ class WorkerRuntime:
         artifact_services = artifact_compose["services"]
         if set(source_services) != set(artifact_services):
             raise BuildInputError("Jenkins deployment artifact changed the Compose service topology")
+        source_volumes = source_compose.get("volumes")
+        artifact_volumes = artifact_compose.get("volumes")
+        if ({} if source_volumes is None else source_volumes) != (
+            {} if artifact_volumes is None else artifact_volumes
+        ):
+            raise BuildInputError(
+                "Jenkins deployment artifact changed top-level volumes; "
+                "the final artifact must preserve the source Compose volume declarations"
+            )
         for name, source_service in source_services.items():
             source_ports = DockerSwarmAdapter._ports(source_service.get("ports"))
             artifact_ports = DockerSwarmAdapter._ports(artifact_services[name].get("ports"))
@@ -495,6 +527,15 @@ class WorkerRuntime:
                 raise BuildInputError(
                     f"Jenkins deployment artifact changed ports for service {name}; "
                     "the final artifact must preserve the source Compose port mappings"
+                )
+            source_mounts = source_service.get("volumes")
+            artifact_mounts = artifact_services[name].get("volumes")
+            if ([] if source_mounts is None else source_mounts) != (
+                [] if artifact_mounts is None else artifact_mounts
+            ):
+                raise BuildInputError(
+                    f"Jenkins deployment artifact changed volumes for service {name}; "
+                    "the final artifact must preserve the source Compose mount definitions"
                 )
 
     def _fail(self, build: BuildJob, exc: Exception, fallback: str) -> BuildJob:

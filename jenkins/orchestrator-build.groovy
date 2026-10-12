@@ -94,7 +94,35 @@ EOF
 import json
 import os
 import re
+import ipaddress
 from pathlib import Path
+
+def validate_repository(value):
+    # Match Docker's repository grammar, not the looser Compose/Swarm name
+    # grammar. Tags allow uppercase, but repository path components do not.
+    component = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+    host_component = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    registry_pattern = rf"(?:{host_component}(?:\.{host_component})*|\[[A-Fa-f0-9:]+\])(?::[0-9]{{1,5}})?"
+    registry, separator, path = value.partition("/")
+    if not separator or not re.fullmatch(registry_pattern, registry):
+        raise SystemExit("IMAGE_REPOSITORY must start with a valid registry host (and optional port)")
+    if registry.startswith("["):
+        try:
+            ipaddress.IPv6Address(registry[1:registry.index("]")])
+        except ValueError:
+            raise SystemExit("IMAGE_REPOSITORY registry IPv6 address is invalid") from None
+    port = registry[registry.index("]") + 1:] if registry.startswith("[") else registry.rpartition(":")[2] if ":" in registry else ""
+    if port:
+        digits = port.removeprefix(":")
+        if len(digits) > 5 or not 1 <= int(digits) <= 65535:
+            raise SystemExit("IMAGE_REPOSITORY registry port is invalid")
+    if registry.lower() != "localhost" and "." not in registry and ":" not in registry:
+        raise SystemExit("IMAGE_REPOSITORY registry must be localhost, a qualified host, or host:port")
+    if not re.fullmatch(rf"{component}(?:/{component})*", path) or len(path) > 255:
+        raise SystemExit("IMAGE_REPOSITORY repository path must be lowercase Docker components and at most 255 characters")
+    if registry != os.environ["HARBOR_REGISTRY"]:
+        raise SystemExit("HARBOR_REGISTRY must match the IMAGE_REPOSITORY registry")
+    return value
 
 compose = json.loads(Path("input-compose.json").read_text())
 environment = json.loads(Path("input-environment.json").read_text())
@@ -102,14 +130,18 @@ if not isinstance(compose, dict) or not isinstance(compose.get("services"), dict
     raise SystemExit("COMPOSE_JSON must contain a non-empty services mapping")
 if not isinstance(environment, dict):
     raise SystemExit("ENVIRONMENT_JSON must be a JSON object")
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", os.environ["APPID"]):
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", os.environ["APPID"]):
     raise SystemExit("APPID contains unsupported characters")
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)+", os.environ["IMAGE_REPOSITORY"]):
-    raise SystemExit("IMAGE_REPOSITORY must be a registry/repository reference")
+repository = validate_repository(os.environ["IMAGE_REPOSITORY"])
+if not re.fullmatch(r"[0-9]+", os.environ["BUILD_NUMBER"]):
+    raise SystemExit("BUILD_NUMBER must be numeric")
 plan = []
 for name, raw in compose["services"].items():
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
         raise SystemExit(f"invalid service name: {name!r}")
+    tag = f"{os.environ['BUILD_NUMBER']}-{name}"
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag):
+        raise SystemExit(f"image tag for service {name!r} exceeds Docker's 128-character limit")
     if not isinstance(raw, dict):
         raise SystemExit(f"service {name} must be an object")
     if "env_file" in raw:
@@ -129,7 +161,7 @@ for name, raw in compose["services"].items():
     for value, label in ((context, "build context"), (dockerfile, "dockerfile")):
         if value is not None and (not isinstance(value, str) or value.startswith("/") or ".." in Path(value).parts):
             raise SystemExit(f"service {name} has unsafe {label}")
-    plan.append({"name": name, "image": image, "context": context, "dockerfile": dockerfile})
+    plan.append({"name": name, "image": image, "context": context, "dockerfile": dockerfile, "destination": f"{repository}:{tag}"})
 Path("build-plan.json").write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
 PY
         '''
@@ -159,7 +191,7 @@ plan = json.loads(Path("build-plan.json").read_text())
 references = {}
 for item in plan:
     name = item["name"]
-    destination = f"{os.environ['IMAGE_REPOSITORY']}:{os.environ['BUILD_NUMBER']}-{name}"
+    destination = item["destination"]
     source = item.get("image")
     context = item.get("context")
     if context is not None:
@@ -190,6 +222,10 @@ result = {
     "compose": {"version": compose.get("version", "3.9"), "services": services},
     "source": json.loads(Path("checkout.json").read_text()),
 }
+if "volumes" in compose:
+    # Keep explicit/external volume metadata; an alias alone cannot tell the
+    # deployment adapter whether a volume is app-owned or intentionally shared.
+    result["compose"]["volumes"] = compose["volumes"]
 Path("orchestrator-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
 PY
             test -s orchestrator-result.json
@@ -209,8 +245,10 @@ source = json.loads(Path("input-compose.json").read_text())
 artifact = json.loads(Path("orchestrator-result.json").read_text())
 assert artifact["images"]
 assert set(source["services"]) == set(artifact["compose"]["services"])
+assert artifact["compose"].get("volumes") == source.get("volumes"), "top-level volumes"
 for name, service in source["services"].items():
     assert artifact["compose"]["services"][name].get("ports") == service.get("ports"), name
+    assert artifact["compose"]["services"][name].get("volumes") == service.get("volumes"), name
     assert artifact["compose"]["services"][name].get("image"), name
 PY
         '''

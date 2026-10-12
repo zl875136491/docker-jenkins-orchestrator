@@ -1,9 +1,52 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
-from orchestrator.models import BaseImage, BuildJob, BuildStatus
-from orchestrator.repository import InMemoryRepository
+from orchestrator.models import BaseImage, BuildJob, BuildStatus, UserAppRecord
+from orchestrator.repository import InMemoryRepository, MongoRepository
+
+
+def _app_record(appid: str = "Foo") -> UserAppRecord:
+    return UserAppRecord(
+        appid=appid,
+        name=f"app {appid}",
+        repository_url=f"https://git.example/{appid}.git",
+        git_ref="main",
+        environment_ciphertext="{}",
+    )
+
+
+class FakeAppCollection:
+    def __init__(self, app: UserAppRecord) -> None:
+        self.document = app.model_dump(mode="python")
+        self.updates: list[tuple[dict[str, Any], dict[str, Any], Any]] = []
+
+    def find_one_and_update(self, query, update, *, return_document):
+        self.updates.append((query, update, return_document))
+        if self.document["appid"] != query["appid"]:
+            return None
+        self.document.update(update["$set"])
+        return dict(self.document)
+
+
+@pytest.fixture
+def mongo_app_repository() -> tuple[MongoRepository, FakeAppCollection]:
+    collection = FakeAppCollection(_app_record())
+    database = {
+        name: object()
+        for name in (
+            "build_jobs",
+            "app_events",
+            "user_images",
+            "base_images",
+            "tech_stacks",
+            "deployment_services",
+            "alerts",
+        )
+    }
+    database["user_apps"] = collection
+    return MongoRepository(database), collection
 
 
 def test_base_image_storage_is_separate_from_user_apps() -> None:
@@ -12,6 +55,96 @@ def test_base_image_storage_is_separate_from_user_apps() -> None:
     repository.save_base_image(image)
     assert repository.base_images["python:3.12"].harbor_reference == "boot-images/python"
     assert repository.apps == {}
+
+
+def test_app_identity_and_build_filtering_preserve_appid_case() -> None:
+    repository = InMemoryRepository()
+    for appid in ("Foo", "foo"):
+        repository.create_app(
+            UserAppRecord(
+                appid=appid,
+                name=f"app {appid}",
+                repository_url=f"https://git.example/{appid}.git",
+                git_ref="main",
+                environment_ciphertext="{}",
+            )
+        )
+        repository.create_build(BuildJob(build_id=f"build-{appid}", appid=appid, git_ref="main"))
+
+    assert repository.get_app("Foo").appid == "Foo"
+    assert repository.get_app("foo").appid == "foo"
+    assert repository.get_app("FOO") is None
+    assert repository.list_builds(appid="Foo")[1] == 1
+    assert repository.list_builds(appid="foo")[1] == 1
+
+
+@pytest.mark.parametrize("replacement_appid", ["foo", "other", None])
+def test_in_memory_app_updates_reject_identity_changes(replacement_appid: str | None) -> None:
+    repository = InMemoryRepository()
+    original = repository.create_app(_app_record())
+    repository.create_build(BuildJob(build_id="build-Foo", appid="Foo", git_ref="main"))
+    fields = {"appid": replacement_appid, "name": "renamed"}
+
+    with pytest.raises(ValueError, match="appid is immutable"):
+        repository.update_app("Foo", fields)
+
+    assert repository.get_app("Foo") == original
+    assert repository.get_app("foo") is None
+    assert repository.get_app("other") is None
+    assert repository.list_builds(appid="Foo")[1] == 1
+    assert fields == {"appid": replacement_appid, "name": "renamed"}
+
+
+def test_in_memory_app_updates_allow_same_identity_without_changing_foreign_keys() -> None:
+    repository = InMemoryRepository()
+    repository.create_app(_app_record())
+    repository.create_build(BuildJob(build_id="build-Foo", appid="Foo", git_ref="main"))
+    fields = {"appid": "Foo", "name": "renamed"}
+
+    updated = repository.update_app("Foo", fields)
+
+    assert updated.appid == "Foo"
+    assert updated.name == "renamed"
+    assert repository.get_app("Foo") == updated
+    assert repository.get_app("foo") is None
+    builds, total = repository.list_builds(appid="Foo")
+    assert total == 1
+    assert builds[0].appid == "Foo"
+    assert repository.list_builds(appid="foo")[1] == 0
+    assert fields == {"appid": "Foo", "name": "renamed"}
+
+
+@pytest.mark.parametrize("replacement_appid", ["foo", "other", None])
+def test_mongo_app_updates_reject_identity_changes_before_writing(
+    mongo_app_repository: tuple[MongoRepository, FakeAppCollection], replacement_appid: str | None
+) -> None:
+    repository, collection = mongo_app_repository
+    original = dict(collection.document)
+    fields = {"appid": replacement_appid, "name": "renamed"}
+
+    with pytest.raises(ValueError, match="appid is immutable"):
+        repository.update_app("Foo", fields)
+
+    assert collection.updates == []
+    assert collection.document == original
+    assert fields == {"appid": replacement_appid, "name": "renamed"}
+
+
+def test_mongo_app_updates_remove_same_identity_from_set_without_changing_caller_fields(
+    mongo_app_repository: tuple[MongoRepository, FakeAppCollection],
+) -> None:
+    from pymongo import ReturnDocument
+
+    repository, collection = mongo_app_repository
+    fields = {"appid": "Foo", "name": "renamed"}
+
+    updated = repository.update_app("Foo", fields)
+
+    assert updated.appid == "Foo"
+    assert updated.name == "renamed"
+    assert collection.updates == [({"appid": "Foo"}, {"$set": {"name": "renamed"}}, ReturnDocument.AFTER)]
+    assert collection.document["appid"] == "Foo"
+    assert fields == {"appid": "Foo", "name": "renamed"}
 
 
 def test_build_history_filters_sorts_and_pages() -> None:

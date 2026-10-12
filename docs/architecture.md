@@ -147,7 +147,7 @@ Celery beat 定期投递基础镜像同步任务。同步 worker 从模板目录
 - **GitLab**：使用项目 API 验证仓库和分支；仓库检出仍由 Jenkins job 完成。
 - **Jenkins**：获取 crumb、触发参数化 build、解析 queue item、轮询 build、读取 JSON artifact。
 - **Harbor/Docker Registry**：通过 Docker SDK 的 pull/tag/push 同步基础镜像；应用镜像由 Jenkins 生成后登记。
-- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。适配器映射镜像、环境、挂载、端口、健康检查、`shm_size`、资源、重启策略和副本数；真实 SDK 下会等待期望 task 进入 `running`，worker 在配置公开 host 时会探测 published TCP 端口。`depends_on` 仍只用于依赖校验与依赖优先创建，Compose healthcheck 会随 task spec 下发，但应用级健康语义仍需后续协议检查或自身重试。`env_file`、secrets/configs、GPU/devices、自定义网络等无法安全映射的字段必须在创建 Docker 对象前显式拒绝。
+- **Docker Services**：通过 Docker SDK 的 Swarm Service API 创建或更新服务，使用 appid 命名空间隔离服务和网络。业务身份保留原始 appid，外部名称映射及旧资源迁移边界见 [App ID 命名迁移说明](appid-namespace.md)。适配器映射镜像、环境、挂载、端口、健康检查、`shm_size`、资源、重启策略和副本数；真实 SDK 下会等待期望 task 进入 `running`，worker 在配置公开 host 时会探测 published TCP 端口。`depends_on` 仍只用于依赖校验与依赖优先创建，Compose healthcheck 会随 task spec 下发，但应用级健康语义仍需后续协议检查或自身重试。`env_file`、secrets/configs、GPU/devices、自定义网络等无法安全映射的字段必须在创建 Docker 对象前显式拒绝。
 
 适配器不得记录密码、token 或完整环境变量。网络错误转换为包含安全上下文的领域错误，并写入事件及告警。
 

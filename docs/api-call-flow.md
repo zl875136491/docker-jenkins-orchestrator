@@ -9,7 +9,7 @@
 4. 使用 `POST /api/v1/docker/template_compose?format=json` 获取 Compose JSON 与完整路径注释，或使用 `?format=yaml` 获取带注释 YAML；也可以提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
 5. 如果仓库 Compose 有更新，调用 `POST /api/v1/jenkins/app_sync/{app_id}`；它不需要请求体，默认同步创建应用时保存的 `git_ref`。
 6. 如需人工覆盖或调整 Compose，调用 `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
-7. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。
+7. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。HTTP `202` 表示请求已受理，响应中的 `queued` 只是此刻的状态快照，不能作为之后仍在排队的依据。
 8. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
 9. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
 
@@ -26,6 +26,8 @@ WebUI 调用 Control API；MongoDB 保存应用、构建、事件、镜像、服
 ## Compose 规则
 
 构建前必须保存有效的 `services` mapping。GitLab 自动发现/同步会先把仓库完整克隆到本地，再基于解析出的固定 commit SHA 检出并搜索；运行镜像内必须有 Git 和 CA 证书，克隆超时由 `ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS` 控制。自动发现只识别 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml`，不会改写环境专属参数；发现多个嵌套候选时需要人工通过 `PATCH app_info` 选择或整理 Compose。`ports` 才会申请外部入口，例如 `18082:3000` 表示期望宿主机 18082 转发到容器 3000；worker 会在部署前检查冲突并可能重新分配宿主机 published 端口，实际端口以 `app_access`/`published_ports` 为准。`expose` 仅供容器网络使用。服务必须真正监听 target port。
+
+业务 appid 保留原值且不可改写，外部资源使用独立 namespace。默认 named volume 按应用及逻辑卷身份隔离，显式 `name`/`external` 才表示指定或共享物理卷；升级旧部署前须核对 owner 标签与卷数据，不能仅凭旧的小写名称认领。详细兼容边界见 [App ID 与外部资源命名迁移说明](appid-namespace.md)。
 
 ## 排障顺序
 

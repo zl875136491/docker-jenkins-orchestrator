@@ -1,6 +1,11 @@
+from pathlib import Path
+from hashlib import sha256
+
 import pytest
 
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
+from orchestrator.naming import external_namespace, managed_volume_name, template_volume_alias
+from orchestrator.templates import TemplateCatalog
 
 
 class NotFound(Exception):
@@ -11,6 +16,15 @@ class FakeNetwork:
     def __init__(self, name: str) -> None:
         self.name = name
         self.id = f"network-{name}-id"
+        appid = name.rsplit("-", 1)[-1]
+        self.attrs = {
+            "ID": self.id,
+            "Name": name,
+            "Labels": {
+                "io.docker-jenkins-orchestrator.appid": appid,
+                "io.docker-jenkins-orchestrator.namespace": external_namespace(appid),
+            },
+        }
         self.remove_calls = 0
 
     def remove(self) -> None:
@@ -26,12 +40,16 @@ class FakeNetworks:
     def get(self, name: str) -> FakeNetwork:
         self.get_calls.append(name)
         if name not in self.items:
+            for network in self.items.values():
+                if network.id == name:
+                    return network
             raise NotFound(name)
         return self.items[name]
 
     def create(self, name: str, **kwargs) -> FakeNetwork:
         self.create_calls.append((name, kwargs))
         network = FakeNetwork(name)
+        network.attrs["Labels"] = dict(kwargs.get("labels", {}))
         self.items[name] = network
         return network
 
@@ -40,7 +58,17 @@ class FakeService:
     def __init__(self, name: str) -> None:
         self.name = name
         self.id = f"service-{name}-id"
-        self.attrs = {"ID": self.id}
+        appid = name.rsplit("-", 1)[0]
+        self.attrs = {
+            "ID": self.id,
+            "Spec": {
+                "Name": name,
+                "Labels": {
+                    "io.docker-jenkins-orchestrator.appid": appid,
+                    "io.docker-jenkins-orchestrator.namespace": external_namespace(appid),
+                },
+            },
+        }
         self.update_calls: list[dict] = []
         self.remove_calls = 0
 
@@ -70,17 +98,40 @@ class FakeServices:
     def get(self, name: str) -> FakeService:
         self.get_calls.append(name)
         if name not in self.items:
+            for service in self.items.values():
+                if service.id == name:
+                    return service
             raise NotFound(name)
         return self.items[name]
 
     def create(self, image: str, **kwargs) -> FakeService:
         self.create_calls.append((image, kwargs))
         service = FakeService(kwargs["name"])
+        service.attrs["Spec"]["Labels"] = dict(kwargs.get("labels", {}))
+        mounts = []
+        for mount in kwargs.get("mounts", []):
+            if isinstance(mount, str):
+                source, target = mount.split(":")[:2]
+                mounts.append({"Type": "bind" if source.startswith("/") else "volume", "Source": source, "Target": target})
+            elif isinstance(mount, dict):
+                mounts.append(dict(mount))
+        service.attrs["Spec"]["TaskTemplate"] = {"ContainerSpec": {"Mounts": mounts}}
         self.items[kwargs["name"]] = service
         return service
 
     def list(self, **kwargs) -> list[FakeService]:
-        return list(self.items.values())
+        services = list(self.items.values())
+        filters = kwargs.get("filters")
+        if isinstance(filters, dict):
+            label = filters.get("label")
+            if isinstance(label, str) and "=" in label:
+                key, expected = label.split("=", 1)
+                services = [
+                    service
+                    for service in services
+                    if str(service.attrs.get("Spec", {}).get("Labels", {}).get(key)) == expected
+                ]
+        return services
 
 
 class FakeDocker:
@@ -124,7 +175,10 @@ def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> 
             {
                 "driver": "overlay",
                 "attachable": True,
-                "labels": {"io.docker-jenkins-orchestrator.appid": "demo"},
+                "labels": {
+                    "io.docker-jenkins-orchestrator.appid": "demo",
+                    "io.docker-jenkins-orchestrator.namespace": "demo",
+                },
             },
         )
     ]
@@ -142,9 +196,10 @@ def test_swarm_adapter_creates_namespaced_network_and_service_from_compose() -> 
     assert kwargs["env"] == ["DEBUG=false", "LOG_LEVEL=info"]
     assert kwargs["command"] == ["serve", "--port", "80"]
     assert kwargs["workdir"] == "/srv/app"
-    assert kwargs["mounts"] == ["api-data:/var/lib/api"]
+    assert kwargs["mounts"] == [f"{managed_volume_name('demo', 'api-data')}:/var/lib/api"]
     assert kwargs["labels"] == {
         "io.docker-jenkins-orchestrator.appid": "demo",
+        "io.docker-jenkins-orchestrator.namespace": "demo",
         "io.docker-jenkins-orchestrator.compose-service": "api",
         "team": "apps",
     }
@@ -239,6 +294,7 @@ def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> 
             "env": [],
             "labels": {
                 "io.docker-jenkins-orchestrator.appid": "demo",
+                "io.docker-jenkins-orchestrator.namespace": "demo",
                 "io.docker-jenkins-orchestrator.compose-service": "demo-api",
             },
             "networks": [{"Target": "network-orchestrator-demo-id", "Aliases": ["demo-api"]}],
@@ -252,7 +308,7 @@ def test_swarm_adapter_updates_existing_service_without_double_namespacing() -> 
     ]
 
 
-def test_swarm_adapter_reuses_existing_service_port_during_update() -> None:
+def test_swarm_adapter_does_not_adopt_legacy_lowercase_service_for_uppercase_appid() -> None:
     docker = FakeDocker()
     docker.networks.items["orchestrator-demo"] = FakeNetwork("orchestrator-demo")
     existing = FakeService("demo-api")
@@ -264,8 +320,10 @@ def test_swarm_adapter_reuses_existing_service_port_during_update() -> None:
 
     deployment = adapter.deploy("Demo", {"services": {"api": {"image": "example/api:2", "ports": ["18000:80"]}}})
 
-    assert deployment.services[0].service_name == "demo-api"
-    assert deployment.services[0].ports[0].published_port == 18000
+    assert deployment.services[0].service_name == "appid-v1-44656d6f-api"
+    assert deployment.services[0].ports[0].published_port == 18001
+    assert existing.update_calls == []
+    assert docker.networks.create_calls[0][0] == "orchestrator-appid-v1-44656d6f"
 
 
 def test_swarm_adapter_rejects_unsupported_host_ip_port_binding_before_service_creation() -> None:
@@ -515,3 +573,591 @@ def test_swarm_adapter_ignores_running_tasks_marked_for_shutdown() -> None:
 
     with pytest.raises(DockerServiceError, match="shutdown:running"):
         adapter._wait_for_service_ready(docker, "demo-api")
+
+
+def test_swarm_adapter_managed_labels_cannot_be_overridden_by_compose() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    adapter.deploy(
+        "demo",
+        {
+            "services": {
+                "api": {
+                    "image": "example/api:1",
+                    "labels": {
+                        "io.docker-jenkins-orchestrator.appid": "attacker",
+                        "io.docker-jenkins-orchestrator.namespace": "attacker",
+                        "io.docker-jenkins-orchestrator.compose-service": "other",
+                    },
+                }
+            }
+        },
+    )
+
+    labels = docker.services.create_calls[0][1]["labels"]
+    assert labels["io.docker-jenkins-orchestrator.appid"] == "demo"
+    assert labels["io.docker-jenkins-orchestrator.namespace"] == "demo"
+    assert labels["io.docker-jenkins-orchestrator.compose-service"] == "api"
+
+
+def test_swarm_adapter_separates_case_distinct_appids() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    upper = adapter.deploy("Foo", {"services": {"api": {"image": "example/api:1"}}})
+    lower = adapter.deploy("foo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert upper.network_name == "orchestrator-appid-v1-466f6f"
+    assert lower.network_name == "orchestrator-foo"
+    assert upper.services[0].service_name == "appid-v1-466f6f-api"
+    assert lower.services[0].service_name == "foo-api"
+    assert upper.network_name != lower.network_name
+    assert upper.services[0].service_name != lower.services[0].service_name
+
+
+def test_swarm_adapter_fails_closed_for_unowned_existing_network() -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-demo")
+    network.attrs["Labels"] = {}
+    docker.networks.items[network.name] = network
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="ownership could not be verified"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert docker.services.create_calls == []
+
+
+def test_swarm_adapter_fails_closed_for_unowned_existing_service() -> None:
+    docker = FakeDocker()
+    existing = FakeService("demo-api")
+    existing.attrs["Spec"]["Labels"] = {}
+    docker.services.items[existing.name] = existing
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="ownership could not be verified"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert existing.update_calls == []
+
+
+def test_swarm_adapter_scopes_implicit_volumes_and_preserves_explicit_shared_names() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    adapter.deploy(
+        "demo",
+        {
+            "services": {
+                "api": {
+                    "image": "example/api:1",
+                    "volumes": ["private:/private", "shared:/shared"],
+                }
+            },
+            "volumes": {
+                "private": {},
+                "shared": {"name": "platform-shared", "external": True},
+            },
+        },
+    )
+
+    assert docker.services.create_calls[0][1]["mounts"] == [
+        f"{managed_volume_name('demo', 'private')}:/private",
+        "platform-shared:/shared",
+    ]
+
+
+def test_service_physical_name_collision_fails_before_docker_client_creation() -> None:
+    docker = FakeDocker()
+    client_factory_calls: list[str | None] = []
+
+    def client_factory(base_url: str | None) -> FakeDocker:
+        client_factory_calls.append(base_url)
+        return docker
+
+    adapter = DockerSwarmAdapter(client_factory=client_factory)
+
+    with pytest.raises(DockerServiceError, match="map to the same Docker service name foo-api"):
+        adapter.deploy(
+            "foo", {"services": {"api": {"image": "example/api:1"}, "foo-api": {"image": "example/api:2"}}}
+        )
+
+    assert client_factory_calls == []
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_simulated_managed_volume_collision_fails_before_docker_client_creation(
+    monkeypatch: pytest.MonkeyPatch, declared: bool
+) -> None:
+    docker = FakeDocker()
+    client_factory_calls: list[str | None] = []
+
+    def client_factory(base_url: str | None) -> FakeDocker:
+        client_factory_calls.append(base_url)
+        return docker
+
+    monkeypatch.setattr("orchestrator.docker_services.managed_volume_name", lambda namespace, alias: "same-volume")
+    compose = {"services": {"api": {"image": "example/api:1", "volumes": ["data:/data", "foo-data:/other"]}}}
+    if declared:
+        compose["volumes"] = {"data": {}, "foo-data": {}}
+
+    with pytest.raises(DockerServiceError, match="map to the same managed Docker volume name same-volume"):
+        DockerSwarmAdapter(client_factory=client_factory).deploy("foo", compose)
+
+    assert client_factory_calls == []
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_invalid_implicit_volume_alias_is_a_docker_service_error_before_client_creation(declared: bool) -> None:
+    docker = FakeDocker()
+    client_factory_calls: list[str | None] = []
+
+    def client_factory(base_url: str | None) -> FakeDocker:
+        client_factory_calls.append(base_url)
+        return docker
+
+    compose = {"services": {"api": {"image": "example/api:1", "volumes": ["invalid/name:/data"]}}}
+    if declared:
+        compose["volumes"] = {"invalid/name": {}}
+
+    with pytest.raises(DockerServiceError, match="invalid for managed Docker volume naming"):
+        DockerSwarmAdapter(client_factory=client_factory).deploy("foo", compose)
+
+    assert client_factory_calls == []
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
+@pytest.mark.parametrize("sharing_boundary", ["name", "external", "both"])
+def test_explicit_volume_can_intentionally_share_managed_physical_name(sharing_boundary: str) -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    physical_name = managed_volume_name("foo", "data")
+    shared_alias = physical_name if sharing_boundary == "external" else "shared"
+    shared_definition = {}
+    if sharing_boundary in {"name", "both"}:
+        shared_definition["name"] = physical_name
+    if sharing_boundary in {"external", "both"}:
+        shared_definition["external"] = True
+
+    adapter.deploy(
+        "foo",
+        {
+            "services": {"api": {"image": "example/api:1", "volumes": ["data:/data", f"{shared_alias}:/shared"]}},
+            "volumes": {"data": {}, shared_alias: shared_definition},
+        },
+    )
+
+    assert docker.services.create_calls[0][1]["mounts"] == [f"{physical_name}:/data", f"{physical_name}:/shared"]
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_different_aliases_under_one_app_have_distinct_managed_volumes(declared: bool) -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    compose = {
+        "services": {
+            "api": {
+                "image": "example/api:1",
+                "volumes": ["data:/data", {"source": "foo-data", "target": "/other"}],
+            }
+        }
+    }
+    if declared:
+        compose["volumes"] = {"data": {}, "foo-data": {}}
+
+    deployment = adapter.deploy("foo", compose)
+    physical_data = managed_volume_name("foo", "data")
+    physical_prefixed_data = managed_volume_name("foo", "foo-data")
+
+    assert physical_data != physical_prefixed_data
+    assert docker.services.create_calls[0][1]["mounts"] == [
+        f"{physical_data}:/data", f"{physical_prefixed_data}:/other:rw"
+    ]
+    assert adapter.deploy("foo", compose).services[0].service_name == deployment.services[0].service_name
+    assert docker.services.items[deployment.services[0].service_name].update_calls[0]["mounts"] == [
+        f"{physical_data}:/data", f"{physical_prefixed_data}:/other:rw"
+    ]
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_hyphenated_app_and_volume_alias_boundaries_do_not_share_managed_volume(declared: bool) -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    for appid, alias in [("foo", "bar-data"), ("foo-bar", "data")]:
+        compose = {"services": {"api": {"image": "example/api:1", "volumes": [f"{alias}:/data"]}}}
+        if declared:
+            compose["volumes"] = {alias: {}}
+        adapter.deploy(appid, compose)
+
+    first_physical_name = managed_volume_name("foo", "bar-data")
+    second_physical_name = managed_volume_name("foo-bar", "data")
+    assert first_physical_name != second_physical_name
+    assert docker.services.create_calls[0][1]["mounts"] == [f"{first_physical_name}:/data"]
+    assert docker.services.create_calls[1][1]["mounts"] == [f"{second_physical_name}:/data"]
+    assert docker.services.items["foo-api"].remove_calls == 0
+    assert docker.services.items["foo-bar-api"].remove_calls == 0
+
+
+def test_swarm_adapter_long_resource_names_keep_complete_hash_suffix() -> None:
+    adapter = DockerSwarmAdapter(network_name="network" + "x" * 50)
+    namespace = adapter._namespace("A" + "b" * 63)
+    network_name = adapter._network_name(namespace)
+    service_name = adapter._service_name(namespace, "api" + "z" * 80)
+
+    assert len(network_name) <= 63
+    assert len(service_name) <= 63
+    assert network_name[-11] == "-"
+    assert service_name[-11] == "-"
+    assert all(character in "0123456789abcdef" for character in network_name[-10:])
+    assert all(character in "0123456789abcdef" for character in service_name[-10:])
+
+
+@pytest.mark.parametrize(
+    "owner_labels",
+    [
+        {},
+        {"io.docker-jenkins-orchestrator.appid": "Foo"},
+        {
+            "io.docker-jenkins-orchestrator.appid": "Foo",
+            "io.docker-jenkins-orchestrator.namespace": "foo",
+        },
+        {
+            "io.docker-jenkins-orchestrator.appid": "foo",
+            "io.docker-jenkins-orchestrator.namespace": "appid-v1-466f6f",
+        },
+    ],
+)
+def test_encoded_app_rejects_network_without_exact_raw_owner_and_namespace(owner_labels: dict) -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-appid-v1-466f6f")
+    network.attrs["Labels"] = owner_labels
+    docker.networks.items[network.name] = network
+
+    with pytest.raises(DockerServiceError, match="ownership could not be verified"):
+        DockerSwarmAdapter(docker_client=docker).deploy("Foo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert docker.services.create_calls == []
+    assert network.remove_calls == 0
+
+
+@pytest.mark.parametrize("original_appid", ["Foo", "foo"])
+def test_canonical_app_rejects_ambiguous_legacy_lowercase_owner_labels(original_appid: str) -> None:
+    docker = FakeDocker()
+    # This is what HEAD deploy("Foo", ...) actually persisted: lowercasing
+    # happens before both _ensure_network and _labels receive the appid. The
+    # same label was also written for a genuine lowercase "foo" application.
+    legacy_labels = {"io.docker-jenkins-orchestrator.appid": original_appid.lower()}
+    network = FakeNetwork("orchestrator-foo")
+    network.attrs["Labels"] = dict(legacy_labels)
+    service = FakeService("foo-api")
+    service.attrs["Spec"]["Labels"] = dict(legacy_labels)
+    stale = FakeService("foo-old")
+    stale.attrs["Spec"]["Labels"] = dict(legacy_labels)
+    docker.networks.items[network.name] = network
+    docker.services.items[service.name] = service
+    docker.services.items[stale.name] = stale
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="migrate legacy resources explicitly"):
+        adapter.deploy("foo", {"services": {"api": {"image": "example/api:2"}}})
+
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+    assert service.update_calls == []
+    assert network.remove_calls == service.remove_calls == stale.remove_calls == 0
+
+    # The uppercase application can instead deploy safely to its new encoded
+    # namespace without claiming or cleaning up any of these ambiguous ones.
+    isolated = adapter.deploy("Foo", {"services": {"api": {"image": "example/api:2"}}})
+    assert isolated.network_name == "orchestrator-appid-v1-466f6f"
+    assert isolated.services[0].service_name == "appid-v1-466f6f-api"
+    assert service.update_calls == []
+    assert network.remove_calls == service.remove_calls == stale.remove_calls == 0
+
+
+def test_canonical_app_rejects_ambiguous_legacy_service_even_with_verified_network() -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-foo")
+    service = FakeService("foo-api")
+    service.attrs["Spec"]["Labels"] = {"io.docker-jenkins-orchestrator.appid": "foo"}
+    docker.networks.items[network.name] = network
+    docker.services.items[service.name] = service
+
+    with pytest.raises(DockerServiceError, match="migrate legacy resources explicitly"):
+        DockerSwarmAdapter(docker_client=docker).deploy("foo", {"services": {"api": {"image": "example/api:2"}}})
+
+    assert service.update_calls == []
+    assert network.remove_calls == service.remove_calls == 0
+
+
+def test_canonical_app_rejects_ambiguous_legacy_stale_cleanup() -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-foo")
+    stale = FakeService("foo-old")
+    stale.attrs["Spec"]["Labels"] = {"io.docker-jenkins-orchestrator.appid": "foo"}
+    docker.networks.items[network.name] = network
+    docker.services.items[stale.name] = stale
+
+    with pytest.raises(DockerServiceError, match="migrate legacy resources explicitly"):
+        DockerSwarmAdapter(docker_client=docker).deploy("foo", {"services": {"api": {"image": "example/api:2"}}})
+
+    assert stale.remove_calls == 0
+    assert network.remove_calls == 0
+    assert docker.services.items["foo-api"].remove_calls == 1
+
+
+def test_explicitly_verified_legacy_resource_labels_allow_update_without_renaming() -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-foo")
+    network.attrs["Labels"] = {"io.docker-jenkins-orchestrator.appid": "foo"}
+    service = FakeService("foo-api")
+    service.attrs["Spec"]["Labels"] = {"io.docker-jenkins-orchestrator.appid": "foo"}
+    docker.networks.items[network.name] = network
+    docker.services.items[service.name] = service
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="ownership could not be verified"):
+        adapter.deploy("foo", {"services": {"api": {"image": "example/api:2"}}})
+
+    # Simulate an explicit migration only after the raw owner was independently
+    # verified. The adapter never writes these labels to an unknown resource.
+    verified_labels = {
+        "io.docker-jenkins-orchestrator.appid": "foo",
+        "io.docker-jenkins-orchestrator.namespace": "foo",
+    }
+    network.attrs["Labels"] = dict(verified_labels)
+    service.attrs["Spec"]["Labels"] = dict(verified_labels)
+
+    deployment = adapter.deploy("foo", {"services": {"api": {"image": "example/api:2"}}})
+
+    assert deployment.network_name == "orchestrator-foo"
+    assert deployment.services[0].service_name == "foo-api"
+    assert deployment.services[0].action == "updated"
+    assert service.update_calls[0]["labels"]["io.docker-jenkins-orchestrator.namespace"] == "foo"
+    assert docker.networks.create_calls == docker.services.create_calls == []
+
+
+def test_stale_cleanup_validates_all_owners_before_removing_previous_services() -> None:
+    docker = FakeDocker()
+    stale = FakeService("demo-old")
+    invalid = FakeService("demo-foreign")
+    invalid.attrs["Spec"]["Labels"]["io.docker-jenkins-orchestrator.namespace"] = "another-namespace"
+    docker.services.items[stale.name] = stale
+    docker.services.items[invalid.name] = invalid
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="ownership could not be verified"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert stale.remove_calls == 0
+    assert invalid.remove_calls == 0
+    assert docker.services.items["demo-api"].remove_calls == 1
+
+
+def test_rollback_does_not_remove_replacement_service_or_network_with_same_name() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    originals = []
+
+    def replace_then_fail(_client: object, service_name: str) -> None:
+        original_service = docker.services.items[service_name]
+        original_network = docker.networks.items["orchestrator-demo"]
+        originals.extend([original_service, original_network])
+        replacement_service = FakeService(service_name)
+        replacement_service.id = "replacement-service-id"
+        replacement_network = FakeNetwork("orchestrator-demo")
+        replacement_network.id = "replacement-network-id"
+        docker.services.items[service_name] = replacement_service
+        docker.networks.items[replacement_network.name] = replacement_network
+        raise DockerServiceError("readiness failed after resources were replaced")
+
+    adapter._wait_for_service_ready = replace_then_fail
+
+    with pytest.raises(DockerServiceError, match="readiness failed"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert docker.services.items["demo-api"].remove_calls == 0
+    assert docker.networks.items["orchestrator-demo"].remove_calls == 0
+    assert all(resource.remove_calls == 0 for resource in originals)
+
+
+def test_rollback_leaves_new_resource_when_owner_changes_during_rollout() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    def change_owner_then_fail(_client: object, service_name: str) -> None:
+        docker.services.items[service_name].attrs["Spec"]["Labels"]["io.docker-jenkins-orchestrator.appid"] = "other"
+        raise DockerServiceError("readiness failed")
+
+    adapter._wait_for_service_ready = change_owner_then_fail
+    with pytest.raises(DockerServiceError, match="readiness failed"):
+        adapter.deploy("demo", {"services": {"api": {"image": "example/api:1"}}})
+
+    assert docker.services.items["demo-api"].remove_calls == 0
+    assert docker.networks.items["orchestrator-demo"].remove_calls == 0
+
+
+@pytest.mark.parametrize("historical_name", ["data", "demo-data"])
+def test_existing_volume_is_not_rebound_without_explicit_preservation(historical_name: str) -> None:
+    docker = FakeDocker()
+    service = FakeService("demo-api")
+    service.attrs["Spec"]["TaskTemplate"] = {
+        "ContainerSpec": {"Mounts": [{"Type": "volume", "Source": historical_name, "Target": "/data"}]}
+    }
+    docker.services.items[service.name] = service
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    with pytest.raises(DockerServiceError, match="refusing to rebind historical data"):
+        adapter.deploy(
+            "demo", {"services": {"api": {"image": "example/api:2", "volumes": ["data:/data"]}}, "volumes": {"data": {}}}
+        )
+
+    assert service.update_calls == []
+    assert service.remove_calls == 0
+    adapter.deploy(
+        "demo",
+        {
+            "services": {"api": {"image": "example/api:2", "volumes": ["data:/data"]}},
+            "volumes": {"data": {"name": historical_name, "external": True}},
+        },
+    )
+    assert service.update_calls[0]["mounts"] == [f"{historical_name}:/data"]
+
+
+def test_case_distinct_apps_do_not_share_default_named_volumes() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    compose = {"services": {"api": {"image": "example/api:1", "volumes": ["data:/data"]}}, "volumes": {"data": {}}}
+
+    adapter.deploy("Foo", compose)
+    adapter.deploy("foo", compose)
+
+    assert docker.services.create_calls[0][1]["mounts"] == [
+        f"{managed_volume_name(external_namespace('Foo'), 'data')}:/data"
+    ]
+    assert docker.services.create_calls[1][1]["mounts"] == [f"{managed_volume_name('foo', 'data')}:/data"]
+
+
+def test_deploy_one_implicit_volume_is_scoped_with_complete_app_and_alias_identity() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    adapter.deploy_one("foo", "api", {"image": "example/api:1", "volumes": ["bar-data:/data"]})
+    adapter.deploy_one("foo-bar", "api", {"image": "example/api:1", "volumes": ["data:/data"]})
+
+    assert docker.services.create_calls[0][1]["mounts"] == [f"{managed_volume_name('foo', 'bar-data')}:/data"]
+    assert docker.services.create_calls[1][1]["mounts"] == [f"{managed_volume_name('foo-bar', 'data')}:/data"]
+
+
+@pytest.mark.parametrize(
+    "appids", [("foo", "foo-bar"), ("foo", "Foo"), ("A" * 64, "c822e6a0-2096-4e1d-8915-b5f24c6d9670")]
+)
+def test_generic_template_volumes_are_app_scoped_and_match_app_bound_template(appids: tuple[str, str]) -> None:
+    catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
+    generic_compose = catalog.compose(["mongodb"])
+    alias = next(iter(generic_compose["volumes"]))
+    assert alias == template_volume_alias("mongodb", "data")
+    assert generic_compose["volumes"][alias] == {}
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    physical_names: list[str] = []
+
+    for appid in appids:
+        generic_deployment = adapter.deploy(appid, generic_compose)
+        service_name = generic_deployment.services[0].service_name
+        physical_name = managed_volume_name(external_namespace(appid), alias)
+        physical_names.append(physical_name)
+        assert docker.services.items[service_name].attrs["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"] == [
+            {"Type": "volume", "Source": physical_name, "Target": "/data/db"}
+        ]
+
+        bound_compose = catalog.compose(["mongodb"], appid=appid)
+        assert bound_compose["volumes"] == {physical_name: {"name": physical_name}}
+        bound_deployment = adapter.deploy(appid, bound_compose)
+        assert bound_deployment.services[0].service_name == service_name
+        assert bound_deployment.services[0].action == "updated"
+        assert docker.services.items[service_name].update_calls[0]["mounts"] == [f"{physical_name}:/data/db"]
+
+    assert physical_names[0] != physical_names[1]
+    assert all(service.remove_calls == 0 for service in docker.services.items.values())
+
+
+@pytest.mark.parametrize("bound_template", [True, False])
+@pytest.mark.parametrize("historical_name", ["mongodb-data", "demo-mongodb-data"])
+def test_canonical_template_refuses_to_replace_existing_historical_volume(
+    bound_template: bool, historical_name: str
+) -> None:
+    docker = FakeDocker()
+    network = FakeNetwork("orchestrator-demo")
+    service = FakeService("demo-mongodb")
+    service.attrs["Spec"]["TaskTemplate"] = {
+        "ContainerSpec": {"Mounts": [{"Type": "volume", "Source": historical_name, "Target": "/data/db"}]}
+    }
+    docker.networks.items[network.name] = network
+    docker.services.items[service.name] = service
+    compose = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml").compose(
+        ["mongodb"], appid="demo" if bound_template else None
+    )
+
+    with pytest.raises(DockerServiceError, match="refusing to rebind historical data automatically"):
+        DockerSwarmAdapter(docker_client=docker).deploy("demo", compose)
+
+    assert service.update_calls == []
+    assert service.attrs["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"][0]["Source"] == historical_name
+    assert service.remove_calls == network.remove_calls == 0
+    assert docker.networks.create_calls == []
+    assert docker.services.create_calls == []
+
+
+def test_deploy_one_rolls_back_only_its_new_resources_on_readiness_failure() -> None:
+    docker = FakeDocker()
+    adapter = DockerSwarmAdapter(docker_client=docker)
+
+    def fail(_client: object, _service_name: str) -> None:
+        raise DockerServiceError("readiness failed")
+
+    adapter._wait_for_service_ready = fail
+    with pytest.raises(DockerServiceError, match="readiness failed"):
+        adapter.deploy_one("demo", "api", {"image": "example/api:1"})
+
+    assert docker.services.items["demo-api"].remove_calls == 1
+    assert docker.networks.items["orchestrator-demo"].remove_calls == 1
+
+
+@pytest.mark.parametrize("appid", ["A" * 64, "c822e6a0-2096-4e1d-8915-b5f24c6d9670"])
+def test_template_service_and_volume_names_are_not_prefixed_twice(appid: str) -> None:
+    compose = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml").compose(
+        ["mongodb"], appid=appid
+    )
+    service_name = next(iter(compose["services"]))
+    volume_name = next(iter(compose["volumes"]))
+    docker = FakeDocker()
+
+    adapter = DockerSwarmAdapter(docker_client=docker)
+    deployment = adapter.deploy(appid, compose)
+
+    assert deployment.services[0].service_name == service_name
+    assert docker.services.create_calls[0][1]["mounts"] == [f"{volume_name}:/data/db"]
+    assert docker.services.create_calls[0][1]["labels"]["io.docker-jenkins-orchestrator.appid"] == appid
+    repeated = adapter.deploy(appid, compose)
+    assert repeated.services[0].service_name == service_name
+    assert repeated.services[0].action == "updated"
+    assert docker.services.items[service_name].update_calls[0]["mounts"] == [f"{volume_name}:/data/db"]
+
+
+def test_long_canonical_template_preserves_legacy_swarm_service_name() -> None:
+    appid = "a" * 64
+    compose = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml").compose(["go"], appid=appid)
+    adapter = DockerSwarmAdapter(docker_client=FakeDocker())
+    legacy_digest = sha256(f"{appid}:{appid}-go".encode()).hexdigest()[:10]
+    expected_legacy_name = f"{legacy_digest}-{appid[:51]}"
+
+    deployment = adapter.deploy(appid, compose)
+
+    assert deployment.services[0].service_name == expected_legacy_name
