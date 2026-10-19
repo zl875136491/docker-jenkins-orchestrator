@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
-from pydantic import model_validator
+from pydantic import SerializerFunctionWrapHandler, field_serializer, model_validator
 
 from orchestrator.naming import APPID_MAX_LENGTH, NamingError, validate_appid
+
+
+UTC_PLUS_EIGHT = timezone(timedelta(hours=8))
 
 
 def utc_now() -> datetime:
@@ -17,6 +20,14 @@ def utc_now() -> datetime:
 
 class DomainModel(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    @field_serializer("*", mode="wrap", when_used="json")
+    def serialize_json_field(self, value: Any, handler: SerializerFunctionWrapHandler) -> Any:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            value = value.astimezone(UTC_PLUS_EIGHT)
+        return handler(value)
 
 
 def _json_paths(value: Any, path: str = "$") -> list[str]:
@@ -53,6 +64,57 @@ TERMINAL_BUILD_STATUSES = {BuildStatus.SUCCEEDED, BuildStatus.FAILED, BuildStatu
 ACTIVE_BUILD_STATUSES = set(BuildStatus) - TERMINAL_BUILD_STATUSES
 
 
+class CleanupStatus(str, Enum):
+    NOT_STARTED = "not_started"
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    PARTIAL_FAILED = "partial_failed"
+
+
+class ResourceState(str, Enum):
+    PLANNED = "planned"
+    PRESENT = "present"
+    REMOVED = "removed"
+    BLOCKED = "blocked"
+    ERROR = "error"
+
+
+class BuildResource(DomainModel):
+    key: str
+    kind: Literal["service", "container", "network", "volume", "workspace", "runtime_directory", "local_image", "registry_image", "port", "builder_cache"]
+    name: str
+    target: str = "docker"
+    native_id: str | None = None
+    managed: bool = True
+    state: ResourceState = ResourceState.PLANNED
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class BuildResources(DomainModel):
+    build_id: str
+    appid: str
+    ownership_version: int = 1
+    namespace: str | None = None
+    repository_url: str | None = Field(default=None, repr=False)
+    environment_ciphertext: str | None = Field(default=None, repr=False)
+    jenkins_trigger_pending: bool = False
+    resources: dict[str, BuildResource] = Field(default_factory=dict)
+    cleanup_status: CleanupStatus = CleanupStatus.NOT_STARTED
+    cleanup_generation: int = 0
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    cleanup_requested_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_error: str | None = None
+    registry_storage_status: str = "not_applicable"
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class EventLevel(str, Enum):
     INFO = "info"
     WARNING = "warning"
@@ -62,7 +124,7 @@ class EventLevel(str, Enum):
 class UserAppCreate(DomainModel):
     appid: str = Field(min_length=1, max_length=APPID_MAX_LENGTH)
     name: str = Field(min_length=1, max_length=128)
-    repository_url: str = Field(min_length=3, max_length=2048)
+    repository_url: str = Field(default="", max_length=2048)
     git_ref: str = Field(default="main", min_length=1, max_length=256)
     environment: dict[str, str] = Field(default_factory=dict)
     compose: dict[str, Any] | None = None
@@ -79,6 +141,8 @@ class UserAppCreate(DomainModel):
     @field_validator("repository_url")
     @classmethod
     def repository_url_is_supported(cls, value: str) -> str:
+        if not value:
+            return value
         supported_prefixes = ("https://", "http://", "ssh://", "git@")
         if not value.startswith(supported_prefixes):
             raise ValueError("repository_url must be an HTTP(S), SSH, or git@ URL")
@@ -97,7 +161,7 @@ class UserAppCreate(DomainModel):
 
 class UserAppUpdate(DomainModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    repository_url: str | None = Field(default=None, min_length=3, max_length=2048)
+    repository_url: str | None = Field(default=None, max_length=2048)
     git_ref: str | None = Field(default=None, min_length=1, max_length=256)
     environment: dict[str, str] | None = None
     compose: dict[str, Any] | None = None
@@ -173,7 +237,12 @@ class BuildJob(DomainModel):
     build_id: str
     appid: str
     git_ref: str
+    inputs_ready: bool = True
     git_commit_sha: str | None = None
+    compose_snapshot: dict[str, Any] | None = Field(default=None, repr=False)
+    workspace_snapshot: str | None = None
+    workspace_file_count: int = 0
+    workspace_archive_sha256: str | None = None
     status: BuildStatus = BuildStatus.QUEUED
     celery_task_id: str | None = None
     jenkins_queue_url: str | None = None
@@ -332,6 +401,23 @@ class AppAccess(DomainModel):
     access_available: bool = False
     access_urls: list[str] = Field(default_factory=list)
     access_reason: str | None = None
+
+
+class BuildResourceReport(DomainModel):
+    build_id: str
+    appid: str
+    build_status: BuildStatus
+    isolated: bool
+    cleanup_status: CleanupStatus
+    resources: list[BuildResource] = Field(default_factory=list)
+    services: list[ServiceAccess] = Field(default_factory=list)
+    cleanup_allowed: bool = False
+    cleanup_reason: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_error: str | None = None
+    registry_storage_status: str = "not_applicable"
+    reclaimed_bytes: int | None = None
 
 
 class Alert(DomainModel):

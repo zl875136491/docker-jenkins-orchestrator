@@ -1,8 +1,11 @@
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Annotated
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+import json
 
 
 class Settings(BaseSettings):
@@ -41,6 +44,7 @@ class Settings(BaseSettings):
     harbor_url: str | None = None
     harbor_user: str | None = None
     harbor_password: str | None = None
+    harbor_ca_file: Path | None = None
     harbor_project: str = "apps"
     harbor_boot_images_project: str = "boot-images"
     docker_base_url: str | None = None
@@ -53,11 +57,38 @@ class Settings(BaseSettings):
     public_host: str | None = None
     public_scheme: Literal["http", "https"] = "http"
     git_clone_timeout_seconds: int = Field(default=600, gt=0)
+    workspace_root: Path = Path("var/workspaces")
+    workspace_host_root: Path | None = None
+    workspace_download_base_url: str | None = None
+    workspace_max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    workspace_max_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    workspace_max_files: int = Field(default=10000, gt=0)
+    workspace_shared_storage: bool = False
+    cleanup_timeout_seconds: int = Field(default=120, gt=0)
+    cleanup_docker_targets: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+
+    @field_validator("harbor_ca_file", mode="before")
+    @classmethod
+    def normalize_harbor_ca_file(cls, value):
+        return None if value == "" else value
+
+    @field_validator("cleanup_docker_targets", mode="before")
+    @classmethod
+    def parse_cleanup_targets(cls, value):
+        return json.loads(value) if isinstance(value, str) and value.strip() else {} if value is None or value == "" else value
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
     def validate_production_dependencies(self) -> "Settings":
+        if self.workspace_host_root is not None and not self.workspace_host_root.is_absolute():
+            raise ValueError("ORCHESTRATOR_WORKSPACE_HOST_ROOT must be absolute")
+        for target, endpoint in self.cleanup_docker_targets.items():
+            parsed = urlsplit(endpoint)
+            valid = target.startswith(("docker:", "docker-node:")) and not any(character.isspace() for character in target)
+            valid = valid and parsed.scheme in {"unix", "tcp", "http", "https", "ssh"} and not parsed.password and not parsed.query and not parsed.fragment
+            if not valid or not (parsed.path.startswith("/") if parsed.scheme == "unix" else parsed.hostname):
+                raise ValueError("ORCHESTRATOR_CLEANUP_DOCKER_TARGETS must map execution identities to controlled Docker endpoints")
         if not 1 <= self.deployment_port_range_start <= 65535:
             raise ValueError("ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_START must be between 1 and 65535")
         if not 1 <= self.deployment_port_range_end <= 65535:

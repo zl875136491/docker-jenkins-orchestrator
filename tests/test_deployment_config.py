@@ -22,6 +22,26 @@ def test_runtime_image_installs_and_configures_git_for_full_repository_clones() 
     assert "git config --system core.quotepath false" in dockerfile
 
 
+@pytest.mark.parametrize("compose_path", [COMPOSE_PATH, TEST_COMPOSE_PATH])
+def test_cleanup_settings_and_jenkins_verification_credentials_reach_api_and_worker(compose_path):
+    document = yaml.safe_load(compose_path.read_text())
+    for name in ("api", "worker", "beat"):
+        environment = document["services"][name]["environment"]
+        assert environment["ORCHESTRATOR_CLEANUP_TIMEOUT_SECONDS"] == "${ORCHESTRATOR_CLEANUP_TIMEOUT_SECONDS:-120}"
+        assert "ORCHESTRATOR_CLEANUP_DOCKER_TARGETS" in environment
+        assert environment["ORCHESTRATOR_JENKINS_USER"]
+        assert environment["ORCHESTRATOR_JENKINS_PASSWORD"]
+
+
+def test_cleanup_targets_are_controlled_configuration(monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_CLEANUP_DOCKER_TARGETS", '{"docker:builder":"tcp://builder:2376"}')
+    assert Settings().cleanup_docker_targets == {"docker:builder": "tcp://builder:2376"}
+    monkeypatch.setenv("ORCHESTRATOR_CLEANUP_DOCKER_TARGETS", "")
+    assert Settings().cleanup_docker_targets == {}
+    with pytest.raises(ValueError, match="controlled Docker endpoints"):
+        Settings(cleanup_docker_targets={"docker:builder": "https://user:secret@builder/"})
+
+
 @pytest.mark.parametrize(
     ("compose_path", "environment_key"),
     [
@@ -62,7 +82,7 @@ def test_compose_runs_api_worker_beat_and_durable_dependencies() -> None:
     assert services["beat"]["depends_on"]["mongo"]["condition"] == "service_healthy"
     assert services["mongo"]["healthcheck"]
     assert services["redis"]["healthcheck"]
-    assert services["worker"]["volumes"][0]["target"] == "/var/run/docker.sock"
+    assert any(isinstance(mount, dict) and mount["target"] == "/var/run/docker.sock" for mount in services["worker"]["volumes"])
 
 
 def test_compose_runtime_environment_enforces_mongo_celery_and_separate_queues() -> None:

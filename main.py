@@ -9,9 +9,13 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 
@@ -30,6 +34,7 @@ from orchestrator.models import (
     BuildCreate,
     BuildHistoryPage,
     BuildJob,
+    BuildResourceReport,
     BuildStatus,
     PublishedPort,
     ServiceAccess,
@@ -41,8 +46,11 @@ from orchestrator.models import (
     UserAppUpdate,
 )
 from orchestrator.repository import DuplicateAppError, DuplicateTechStackError
+from orchestrator.repository import RepositoryError
+from orchestrator.build_resources import ResourceConflict
 from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFoundError
 from orchestrator.templates import TemplateError
+from orchestrator.workspaces import WorkspaceError, WorkspaceLimitError
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -178,6 +186,116 @@ def create_app(
 
     api = FastAPI(title="Docker-Jenkins Orchestrator", version="0.2.0", lifespan=lifespan)
     api.state.container = container
+
+    @api.exception_handler(WorkspaceError)
+    async def workspace_error(_: Request, exc: WorkspaceError) -> JSONResponse:
+        return JSONResponse(status_code=413 if isinstance(exc, WorkspaceLimitError) else 422, content={"detail": str(exc)})
+
+    @api.post("/workspace/{appid}", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+    @api.post("/api/v1/workspace/{appid}", status_code=status.HTTP_201_CREATED, openapi_extra={
+        "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
+            "type": "object", "required": ["files"], "properties": {
+                "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
+                "path": {"type": "string", "description": "Optional relative directory prefix"},
+            },
+        }}}},
+    })
+    async def upload_workspace(appid: str, request: Request, _: dict = Depends(require_token)) -> dict:
+        try:
+            container.applications.get_record(appid)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Register the app before uploading workspace files") from exc
+        length = request.headers.get("content-length")
+        if length and (not length.isdigit() or int(length) > container.settings.workspace_max_upload_bytes + 1024 * 1024):
+            raise HTTPException(status_code=413, detail="Workspace upload byte limit exceeded")
+        if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+            raise HTTPException(status_code=415, detail="Use multipart/form-data with one or more files fields")
+        received = 0
+        original_receive = request._receive
+
+        async def limited_receive():
+            nonlocal received
+            message = await original_receive()
+            received += len(message.get("body", b""))
+            if received > container.settings.workspace_max_upload_bytes + 1024 * 1024:
+                raise MultiPartException("Workspace upload byte limit exceeded")
+            return message
+
+        request._receive = limited_receive
+        try:
+            form = await request.form(max_files=container.settings.workspace_max_files, max_fields=1)
+        except StarletteHTTPException as exc:
+            if exc.detail == "Workspace upload byte limit exceeded":
+                raise HTTPException(status_code=413, detail=exc.detail) from exc
+            raise
+        try:
+            prefix = form.get("path", "")
+            if not isinstance(prefix, str):
+                raise WorkspaceError("Workspace path must be a string")
+            uploads = []
+            for key, value in form.multi_items():
+                if key == "path":
+                    continue
+                if key not in ("files", "file") or not isinstance(value, UploadFile) or not value.filename:
+                    raise WorkspaceError("Use files fields with relative filenames")
+                container.workspace.relative_path(value.filename)
+                filename = f"{prefix}/{value.filename}" if prefix else value.filename
+                uploads.append((filename, value.file))
+            try:
+                return await run_in_threadpool(container.workspace.upload, appid, uploads)
+            except OSError as exc:
+                raise HTTPException(status_code=503, detail="Workspace storage is unavailable") from exc
+        finally:
+            await form.close()
+
+    @api.get("/api/v1/workspace/{appid}")
+    def list_workspace(appid: str, _: dict = Depends(require_token)) -> dict:
+        try:
+            container.applications.get_record(appid)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
+        try:
+            return container.workspace.list_files(appid)
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="Workspace storage is unavailable") from exc
+
+    @api.delete("/api/v1/workspace/{appid}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_workspace_file(
+        appid: str, path: str = Query(..., min_length=1, max_length=1024), _: dict = Depends(require_token),
+    ) -> Response:
+        try:
+            container.applications.get_record(appid)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
+        try:
+            container.workspace.delete_file(appid, path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Workspace file not found") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="Workspace storage is unavailable") from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @api.get("/api/v1/workspace/{appid}/builds/{build_id}/archive", include_in_schema=False)
+    def download_workspace_snapshot(appid: str, build_id: str, credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> FileResponse:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Workspace download token required")
+        try:
+            claims = jwt.decode(credentials.credentials, container.settings.jwt_secret, algorithms=["HS256"], options={"require_exp": True})
+        except JWTError as exc:
+            raise HTTPException(status_code=401, detail="Invalid workspace download token") from exc
+        if claims.get("scope") != "workspace-download" or claims.get("appid") != appid or claims.get("build_id") != build_id:
+            raise HTTPException(status_code=403, detail="Workspace download token does not match this build")
+        try:
+            build = container.builds.get_build(build_id)
+            container.applications.get_record(appid)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Workspace build not found") from exc
+        if build.appid != appid or build.workspace_snapshot != build_id:
+            raise HTTPException(status_code=404, detail="Workspace build not found")
+        archive = container.workspace.snapshot_path(appid, build_id) / "workspace.tar"
+        if not archive.is_file():
+            raise HTTPException(status_code=404, detail="Workspace build snapshot is unavailable")
+        return FileResponse(archive, media_type="application/x-tar", filename="workspace.tar", headers={"Cache-Control": "no-store"})
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -210,17 +328,37 @@ def create_app(
         return {
             "name": "Docker-Jenkins Orchestrator",
             "version": "0.2.0",
+            "timestamps": {"timezone": "Asia/Shanghai", "utc_offset": "+08:00", "format": "ISO 8601", "storage": "UTC"},
             "authentication": {"token": "POST /oauth2/token", "refresh": "POST /oauth2/refresh", "scheme": "Bearer JWT"},
             "roles": ["webui", "control_api", "mongodb", "redis_celery", "worker", "jenkins", "harbor", "docker_swarm"],
             "call_sequence": [
                 "POST /oauth2/token", "GET /api/v1/jenkins/app_list", "POST /api/v1/jenkins/app_create or PATCH /api/v1/jenkins/app_info/{app_id}",
                 "POST /api/v1/jenkins/app_sync/{app_id}",
+                "POST /api/v1/workspace/{appid} (multipart files, after app registration)",
                 "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
+                "GET /api/v1/jenkins/build_resources/{build_id}",
+                "DELETE /api/v1/jenkins/build_resources/{build_id} (optional destructive cleanup after build completion)",
                 "GET /api/v1/jenkins/app_events/{app_id}", "GET /api/v1/jenkins/app_images/{app_id}",
                 "GET /api/v1/jenkins/app_services/{app_id}", "GET /api/v1/jenkins/app_access/{app_id}", "GET /api/v1/jenkins/app_alerts/{app_id}",
                 "GET/POST/PATCH/DELETE /api/v1/docker/tech_stack_*", "GET /api/v1/docker/compose_prompt",
             ],
             "build_statuses": [status.value for status in BuildStatus],
+            "resource_cleanup": {
+                "scope": "build_id", "query": "GET /api/v1/jenkins/build_resources/{build_id}",
+                "delete": "DELETE /api/v1/jenkins/build_resources/{build_id}", "body_required": False,
+                "stops_services": True, "deletes_private_data": True, "preserves_app_and_build_history": True,
+                "statuses": ["not_started", "queued", "running", "succeeded", "partial_failed"],
+                "storage_accounting": "logical removal; registry blobs may wait for Harbor GC; reclaimed_bytes may be null",
+            },
+            "workspace": {
+                "upload": "POST /api/v1/workspace/{appid}", "upload_alias": "POST /workspace/{appid}",
+                "list": "GET /api/v1/workspace/{appid}", "requires_registered_app": True,
+                "relative_mount_base": "app workspace snapshot frozen at build_create",
+                "workspace_only_build": "x-orchestrator-build-source: workspace",
+                "max_upload_bytes": container.settings.workspace_max_upload_bytes,
+                "max_bytes": container.settings.workspace_max_bytes,
+                "max_files": container.settings.workspace_max_files,
+            },
             "compose_rules": {
                 "required_before_build": True,
                 "git_auto_discovery": container.applications.gitlab is not None,
@@ -228,6 +366,13 @@ def create_app(
                 "external_access_requires_ports": True,
                 "expose_is_external": False,
                 "published_ports_reassigned_on_conflict": True,
+                "build_private_resources": True,
+                "workspace_mounts_read_only": True,
+                "build_mode": "local",
+                "service_build_required": True,
+                "service_dockerfile_required": True,
+                "service_dockerfile_must_exist_in_context": True,
+                "external_stateful_backends": "blocked unless supplied as private services inside the build",
                 "compose_output_formats": ["json", "yaml"],
             },
             "tech_stack_schema": {
@@ -247,7 +392,8 @@ def create_app(
         """Return the complete Markdown API usage guide."""
         guide_path = Path(__file__).parent / "docs" / "api-reference.md"
         flow_path = Path(__file__).parent / "docs" / "api-call-flow.md"
-        return f"{guide_path.read_text(encoding='utf-8').rstrip()}\n\n---\n\n{flow_path.read_text(encoding='utf-8').rstrip()}\n"
+        workspace_path = Path(__file__).parent / "docs" / "workspace.md"
+        return "\n\n---\n\n".join(path.read_text(encoding="utf-8").rstrip() for path in (guide_path, flow_path, workspace_path)) + "\n"
 
     @api.get("/api/v1/docker/compose_prompt", response_class=PlainTextResponse)
     def compose_prompt(_: dict = Depends(require_token)) -> PlainTextResponse:
@@ -275,12 +421,17 @@ def create_app(
             return container.applications.create_app(request)
         except DuplicateAppError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="appid already exists") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="Unable to provision workspace storage") from exc
+        except BuildInputError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except (GitLabComposeNotFoundError, GitLabComposeAmbiguousError, GitLabComposeInvalidError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except GitLabNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except GitLabError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
 
     @api.get("/api/v1/jenkins/app_list", response_model=list[UserApp])
     def list_user_apps(_: dict = Depends(require_token)) -> list[UserApp]:
@@ -315,6 +466,8 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except GitLabError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        except BuildInputError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         return AppSyncResult(
             appid=updated.appid,
             git_ref=updated.git_ref,
@@ -335,6 +488,8 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         except BuildInputError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="Unable to snapshot workspace storage") from exc
 
     @api.get("/api/v1/jenkins/build_info/{build_id}", response_model=BuildJob)
     def get_build(build_id: str, _: dict = Depends(require_token)) -> BuildJob:
@@ -360,6 +515,58 @@ def create_app(
             limit=page_size,
         )
         return BuildHistoryPage(items=items, total=total, page=page, page_size=page_size)
+
+    @api.get("/api/v1/jenkins/build_resources/{build_id}", response_model=BuildResourceReport)
+    def get_build_resources(build_id: str, _: dict = Depends(require_token)) -> BuildResourceReport:
+        try:
+            manifest = container.build_resources.manifest(build_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Build not found") from exc
+        build = container.builds.get_build(build_id)
+        runtime_services = []
+        for service in container.repository.list_services(build.appid):
+            if service.build_id != build_id:
+                continue
+            ports = list(service.published_ports) or _legacy_published_ports(service.endpoint)
+            available = service.status != "cleaned" and manifest.cleanup_status.value not in {"queued", "running", "succeeded"}
+            urls = _access_urls(container.settings, ports) if available else []
+            runtime_services.append(ServiceAccess(
+                build_id=build_id, service_name=service.service_name, status=service.status, image=service.image,
+                endpoint=service.endpoint, published_ports=ports, access_urls=urls, access_available=bool(urls),
+                access_reason=_access_reason(container.settings, ports, urls) if available else "构建资源正在清理或已回收",
+            ))
+        allowed = build.status in {BuildStatus.SUCCEEDED, BuildStatus.FAILED, BuildStatus.CANCELLED} and manifest.cleanup_status.value not in {"queued", "running", "succeeded"}
+        reason = None if allowed else "构建尚在执行，或资源已受理清理/已回收"
+        if allowed:
+            try:
+                container.build_resources.assert_quiescent(build_id)
+            except ResourceConflict as exc:
+                allowed, reason = False, str(exc)
+            except Exception:
+                allowed, reason = False, "无法核验外部构建执行状态，请稍后重新查询"
+        return BuildResourceReport(
+            build_id=build_id, appid=build.appid, build_status=build.status, isolated=manifest.ownership_version == 1,
+            cleanup_status=manifest.cleanup_status, resources=list(manifest.resources.values()), services=runtime_services,
+            cleanup_allowed=allowed, cleanup_reason=reason,
+            started_at=manifest.started_at, finished_at=manifest.finished_at, last_error=manifest.last_error,
+            registry_storage_status=manifest.registry_storage_status,
+        )
+
+    @api.delete("/api/v1/jenkins/build_resources/{build_id}", response_model=BuildResourceReport, status_code=202,
+                responses={200: {"description": "Resources already cleaned"}, 409: {"description": "Build or resource operation still active"}})
+    def cleanup_build_resources(build_id: str, response: Response, claims: dict = Depends(require_token)) -> BuildResourceReport:
+        try:
+            _, status_code = container.build_resources.request_cleanup(build_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Build not found") from exc
+        except ResourceConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RepositoryError as exc:
+            raise HTTPException(status_code=503, detail="Unable to accept build cleanup task") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Unable to verify external build execution") from exc
+        response.status_code = status_code
+        return get_build_resources(build_id, claims)
 
     @api.get("/api/v1/jenkins/app_events/{app_id}")
     def list_events(app_id: str, _: dict = Depends(require_token)) -> list:
@@ -395,7 +602,9 @@ def create_app(
         service_access: list[ServiceAccess] = []
         for service in container.repository.list_services(app_id):
             ports = list(service.published_ports) or _legacy_published_ports(service.endpoint)
-            urls = _access_urls(container.settings, ports)
+            manifest = container.repository.get_build_resources(service.build_id)
+            available = service.status != "cleaned" and (manifest is None or manifest.cleanup_status.value not in {"queued", "running", "succeeded"})
+            urls = _access_urls(container.settings, ports) if available else []
             service_access.append(
                 ServiceAccess(
                     build_id=service.build_id,
@@ -406,7 +615,7 @@ def create_app(
                     published_ports=ports,
                     access_urls=urls,
                     access_available=bool(urls),
-                    access_reason=_access_reason(container.settings, ports, urls),
+                    access_reason=_access_reason(container.settings, ports, urls) if available else "构建资源正在清理或已回收",
                 )
             )
 

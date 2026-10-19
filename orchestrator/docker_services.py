@@ -8,11 +8,14 @@ from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from copy import copy
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from orchestrator.adapters import AdapterError
-from orchestrator.models import DeploymentService, PublishedPort as PublishedPortModel
-from orchestrator.naming import NamingError, bounded_resource_name, external_namespace, managed_volume_name
+from orchestrator.models import DeploymentService, PublishedPort as PublishedPortModel, ResourceState
+from orchestrator.naming import NamingError, bounded_resource_name, build_namespace, external_namespace, managed_volume_name
 
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -76,6 +79,9 @@ _MAX_DOCKER_NAME_LENGTH = 63
 _APPID_LABEL = "io.docker-jenkins-orchestrator.appid"
 _NAMESPACE_LABEL = "io.docker-jenkins-orchestrator.namespace"
 _COMPOSE_SERVICE_LABEL = "io.docker-jenkins-orchestrator.compose-service"
+_BUILD_LABEL = "io.docker-jenkins-orchestrator.build-id"
+_MANAGED_LABEL = "io.docker-jenkins-orchestrator.managed"
+_LOGICAL_LABEL = "io.docker-jenkins-orchestrator.logical-name"
 
 
 class DockerServiceError(AdapterError):
@@ -167,6 +173,8 @@ class DockerSwarmAdapter:
         readiness_poll_interval_seconds: float = 1.0,
         published_port_range_start: int = 18000,
         published_port_range_end: int = 18999,
+        workspace_host_root: Path | None = None,
+        workspace_shared_storage: bool = False,
     ) -> None:
         if not isinstance(network_name, str) or not _NAME_PATTERN.fullmatch(network_name):
             raise ValueError("Docker services network name is invalid")
@@ -188,6 +196,136 @@ class DockerSwarmAdapter:
         self.published_port_range_end = int(published_port_range_end)
         self._docker_client = docker_client
         self._client_factory = client_factory or self._create_client
+        self.workspace_host_root = workspace_host_root
+        self.workspace_shared_storage = workspace_shared_storage
+        self._build_id: str | None = None
+        self._tracker: Any | None = None
+        self._target = f"docker:{base_url or 'unix:///var/run/docker.sock'}"
+        self._node_id: str | None = None
+
+    def deploy_build(self, appid: str, build_id: str, compose: Mapping[str, Any], tracker: Any) -> SwarmDeployment:
+        adapter = copy(self)
+        adapter._build_id = build_id
+        adapter._tracker = tracker
+        adapter._allowed_bind_root = (
+            adapter.workspace_host_root / external_namespace(appid) / "snapshots" / build_id / "files"
+            if adapter.workspace_host_root is not None else None
+        )
+        adapter.validate_build_compose(compose)
+        for service in self._compose_services(compose).values():
+            image = service.get("image", "")
+            if not isinstance(image, str) or not image.rsplit(":", 1)[-1].startswith(build_id + "-"):
+                raise DockerServiceError("Build services require build-exclusive image references")
+        return adapter.deploy(appid, compose)
+
+    def validate_build_compose(self, compose: Mapping[str, Any], *, environment: Mapping[str, str] | None = None) -> None:
+        if compose.get("networks") or compose.get("secrets") or compose.get("configs"):
+            raise DockerServiceError("Build-isolated deployments cannot reference external networks, secrets or configs")
+        volumes = compose.get("volumes", {})
+        if not isinstance(volumes, Mapping):
+            raise DockerServiceError("Compose volumes must be a mapping")
+        for definition in volumes.values():
+            if definition is not None and not isinstance(definition, Mapping):
+                raise DockerServiceError("Compose volume definition is invalid")
+            if isinstance(definition, Mapping) and (definition.get("external") or definition.get("driver_opts") or definition.get("driver") not in (None, "local")):
+                raise DockerServiceError("Shared/external volume backends cannot be isolated by build")
+        for definition in self._compose_services(compose).values():
+            for mount in definition.get("volumes", []):
+                source = mount.split(":")[0] if isinstance(mount, str) else mount.get("source", "") if isinstance(mount, Mapping) else ""
+                if not isinstance(source, str) or not source:
+                    raise DockerServiceError("Anonymous mounts are not supported in build-isolated deployments")
+                if source.startswith("/"):
+                    allowed = getattr(self, "_allowed_bind_root", self.workspace_host_root)
+                    if allowed is None or not Path(source).is_relative_to(allowed) or ".." in Path(source).parts:
+                        raise DockerServiceError("Absolute bind mounts must belong to the build workspace")
+        self._validate_private_backends(compose, environment or {})
+
+    def _validate_private_backends(self, compose: Mapping[str, Any], environment: Mapping[str, str]) -> None:
+        services = self._compose_services(compose)
+        private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
+        stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
+        endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?)_(?:HOST|URL|URI|DSN|ENDPOINT)$")
+        configurations = [dict(environment)]
+        configurations.extend(dict(value.split("=", 1) for value in self._environment(service.get("environment"))) for service in services.values())
+        for values in configurations:
+            for key, raw in values.items():
+                value = str(raw)
+                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}",
+                               lambda match: str(environment.get(match.group(1), values.get(match.group(1), match.group(2) or "${" + match.group(1) + "}"))), value)
+                upper_key = key.upper()
+                if upper_key in {"S3_BUCKET", "AWS_S3_BUCKET", "STORAGE_BUCKET", "GOOGLE_STORAGE_BUCKET"} and value:
+                    endpoint_keys = {"S3_ENDPOINT", "MINIO_ENDPOINT", "STORAGE_ENDPOINT", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"}
+                    local_endpoint = False
+                    for endpoint_key_name in endpoint_keys:
+                        endpoint = str(values.get(endpoint_key_name, environment.get(endpoint_key_name, "")))
+                        try:
+                            host = urlsplit(endpoint if "://" in endpoint else "//" + endpoint).hostname
+                        except ValueError:
+                            host = None
+                        if host in services:
+                            local_endpoint = True
+                    if not local_endpoint:
+                        raise DockerServiceError(f"External storage configuration {key} cannot be proven build-private")
+                    continue
+                try:
+                    parsed = urlsplit(value)
+                    is_endpoint = bool(endpoint_key.search(upper_key)) or upper_key in {"PGHOST", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"} or parsed.scheme in stateful_schemes
+                    if not value or not is_endpoint:
+                        continue
+                    if "${" in value:
+                        raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
+                    host = parsed.hostname if parsed.scheme and "://" in value else urlsplit("//" + value).hostname
+                except ValueError:
+                    raise DockerServiceError(f"Stateful endpoint configuration {key} is invalid") from None
+                if host not in private_hosts:
+                    raise DockerServiceError(f"External stateful endpoint {key} cannot be proven build-private; use a service in this build")
+
+    def _assert_tracked_identity(self, kind: str, name: str, obj: Any) -> None:
+        if self._tracker is None:
+            return
+        self._tracker.guard()
+        manifest = self._tracker.repository.get_build_resources(self._build_id)
+        for resource in manifest.resources.values():
+            if resource.kind == kind and resource.target == self._target and resource.name == name and resource.native_id:
+                if resource.native_id != self._object_id(obj):
+                    raise DockerServiceError("Build resource identity changed; refusing reuse")
+                if kind == "volume" and resource.metadata.get("creation_token") != self._volume_creation_token(obj):
+                    raise DockerServiceError("Build volume creation identity changed; refusing reuse")
+
+    @staticmethod
+    def _volume_creation_token(volume: Any) -> str:
+        created_at = volume.attrs.get("CreatedAt")
+        if not isinstance(created_at, str) or not created_at:
+            raise DockerServiceError("Build volume creation identity is unavailable")
+        return sha256(created_at.encode()).hexdigest()
+
+    def _record(self, kind: str, name: str, *, native_id: str | None = None, state: ResourceState = ResourceState.PLANNED,
+                metadata: dict[str, Any] | None = None) -> None:
+        if self._tracker is not None:
+            self._tracker.guard()
+            self._tracker.record(kind, name, target=self._target, native_id=native_id, state=state,
+                                 metadata={"node_id": self._node_id, **(metadata or {})})
+
+    def _build_labels(self, appid: str, namespace: str, logical_name: str = "default") -> dict[str, str]:
+        labels = {_APPID_LABEL: appid, _NAMESPACE_LABEL: namespace}
+        if self._build_id is not None:
+            labels.update({_BUILD_LABEL: self._build_id, _MANAGED_LABEL: "true", _LOGICAL_LABEL: logical_name})
+        return labels
+
+    def _prepare_build_volumes(self, client: Any, appid: str, namespace: str, sources: Mapping[str, str]) -> None:
+        for alias, name in sources.items():
+            self._record("volume", name, metadata={"alias": alias})
+            try:
+                volume = client.volumes.get(name)
+            except Exception as exc:
+                if not self._is_not_found(exc):
+                    raise DockerServiceError("Unable to inspect build volume") from exc
+                self._tracker.guard()
+                volume = client.volumes.create(name=name, driver="local", labels=self._build_labels(appid, namespace, alias))
+            self._assert_resource_owner(volume, appid, namespace, kind="volume", name=name)
+            self._assert_tracked_identity("volume", name, volume)
+            self._record("volume", name, native_id=self._object_id(volume) or name, state=ResourceState.PRESENT,
+                         metadata={"alias": alias, "creation_token": self._volume_creation_token(volume)})
 
     @classmethod
     def from_settings(cls, settings: Any, *, docker_client: Any | None = None) -> "DockerSwarmAdapter":
@@ -199,6 +337,8 @@ class DockerSwarmAdapter:
             readiness_poll_interval_seconds=getattr(settings, "deployment_readiness_poll_interval_seconds", 1.0),
             published_port_range_start=getattr(settings, "deployment_port_range_start", 18000),
             published_port_range_end=getattr(settings, "deployment_port_range_end", 18999),
+            workspace_host_root=(settings.workspace_host_root or settings.workspace_root).absolute(),
+            workspace_shared_storage=settings.workspace_shared_storage,
         )
 
     def __repr__(self) -> str:
@@ -216,7 +356,7 @@ class DockerSwarmAdapter:
         the document to this adapter.
         """
 
-        namespace = self._namespace(appid)
+        namespace = build_namespace(appid, self._build_id) if self._build_id is not None else self._namespace(appid)
         # Complete every deterministic validation before connecting to Docker.
         # In particular, image presence, service names, and dependency cycles
         # used to be checked while the deployment loop was already under way.
@@ -224,8 +364,18 @@ class DockerSwarmAdapter:
         services = self._compose_services(compose)
         self._validate_unique_deployment_service_names(appid, namespace, services)
         volume_sources = self._volume_sources(compose, namespace)
+        if self._build_id is not None:
+            volume_sources = {alias: managed_volume_name(namespace, alias) for alias in volume_sources}
         shared_volume_aliases = self._shared_volume_aliases(compose)
         client = self._client()
+        if self._build_id is not None:
+            info = client.info()
+            swarm = info.get("Swarm", {})
+            self._node_id = swarm.get("NodeID")
+            if not self._node_id:
+                raise DockerServiceError("Build isolation requires an identifiable Swarm storage node")
+            self._target = f"docker:{info.get('ID') or self._node_id}"
+            self._prepare_build_volumes(client, appid, namespace, volume_sources)
         reserved_ports = self._occupied_published_ports(
             client,
             {self._deployment_service_name(appid, namespace, name, definition) for name, definition in services.items()},
@@ -251,15 +401,22 @@ class DockerSwarmAdapter:
                 if deployment.action == "created":
                     created_services.append(deployment)
                 self._wait_for_service_ready(client, deployment.service_name)
+                if self._build_id is not None:
+                    image = client.images.get(deployment.image)
+                    self._record("local_image", deployment.image, native_id=image.id, state=ResourceState.PRESENT)
                 deployments.append(deployment)
-            self._cleanup_stale_services(client, appid, namespace, {item.service_name for item in deployments})
+            if self._build_id is None:
+                self._cleanup_stale_services(client, appid, namespace, {item.service_name for item in deployments})
         except Exception:
             # A failed rollout must leave the previous service set intact.  In
             # particular, updated services belong to the previous revision and
             # must not be removed as part of this deployment's rollback.
-            self._rollback_deployment(
-                client, appid, namespace, network_name, network_target, network_created, created_services
-            )
+            if self._tracker is None or self._tracker.owner is not None:
+                if self._tracker is not None:
+                    self._tracker.guard()
+                self._rollback_deployment(
+                    client, appid, namespace, network_name, network_target, network_created, created_services
+                )
             raise
         return SwarmDeployment(appid=appid, network_name=network_name, services=tuple(deployments))
 
@@ -329,6 +486,8 @@ class DockerSwarmAdapter:
         deadline = time.monotonic() + self.readiness_timeout_seconds
         last_states: list[str] = []
         while True:
+            if self._tracker is not None:
+                self._tracker.guard()
             try:
                 tasks = tasks_method()
             except Exception as exc:
@@ -422,6 +581,7 @@ class DockerSwarmAdapter:
     def _ensure_network(self, client: Any, appid: str, namespace: str) -> tuple[str, str, bool]:
         name = self._network_name(namespace)
         created = False
+        self._record("network", name)
         try:
             network = client.networks.get(name)
         except Exception as exc:
@@ -430,11 +590,13 @@ class DockerSwarmAdapter:
                     f"Unable to inspect Docker network {name}: {self._safe_error_detail(exc)}"
                 ) from exc
             try:
+                if self._tracker is not None:
+                    self._tracker.guard()
                 network = client.networks.create(
                     name,
                     driver="overlay",
-                    attachable=True,
-                    labels={_APPID_LABEL: appid, _NAMESPACE_LABEL: namespace},
+                    attachable=self._build_id is None,
+                    labels=self._build_labels(appid, namespace),
                 )
                 created = True
             except Exception as create_exc:
@@ -443,6 +605,8 @@ class DockerSwarmAdapter:
                 ) from create_exc
         if not created:
             self._assert_resource_owner(network, appid, namespace, kind="network", name=name)
+            self._assert_tracked_identity("network", name, network)
+        self._record("network", name, native_id=self._object_id(network), state=ResourceState.PRESENT)
         identifier = self._object_id(network) or name
         return name, identifier, created
 
@@ -798,6 +962,8 @@ class DockerSwarmAdapter:
             raise DockerServiceError("Compose service must define an image")
 
         name = self._deployment_service_name(appid, namespace, compose_name, definition)
+        self._record("service", name, metadata={"compose_service": compose_name})
+        self._record("local_image", image)
         ports = self._allocate_ports(
             self._ports(definition.get("ports")),
             reserved_ports,
@@ -809,6 +975,21 @@ class DockerSwarmAdapter:
             if port.published_port is not None
         )
         kwargs = self._service_kwargs(appid, namespace, compose_name, definition, network_target, ports, volume_sources)
+        if self.workspace_host_root is not None and not self.workspace_shared_storage:
+            workspace_mount = any(
+                isinstance(mount, str) and mount.startswith(f"{self.workspace_host_root}/")
+                for mount in kwargs.get("mounts", [])
+            )
+            if workspace_mount:
+                if self.base_url and not self.base_url.startswith("unix://"):
+                    raise DockerServiceError("Workspace mounts on a remote Docker engine require configured shared workspace storage")
+                try:
+                    node_id = client.info().get("Swarm", {}).get("NodeID")
+                except Exception as exc:
+                    raise DockerServiceError("Unable to determine the workspace storage Swarm node") from exc
+                if not node_id:
+                    raise DockerServiceError("Workspace storage node is not a Swarm member")
+                kwargs["constraints"] = [f"node.id=={node_id}"]
 
         try:
             existing = client.services.get(name)
@@ -821,12 +1002,18 @@ class DockerSwarmAdapter:
 
         if existing is not None:
             self._assert_resource_owner(existing, appid, namespace, kind="service", name=name)
+            self._assert_tracked_identity("service", name, existing)
             # Template-generated volume ``name`` values carry final physical
             # names, but do not authorize silently rebinding historical data.
             template_component = self._template_component(appid, namespace, compose_name, definition)
             self._assert_volume_rebinding_safe(
                 existing, definition, volume_sources, set() if template_component else shared_volume_aliases, name
             )
+
+        if self._build_id is not None:
+            kwargs["constraints"] = [f"node.id=={self._node_id}"]
+            if self._tracker is not None:
+                self._tracker.guard()
 
         try:
             if existing is None:
@@ -843,6 +1030,7 @@ class DockerSwarmAdapter:
             ) from exc
 
         service_id = self._object_id(service) or name
+        self._record("service", name, native_id=service_id, state=ResourceState.PRESENT, metadata={"compose_service": compose_name})
         endpoint = self._endpoint(name, ports)
         return ServiceDeployment(
             service_id=service_id,
@@ -864,6 +1052,7 @@ class DockerSwarmAdapter:
         volume_sources: Mapping[str, str],
     ) -> dict[str, Any]:
         labels = self._labels(appid, compose_name, definition.get("labels"), namespace=namespace)
+        labels.update(self._build_labels(appid, namespace, compose_name))
         kwargs: dict[str, Any] = {
             "env": self._environment(definition.get("environment")),
             "labels": labels,
@@ -873,6 +1062,8 @@ class DockerSwarmAdapter:
             # ``postgres://planka-db/...`` cannot resolve at runtime.
             "networks": [{"Target": network_target, "Aliases": [compose_name]}],
         }
+        if self._build_id is not None:
+            kwargs["container_labels"] = dict(labels)
         command = definition.get("command")
         if command is not None:
             kwargs["command"] = self._command(command)
@@ -920,10 +1111,12 @@ class DockerSwarmAdapter:
         except Exception as exc:
             raise DockerServiceError(f"Unable to inspect existing Docker service ports: {self._safe_error_detail(exc)}") from exc
         occupied: set[tuple[int, str, str]] = set()
+        ignored_service_ids = set()
         ignored_service_names = ignored_service_names or set()
         for service in services if isinstance(services, Sequence) and not isinstance(services, (str, bytes)) else ():
             name = self._service_name_from_object(service)
             if name in ignored_service_names:
+                ignored_service_ids.add(self._object_id(service))
                 continue
             attrs = getattr(service, "attrs", None)
             if not isinstance(attrs, Mapping) and isinstance(service, Mapping):
@@ -942,8 +1135,36 @@ class DockerSwarmAdapter:
                 protocol = raw.get("Protocol", "tcp")
                 mode = raw.get("PublishMode", "ingress")
                 if isinstance(protocol, str) and isinstance(mode, str):
-                    occupied.add((published, protocol, mode))
+                    occupied.update({(published, protocol, "ingress"), (published, protocol, "host")} if self._build_id is not None else {(published, protocol, mode)})
+        if self._build_id is not None:
+            try:
+                for container in client.containers.list(all=True):
+                    owner = container.attrs.get("Config", {}).get("Labels", {}).get("com.docker.swarm.service.id")
+                    if owner and owner in ignored_service_ids:
+                        continue
+                    ports = self._container_bound_ports(container)
+                    for published, protocol in ports:
+                        occupied.update({(published, protocol, "ingress"), (published, protocol, "host")})
+            except Exception as exc:
+                raise DockerServiceError("Unable to inspect Docker container port bindings") from exc
         return occupied
+
+    @staticmethod
+    def _container_bound_ports(container: Any) -> set[tuple[int, str]]:
+        result = set()
+        attrs = container.attrs
+        bindings = [attrs.get("HostConfig", {}).get("PortBindings") or {}, attrs.get("NetworkSettings", {}).get("Ports") or {}]
+        for mapping in bindings:
+            for target, addresses in mapping.items():
+                protocol = target.rsplit("/", 1)[-1]
+                for address in addresses or []:
+                    try:
+                        number = int(address.get("HostPort", ""))
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= number <= 65535:
+                        result.add((number, protocol))
+        return result
 
     def _allocate_ports(
         self,
@@ -955,16 +1176,23 @@ class DockerSwarmAdapter:
         """Preserve free requests and allocate conflicting/dynamic ports."""
 
         allocated: list[PublishedPort] = []
-        for port in ports:
+        for port_index, port in enumerate(ports):
             requested = port.published_port
             key = (requested, port.protocol, port.mode) if requested is not None else None
-            if key is not None and key not in occupied:
+            allocation_owner = f"{service_name}:{port_index}:{port.target_port}:{port.mode}"
+            if self._tracker is not None:
+                previous = [item for item in self._tracker.repository.list_build_ports(self._build_id)
+                            if item["target"] == self._target and item["protocol"] == port.protocol and item["service_name"] == allocation_owner]
+                if previous:
+                    requested = previous[0]["port"]
+                    key = (requested, port.protocol, port.mode)
+            if key is not None and key not in occupied and self._reserve_port(requested, port.protocol, allocation_owner):
                 chosen = requested
             else:
                 chosen = None
                 for candidate in range(self.published_port_range_start, self.published_port_range_end + 1):
                     candidate_key = (candidate, port.protocol, port.mode)
-                    if candidate_key not in occupied:
+                    if candidate_key not in occupied and self._reserve_port(candidate, port.protocol, allocation_owner):
                         chosen = candidate
                         break
                 if chosen is None:
@@ -980,7 +1208,15 @@ class DockerSwarmAdapter:
             )
             allocated.append(allocated_port)
             occupied.add((chosen, port.protocol, port.mode))
+            self._record("port", f"{chosen}/{port.protocol}", state=ResourceState.PRESENT,
+                         metadata={"port": chosen, "protocol": port.protocol, "service_name": service_name})
         return allocated
+
+    def _reserve_port(self, port: int, protocol: str, service_name: str) -> bool:
+        if self._tracker is None or self._build_id is None:
+            return True
+        self._tracker.guard()
+        return self._tracker.repository.reserve_port(self._target, protocol, port, self._build_id, service_name)
 
     @classmethod
     def _validate_compose_features(cls, services: Mapping[str, Mapping[str, Any]]) -> None:
@@ -1314,6 +1550,13 @@ class DockerSwarmAdapter:
         cls, resource: Any, appid: str, namespace: str, *, kind: str, name: str
     ) -> None:
         labels = cls._resource_labels(resource)
+        if namespace.startswith("build-v1-"):
+            try:
+                matching = build_namespace(appid, labels.get(_BUILD_LABEL)) == namespace
+            except NamingError:
+                matching = False
+            if not matching or labels.get(_MANAGED_LABEL) != "true":
+                raise DockerServiceError("Build resource ownership could not be verified")
         recorded_namespace = labels.get(_NAMESPACE_LABEL)
         # The old adapter lowercased appid before persisting ownership labels:
         # a legacy "foo" label could therefore belong to either Foo or foo.

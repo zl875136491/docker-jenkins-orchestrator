@@ -70,7 +70,7 @@ def auth_headers() -> dict[str, str]:
 class FakeGitLab:
     def __init__(self, *, commit_sha: str = "a" * 40, compose: dict | None = None) -> None:
         self.commit_sha = commit_sha
-        self.compose = compose or {"services": {"web": {"image": "example/web:1"}}}
+        self.compose = compose or {"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/web:1"}}}
         self.refs: list[tuple[str, str]] = []
         self.discovered: list[str] = []
 
@@ -98,7 +98,7 @@ def test_app_build_lifecycle_smoke() -> None:
             "name": "Demo",
             "repository_url": "https://git.example/demo.git",
             "environment": {"DATABASE_URL": "mongodb://mongodb/demo"},
-            "compose": {"services": {"api": {"image": "example/demo:latest"}}},
+            "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/demo:latest"}}},
         },
     )
     assert app_response.status_code == 201
@@ -123,7 +123,7 @@ def test_appid_identity_remains_case_sensitive_in_app_and_build_apis() -> None:
             "appid": appid,
             "name": appid,
             "repository_url": f"https://git.example/{appid}.git",
-            "compose": {"services": {"api": {"image": "example/demo:1"}}},
+            "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/demo:1"}}},
         }
         response = client.post("/api/v1/jenkins/app_create", headers=headers, json=payload)
         assert response.status_code == 201
@@ -171,7 +171,7 @@ def test_create_app_discovers_compose_when_gitlab_is_configured() -> None:
         assert fake_gitlab.refs == [("https://git.example/group/demo.git", "release/1.2")]
         assert fake_gitlab.discovered == ["b" * 40]
 
-        explicit_compose = {"services": {"web": {"image": "example/explicit:1"}}}
+        explicit_compose = {"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/explicit:1"}}}
         explicit = client.post(
             "/api/v1/jenkins/app_create",
             headers=headers,
@@ -228,7 +228,7 @@ def test_app_sync_uses_saved_ref_updates_compose_and_reports_changes() -> None:
     applications = app.state.container.applications
     previous_gitlab = applications.gitlab
     appid = f"sync-{uuid4().hex}"
-    original_compose = {"services": {"web": {"image": "example/web:old"}}}
+    original_compose = {"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/web:old"}}}
     create_response = client.post(
         "/api/v1/jenkins/app_create",
         headers=headers,
@@ -241,7 +241,7 @@ def test_app_sync_uses_saved_ref_updates_compose_and_reports_changes() -> None:
         },
     )
     assert create_response.status_code == 201
-    fake_gitlab = FakeGitLab(commit_sha="c" * 40, compose={"services": {"web": {"image": "example/web:new"}}})
+    fake_gitlab = FakeGitLab(commit_sha="c" * 40, compose={"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/web:new"}}})
     applications.gitlab = fake_gitlab
     try:
         response = client.post(f"/api/v1/jenkins/app_sync/{appid}", headers=headers)
@@ -293,7 +293,7 @@ def test_app_sync_failure_does_not_modify_saved_compose_or_source_metadata() -> 
     applications = app.state.container.applications
     previous_gitlab = applications.gitlab
     appid = f"sync-failure-{uuid4().hex}"
-    original_compose = {"services": {"web": {"image": "example/web:stable"}}}
+    original_compose = {"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/web:stable"}}}
     applications.gitlab = FakeGitLab(commit_sha="d" * 40, compose=original_compose)
     created = client.post(
         "/api/v1/jenkins/app_create",
@@ -339,7 +339,7 @@ def test_app_list_requires_authentication_and_returns_existing_apps() -> None:
                 "appid": appid,
                 "name": name,
                 "repository_url": "https://git.example/list.git",
-                "compose": {"services": {"api": {"image": "example/list:latest"}}},
+                "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/list:latest"}}},
             },
         )
         assert response.status_code == 201
@@ -386,7 +386,7 @@ def test_build_history_requires_authentication_and_supports_filters_pagination_a
             "appid": appid,
             "name": "History",
             "repository_url": "https://git.example/history.git",
-            "compose": {"services": {"api": {"image": "example/history:latest"}}},
+            "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/history:latest"}}},
         },
     )
     assert app_response.status_code == 201
@@ -476,7 +476,7 @@ def test_app_access_returns_published_ports_and_configured_urls() -> None:
             "appid": appid,
             "name": "Access",
             "repository_url": "https://git.example/access.git",
-            "compose": {"services": {"api": {"image": "example/access:latest"}}},
+            "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/access:latest"}}},
         },
     )
     assert create_response.status_code == 201
@@ -531,7 +531,7 @@ def test_app_access_supports_legacy_endpoint_and_reports_unavailable_access() ->
             "appid": appid,
             "name": "Legacy access",
             "repository_url": "https://git.example/legacy-access.git",
-            "compose": {"services": {"api": {"image": "example/legacy:latest"}}},
+                "compose": {"services": {"api": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/legacy:latest"}}},
         },
     ).status_code == 201
     access_app.state.container.repository.save_service(

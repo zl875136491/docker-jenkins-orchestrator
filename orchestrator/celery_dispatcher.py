@@ -30,3 +30,6 @@ class CeleryTaskDispatcher:
 
     def dispatch_base_image_sync(self) -> TaskSubmission:
         return self._dispatch("orchestrator.images.sync_base_images", self.settings.celery_images_queue)
+
+    def dispatch_build_cleanup(self, build_id: str) -> TaskSubmission:
+        return self._dispatch("orchestrator.pipeline.cleanup_build", self.settings.celery_build_queue, [build_id])

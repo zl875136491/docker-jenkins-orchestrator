@@ -49,6 +49,7 @@ def test_control_console_sidebar_navigation_targets_each_workspace_section() -> 
     navigation_markup = navigation.group(1)
     section_ids = (
         "appSection",
+        "workspaceSection",
         "buildSection",
         "historySection",
         "resourcesSection",
@@ -58,6 +59,25 @@ def test_control_console_sidebar_navigation_targets_each_workspace_section() -> 
     for section_id in section_ids:
         assert f'href="#{section_id}"' in navigation_markup
         assert f'id="{section_id}"' in page.text
+
+
+def test_control_console_exposes_workspace_upload_listing_deletion_and_pagination() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    for element_id in (
+        "workspaceAppId", "workspaceUploadForm", "workspaceFiles", "workspaceDirectory",
+        "workspaceUploadPath", "workspaceUploadButton", "workspaceRefreshButton", "workspaceStatus",
+        "workspaceFileRows", "workspaceEmpty", "workspaceSearch", "workspacePageSize",
+        "workspacePreviousButton", "workspaceNextButton", "workspacePageLabel",
+    ):
+        assert f'id="{element_id}"' in page.text
+    assert "webkitdirectory" in page.text
+    assert "已有构建快照" in page.text
+    assert "new FormData()" in script.text
+    assert 'form.append("files", entry.file, path)' in script.text
+    assert "/api/v1/workspace/" in script.text
+    assert "deleteWorkspaceFile" in script.text
+    assert "workspaceContextMatches" in script.text
 
 
 def test_control_console_has_connection_and_app_context_modals() -> None:
@@ -111,6 +131,16 @@ def test_control_console_exposes_topbar_session_and_app_status_markers() -> None
     assert "function setSession" in script.text
     assert '$("sessionStatus")' in script.text
     assert '$("metricApp")' in script.text
+
+
+def test_control_console_declares_east_eight_display_timezone() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    assert "时间统一使用东八区（UTC+08:00）" in page.text
+    assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in script.text
+    assert 'timeZone: DISPLAY_TIME_ZONE' in script.text
+    assert "toLocaleTimeString()" not in script.text
+    assert "toLocaleString()" not in script.text
 
 
 def test_control_console_loads_existing_apps_for_context_selection() -> None:

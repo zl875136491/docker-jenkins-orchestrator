@@ -37,7 +37,12 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "orchestrator.pipeline.recover_builds",
                 "schedule": timedelta(seconds=settings.celery_recovery_interval_seconds),
                 "options": {"queue": settings.celery_build_queue},
-            }
+            },
+            "recover-build-cleanups": {
+                "task": "orchestrator.pipeline.recover_cleanups",
+                "schedule": timedelta(seconds=settings.celery_recovery_interval_seconds),
+                "options": {"queue": settings.celery_build_queue},
+            },
         },
     )
     return app

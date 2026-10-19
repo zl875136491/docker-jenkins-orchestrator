@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from base64 import b64encode
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol
@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from orchestrator.adapters import AdapterError
 from orchestrator.gitlab import HttpResponse, HttpTransport, UrllibHttpTransport
+from orchestrator.jenkins_diagnostics import summarize_failure
 from orchestrator.naming import NamingError, registry_from_image_repository, validate_image_repository
 
 
@@ -27,6 +28,10 @@ class JenkinsError(AdapterError):
 
 class JenkinsNotFoundError(JenkinsError):
     """The requested Jenkins queue item or build does not exist."""
+
+
+class JenkinsNotStartedError(JenkinsError):
+    """The trigger was definitively rejected or failed before submission."""
 
 
 class JenkinsArtifactError(JenkinsError):
@@ -51,9 +56,13 @@ class JenkinsBuildRequest:
     environment: Mapping[str, str]
     compose: Mapping[str, Any]
     image_repository: str
+    workspace_archive_url: str = field(default="", repr=False)
+    workspace_archive_sha256: str = ""
+    workspace_archive_token: str = field(default="", repr=False)
+    build_id: str = ""
 
     def __post_init__(self) -> None:
-        for name in ("appid", "repository_url", "git_ref", "image_repository"):
+        for name in ("appid", "git_ref", "image_repository"):
             _require_nonempty(getattr(self, name), name)
         try:
             validate_image_repository(self.image_repository)
@@ -85,7 +94,7 @@ class JenkinsBuildRequest:
             compose = json.dumps(dict(self.compose), sort_keys=True, separators=(",", ":"))
         except (TypeError, ValueError):
             raise JenkinsError("Build input could not be serialized for Jenkins") from None
-        return {
+        parameters = {
             "APPID": self.appid,
             "REPOSITORY_URL": self.repository_url,
             "GIT_REF": self.git_ref,
@@ -93,7 +102,23 @@ class JenkinsBuildRequest:
             "COMPOSE_JSON": compose,
             "IMAGE_REPOSITORY": self.image_repository,
             "HARBOR_REGISTRY": registry_from_image_repository(self.image_repository),
+            "CHECKOUT_REQUIRED": "true" if self.compose.get("x-orchestrator-build-source") != "workspace" and any(
+                isinstance(service, Mapping) and service.get("build") is not None
+                for service in self.compose.get("services", {}).values()
+            ) else "false",
         }
+        if self.workspace_archive_url:
+            parameters["WORKSPACE_ARCHIVE_URL"] = self.workspace_archive_url
+            parameters["WORKSPACE_ARCHIVE_SHA256"] = self.workspace_archive_sha256
+            parameters["WORKSPACE_ARCHIVE_TOKEN"] = self.workspace_archive_token
+        if self.build_id:
+            from orchestrator.naming import validate_build_id
+
+            validate_build_id(self.build_id)
+            parameters["BUILD_ID"] = self.build_id
+            if re.fullmatch(r"[a-f0-9]{40}", self.git_ref):
+                parameters["EXPECTED_COMMIT"] = self.git_ref
+        return parameters
 
 
 @dataclass(frozen=True)
@@ -177,6 +202,8 @@ class JenkinsAdapter(Protocol):
 
     def get_build(self, number: int) -> JenkinsBuild: ...
 
+    def get_failure_summary(self, number: int, *, sensitive_values: Iterable[str] = ()) -> str: ...
+
     def get_result_artifact(self, number: int) -> JenkinsResultArtifact: ...
 
 
@@ -233,13 +260,18 @@ class JenkinsHttpAdapter:
 
         if not isinstance(request, JenkinsBuildRequest):
             raise TypeError("request must be a JenkinsBuildRequest")
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-            **self._crumb_headers(),
-        }
-        body = urlencode(request.as_parameters()).encode("utf-8")
+        try:
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+                **self._crumb_headers(),
+            }
+            body = urlencode(request.as_parameters()).encode("utf-8")
+        except JenkinsError as exc:
+            raise JenkinsNotStartedError(str(exc)) from None
         response = self._request("POST", f"{self._job_path}/buildWithParameters", headers=headers, body=body)
+        if 400 <= response.status_code < 500:
+            raise JenkinsNotStartedError(f"Jenkins rejected the build trigger (HTTP {response.status_code})")
         if response.status_code not in {200, 201, 202, 302}:
             self._raise_for_status(response, "build trigger")
         queue_url = response.header("Location")
@@ -291,6 +323,29 @@ class JenkinsHttpAdapter:
             raise JenkinsError("Jenkins returned an invalid build response")
         return JenkinsBuild(number=build_number, building=building, result=result, url=url)
 
+    def get_failure_summary(self, number: int, *, sensitive_values: Iterable[str] = ()) -> str:
+        build_number = _positive_int(number, "number")
+        path = f"{self._job_path}/{build_number}/logText/progressiveText"
+        window = 128 * 1024
+        metadata = self._request("HEAD", f"{path}?start=0", max_bytes=0)
+        if metadata.status_code not in {200, 405, 501}:
+            self._raise_for_status(metadata, "console log")
+        try:
+            size = max(0, int(metadata.header("X-Text-Size") or "0"))
+        except ValueError:
+            size = 0
+        start = max(0, size - window)
+        response = self._request(
+            "GET", f"{path}?start={start}", headers={"Accept": "text/plain"}, max_bytes=window * 2,
+        )
+        if response.status_code != 200:
+            self._raise_for_status(response, "console log")
+        return summarize_failure(
+            response.body[:window * 2].decode("utf-8", errors="replace"),
+            start=start,
+            sensitive_values=(*sensitive_values, self._username, self._password, self._authorization),
+        )
+
     def get_result_artifact(self, number: int) -> JenkinsResultArtifact:
         """Fetch and validate the mandatory ``orchestrator-result.json`` artifact."""
 
@@ -311,6 +366,15 @@ class JenkinsHttpAdapter:
         ):
             raise JenkinsArtifactError("Jenkins result artifact has an invalid format")
         return JenkinsResultArtifact(images=tuple(images), compose=compose, _payload=payload)
+
+    def get_resource_artifact(self, number: int) -> Mapping[str, Any]:
+        build_number = _positive_int(number, "number")
+        response = self._request("GET", f"{self._job_path}/{build_number}/artifact/orchestrator-resources.json")
+        if response.status_code == 404:
+            raise JenkinsArtifactError("Jenkins resource artifact is missing")
+        if response.status_code != 200:
+            self._raise_for_status(response, "resource artifact")
+        return self._json_object(response, "resource artifact", error_type=JenkinsArtifactError)
 
     def _crumb_headers(self) -> dict[str, str]:
         response = self._request("GET", "/crumbIssuer/api/json")
@@ -336,12 +400,15 @@ class JenkinsHttpAdapter:
         *,
         headers: Mapping[str, str] | None = None,
         body: bytes | None = None,
+        max_bytes: int | None = None,
     ) -> HttpResponse:
         url = path_or_url if path_or_url.startswith(("http://", "https://")) else self._url(path_or_url)
         request_headers = {"Accept": "application/json", "Authorization": self._authorization}
         if headers:
             request_headers.update(headers)
         try:
+            if max_bytes is not None:
+                return self._transport.request(method, url, headers=request_headers, body=body, max_bytes=max_bytes)
             return self._transport.request(method, url, headers=request_headers, body=body)
         except Exception as exc:
             if isinstance(exc, JenkinsError):

@@ -13,7 +13,10 @@ from orchestrator.models import (
     AppEvent,
     BuildCreate,
     BuildJob,
+    BuildResources,
     BuildStatus,
+    CleanupStatus,
+    ResourceState,
     EventLevel,
     TERMINAL_BUILD_STATUSES,
     UserApp,
@@ -31,6 +34,8 @@ from orchestrator.secrets import SecretBox
 from orchestrator.tasks import TaskDispatcher
 from orchestrator.templates import TemplateError
 from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepositoryRef
+from orchestrator.workspaces import WorkspaceError, WorkspaceStore
+from orchestrator.naming import build_namespace
 
 
 class NotFoundError(LookupError):
@@ -58,10 +63,11 @@ ALLOWED_BUILD_TRANSITIONS: dict[BuildStatus, set[BuildStatus]] = {
 
 
 class ApplicationService:
-    def __init__(self, repository: Repository, secret_box: SecretBox, gitlab: GitLabAdapter | None = None) -> None:
+    def __init__(self, repository: Repository, secret_box: SecretBox, gitlab: GitLabAdapter | None = None, workspace: WorkspaceStore | None = None) -> None:
         self.repository = repository
         self.secret_box = secret_box
         self.gitlab = gitlab
+        self.workspace = workspace
 
     @staticmethod
     def _public(record: UserAppRecord) -> UserApp:
@@ -72,7 +78,7 @@ class ApplicationService:
         compose = request.compose
         compose_source_file = None
         compose_source_commit = None
-        if compose is None and self.gitlab is not None:
+        if compose is None and self.gitlab is not None and request.repository_url:
             resolved = self.gitlab.validate_repository_ref(request.repository_url, request.git_ref)
             discovered = self.gitlab.discover_compose(resolved)
             compose = dict(discovered.compose)
@@ -92,6 +98,8 @@ class ApplicationService:
             created_at=now,
             updated_at=now,
         )
+        if self.workspace is not None:
+            self.workspace.ensure_app(request.appid)
         return self._public(self.repository.create_app(record))
 
     def get_record(self, appid: str) -> UserAppRecord:
@@ -183,9 +191,15 @@ class TechStackService:
         if path == "$":
             return f"{tech_stack_id} 技术栈的完整组件配置；组合 Compose 时按项目实际需求核对。"
         if path == "$.images":
-            return "可选的固定版本基础镜像列表；交付时选择与项目运行时兼容的一项。"
+            return "可选的固定版本基础镜像列表；用于 Dockerfile 的 FROM，交付时选择与项目运行时兼容的一项。"
         if path.startswith("$.images["):
             return f"候选基础镜像 {value}；使用前确认架构、运行时版本和安全更新要求。"
+        if path == "$.build":
+            return "本地源码构建配置；每个服务都必须提供 build.context 和 build.dockerfile。"
+        if path == "$.build.context":
+            return "相对构建上下文；必须位于项目仓库或上传 workspace 根目录内。"
+        if path == "$.build.dockerfile":
+            return "构建上下文内必须真实存在的 Dockerfile；不能省略或指向上下文外路径。"
         if path == "$.port":
             return "服务在容器内监听的主端口；必须与应用实际监听端口一致。"
         if path == "$.ports":
@@ -195,7 +209,7 @@ class TechStackService:
         if path == "$.publish_ports":
             return "是否为模板服务生成宿主机端口映射；数据库和内部依赖通常保持关闭。"
         if path == "$.working_dir":
-            return "容器内应用工作目录；启动命令和相对路径均以此目录为基准。"
+            return "容器内应用工作目录；/workspace 模板会映射 APP 的上传文件快照，先注册 APP 并调用 POST workspace/<appid> 上传源码，再创建构建。启动命令和相对路径以此目录为基准。"
         if path == "$.restart":
             return "容器重启策略；应符合目标环境的故障恢复和人工停机要求。"
         if path == "$.command":
@@ -270,8 +284,8 @@ class TechStackService:
 
     def _record(self, payload: TechStackCreate, now: datetime | None = None) -> tuple[TechStack, dict[str, Any]]:
         normalized = self.catalog.validate_component(payload.tech_stack_id, payload.json_data)
-        supplied_comments = self._comments(payload.json_data, payload.line_comments)
-        default_comments = self._default_comments(payload.tech_stack_id, payload.json_data)
+        supplied_comments = self._comments(normalized, payload.line_comments)
+        default_comments = self._default_comments(payload.tech_stack_id, normalized)
         comments = {
             path: supplied_comments[path] if supplied_comments[path].strip() else default_comments[path]
             for path in default_comments
@@ -279,8 +293,8 @@ class TechStackService:
         return TechStack(
             tech_stack_id=payload.tech_stack_id,
             name=payload.name,
-            yaml_original=self.catalog.render_commented_data(payload.json_data, comments),
-            json_data=deepcopy(payload.json_data),
+            yaml_original=self.catalog.render_commented_data(normalized, comments),
+            json_data=deepcopy(normalized),
             line_comments=comments,
             created_at=now or utc_now(),
             updated_at=now or utc_now(),
@@ -307,9 +321,13 @@ class TechStackService:
             records = seed
         synchronized: list[TechStack] = []
         for record in records:
-            comments = self._merge_default_comments(record)
-            yaml_original = self.catalog.render_commented_data(record.json_data, comments)
+            normalized = self.catalog.validate_component(record.tech_stack_id, record.json_data)
+            migrated = record.model_copy(update={"json_data": normalized}, deep=True)
+            comments = self._merge_default_comments(migrated)
+            yaml_original = self.catalog.render_commented_data(normalized, comments)
             updates: dict[str, Any] = {}
+            if normalized != record.json_data:
+                updates["json_data"] = normalized
             if comments != record.line_comments:
                 updates["line_comments"] = comments
             if yaml_original != record.yaml_original:
@@ -442,8 +460,36 @@ class BuildService:
             isinstance(name, str) and isinstance(service, Mapping) for name, service in services.items()
         ):
             raise BuildInputError("A user-provided Docker Compose document with services is required before creating a build")
-        build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref)
+        build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref, compose_snapshot=deepcopy(app.compose), inputs_ready=False)
         self.repository.create_build(build)
+        self.repository.ensure_build_resources(BuildResources(
+            build_id=build.build_id,
+            appid=appid,
+            namespace=build_namespace(appid, build.build_id),
+            repository_url=app.repository_url,
+            environment_ciphertext=app.environment_ciphertext,
+        ))
+        from orchestrator.build_resources import build_lease
+
+        with build_lease(self.repository, build.build_id, [CleanupStatus.NOT_STARTED]) as tracker:
+            if tracker is None:
+                raise BuildInputError("Build input snapshot preparation is already owned by another operation")
+            if self.application_service.workspace is not None:
+                path = self.application_service.workspace.snapshot_path(appid, build.build_id)
+                tracker.record("workspace", str(path), target="workspace")
+                try:
+                    snapshot = self.application_service.workspace.snapshot(appid, build.build_id)
+                except WorkspaceError as exc:
+                    tracker.guard()
+                    self.fail(build.build_id, str(exc))
+                    raise BuildInputError(str(exc)) from exc
+                tracker.guard()
+                self.repository.update_build(build.build_id, snapshot)
+                tracker.record("workspace", str(path), target="workspace", state=ResourceState.PRESENT)
+            tracker.guard()
+            build = self.repository.update_build(build.build_id, {"inputs_ready": True, "updated_at": utc_now()}) or build
+            if not build.inputs_ready:
+                raise BuildInputError("Unable to persist the completed build input snapshot")
         self._event(appid, build.build_id, "build.queued", "Build queued")
         try:
             submission = self.dispatcher.dispatch_build(build.build_id)

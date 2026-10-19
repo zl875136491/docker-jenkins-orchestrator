@@ -17,8 +17,10 @@ from orchestrator.jenkins import (
     JenkinsBuildRequest,
     JenkinsQueueItem,
     JenkinsResultArtifact,
+    JenkinsNotStartedError,
 )
-from orchestrator.models import BaseImage, BuildCreate, BuildStatus, UserAppCreate, UserImage, utc_now
+from orchestrator.jenkins_diagnostics import summarize_failure
+from orchestrator.models import BaseImage, BuildCreate, BuildStatus, CleanupStatus, UserAppCreate, UserImage, utc_now
 from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
 
@@ -27,6 +29,7 @@ APP_COMPOSE = {
     "version": "3.9",
     "services": {
         "api": {
+            "build": {"context": ".", "dockerfile": "Dockerfile"},
             "image": "harbor.example/apps/demo:source",
             "ports": ["18080:8080"],
         }
@@ -41,17 +44,31 @@ class FakeJenkins:
         *,
         build: JenkinsBuild | None = None,
         artifact: JenkinsResultArtifact | Exception | None = None,
+        console_log: str | Exception = "",
     ) -> None:
         self._queue_items = list(queue_items)
         self._build = build
         self._artifact = artifact
+        self._console_log = console_log
         self.requests: list[JenkinsBuildRequest] = []
         self.queue_calls: list[str] = []
         self.build_calls: list[int] = []
         self.artifact_calls: list[int] = []
+        self.failure_calls: list[int] = []
 
     def trigger_build(self, request: JenkinsBuildRequest) -> JenkinsQueueItem:
         self.requests.append(request)
+        if request.build_id and isinstance(self._artifact, JenkinsResultArtifact):
+            images = []
+            for name, service in self._artifact.compose.get("services", {}).items():
+                image = f"{request.image_repository}:{request.build_id}-{name}"
+                if service.get("image"):
+                    service["image"] = image
+                images.append(image)
+            payload = {**self._artifact._payload, "build_id": request.build_id, "images": images, "compose": self._artifact.compose,
+                       "image_digests": {image: "sha256:" + "a" * 64 for image in images},
+                       "source": {"actual_commit": request.git_ref if len(request.git_ref) == 40 else "e" * 40}}
+            self._artifact = JenkinsResultArtifact(images=tuple(images), compose=self._artifact.compose, _payload=payload)
         return JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42)
 
     def get_queue_item(self, queue_url: str) -> JenkinsQueueItem:
@@ -69,6 +86,12 @@ class FakeJenkins:
             raise self._artifact
         assert self._artifact is not None
         return self._artifact
+
+    def get_failure_summary(self, number: int, *, sensitive_values=()) -> str:
+        self.failure_calls.append(number)
+        if isinstance(self._console_log, Exception):
+            raise self._console_log
+        return summarize_failure(self._console_log, sensitive_values=sensitive_values)
 
 
 class FakeGitLab:
@@ -96,6 +119,10 @@ class FakeDockerServices:
         if isinstance(self._deployment, Exception):
             raise self._deployment
         return self._deployment
+
+    def deploy_build(self, appid: str, build_id: str, compose: dict[str, Any], tracker) -> SwarmDeployment:
+        tracker.guard()
+        return self.deploy(appid, compose)
 
 
 class FakeRegistry:
@@ -156,7 +183,11 @@ def make_harness(
     )
 
 
-def queue_build(harness: RuntimeHarness, appid: str = "demo"):
+def queue_build(harness: RuntimeHarness, appid: str = "demo", *, compose: dict | None = None):
+    compose = deepcopy(APP_COMPOSE if compose is None else compose)
+    for service in compose.get("services", {}).values():
+        if isinstance(service, dict):
+            service.setdefault("build", {"context": ".", "dockerfile": "Dockerfile"})
     harness.container.applications.create_app(
         UserAppCreate(
             appid=appid,
@@ -164,7 +195,7 @@ def queue_build(harness: RuntimeHarness, appid: str = "demo"):
             repository_url=f"https://git.example/{appid}.git",
             git_ref="main",
             environment={"DEPLOY_TOKEN": "not-exposed"},
-            compose=APP_COMPOSE,
+                compose=compose,
         )
     )
     return harness.container.builds.queue_build(appid, BuildCreate())
@@ -228,6 +259,129 @@ def test_start_build_triggers_jenkins_and_schedules_the_first_poll() -> None:
     assert request.compose == APP_COMPOSE
     assert request.image_repository == "harbor.example/apps/demo"
     assert gitlab.calls == [("https://git.example/demo.git", "main")]
+
+
+@pytest.mark.parametrize(
+    "source_mount",
+    [".:/workspace", "./:/workspace", "~/app:/workspace", {"type": "bind", "source": ".", "target": "/workspace"}],
+    ids=["saved-developer-app", "relative-directory", "home-directory", "long-bind-syntax"],
+)
+def test_source_relative_bind_fails_before_gitlab_or_jenkins_without_changing_saved_compose(source_mount: Any) -> None:
+    source = {
+        "services": {
+            "developer-app": {
+                    "build": {"context": ".", "dockerfile": "Dockerfile"},
+                    "image": "node:22.11.0-alpine3.20",
+                "working_dir": "/workspace",
+                "ports": ["5188:5188"],
+                "volumes": [source_mount, "developer_app_node_modules:/workspace/node_modules"],
+            }
+        },
+        "volumes": {"developer_app_node_modules": {}},
+    }
+    original = deepcopy(source)
+    jenkins = FakeJenkins([])
+    gitlab = FakeGitLab("a" * 40)
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, gitlab=gitlab, docker_services=docker_services)
+    build = queue_build(harness, compose=source)
+
+    assert build.status is BuildStatus.QUEUED
+    with pytest.raises(BuildInputError, match="relative bind volume paths are not supported for Swarm services"):
+        WorkerRuntime._validate_source_compose(source)
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    stored = harness.container.repository.get_build(build.build_id)
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert stored is not None
+    assert stored.status is BuildStatus.FAILED
+    assert stored.error == "Compose relative bind volume paths are not supported for Swarm services" or "Workspace mount source is empty" in stored.error
+    assert stored.git_commit_sha is None
+    assert stored.jenkins_queue_url is None
+    assert stored.jenkins_build_number is None
+    assert gitlab.calls == []
+    assert jenkins.requests == []
+    assert docker_services.calls == []
+    assert harness.scheduled_polls == []
+    assert source == original
+    assert harness.container.repository.get_app("demo").compose == original
+    assert len(harness.container.repository.list_alerts("demo")) == 1
+
+    # A retry cannot overwrite the terminal failure or start a new external
+    # build. The failed record remains available for status and diagnostics.
+    assert harness.runtime.start_build(build.build_id, task_id="retry-task") == result
+    assert harness.container.repository.get_build(build.build_id).error == stored.error
+    assert gitlab.calls == jenkins.requests == []
+
+
+@pytest.mark.parametrize(
+    ("runtime_fields", "error_fragment"),
+    [
+        ({"ports": ["invalid"]}, "Compose service port is invalid"),
+        ({"working_dir": "workspace"}, "Compose working directory is invalid"),
+        ({"network_mode": "host"}, "uses unsupported fields: network_mode"),
+        ({"env_file": [".env"]}, "uses env_file"),
+    ],
+)
+def test_source_runtime_fields_are_validated_before_external_builds(runtime_fields: dict, error_fragment: str) -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"].update(runtime_fields)
+    jenkins = FakeJenkins([])
+    gitlab = FakeGitLab("a" * 40)
+    harness = make_harness(jenkins=jenkins, gitlab=gitlab)
+    build = queue_build(harness, compose=source)
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert error_fragment in harness.container.repository.get_build(build.build_id).error
+    assert gitlab.calls == []
+    assert jenkins.requests == []
+    assert harness.scheduled_polls == []
+
+
+@pytest.mark.parametrize("build_config", [{"context": ".", "dockerfile": "Dockerfile"}])
+@pytest.mark.parametrize("include_image", [True, False])
+def test_source_build_preflight_preserves_jenkins_build_input_and_accepts_missing_image(
+    build_config: str | dict, include_image: bool
+) -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"].update(
+        {"build": build_config, "working_dir": "/workspace", "volumes": ["data:/data"]}
+    )
+    source["volumes"] = {"data": {}}
+    if not include_image:
+        source["services"]["api"].pop("image")
+    original = deepcopy(source)
+    artifact_compose = deepcopy(source)
+    artifact_compose["services"]["api"].pop("build")
+    artifact_compose["services"]["api"]["image"] = "harbor.example/apps/demo:build-42"
+    artifact = JenkinsResultArtifact(
+        images=("harbor.example/apps/demo:build-42",),
+        compose=artifact_compose,
+        _payload={"images": ["harbor.example/apps/demo:build-42"], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=42)],
+        build=JenkinsBuild(number=42, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    gitlab = FakeGitLab("a" * 40)
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, gitlab=gitlab, docker_services=docker_services)
+    build = queue_build(harness, compose=source)
+
+    started = harness.runtime.start_build(build.build_id, task_id="start-task")
+    completed = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    assert started == {"build_id": build.build_id, "status": "building"}
+    assert completed == {"build_id": build.build_id, "status": "succeeded"}
+    assert gitlab.calls == [("https://git.example/demo.git", "main")]
+    assert jenkins.requests[0].compose == original
+    assert jenkins.requests[0].compose["services"]["api"]["build"] == build_config
+    assert source == original
+    assert harness.container.repository.get_app("demo").compose == original
+    assert docker_services.calls == [("demo", artifact_compose)]
 
 
 def test_start_build_preserves_raw_appid_but_encodes_external_image_repository() -> None:
@@ -339,14 +493,14 @@ def test_pending_queue_then_success_persists_artifact_images_and_swarm_services(
     assert stored is not None
     assert stored.status is BuildStatus.SUCCEEDED
     assert stored.jenkins_build_number == 91
-    assert stored.images == ["harbor.example/apps/demo:build-42"]
+    assert stored.images == [f"harbor.example/apps/demo:{build.build_id}-api"]
     assert stored.service_ids == ["service-demo-api"]
     assert harness.scheduled_polls == [(build.build_id, 0, 7), (build.build_id, 1, 7)]
     assert jenkins.queue_calls == ["https://jenkins.example/queue/item/42/"] * 2
     assert jenkins.build_calls == [91]
     assert jenkins.artifact_calls == [91]
     assert [image.reference for image in harness.container.repository.list_user_images("demo")] == [
-        "harbor.example/apps/demo:build-42"
+        f"harbor.example/apps/demo:{build.build_id}-api"
     ]
     assert [service.service_id for service in harness.container.repository.list_services("demo")] == ["service-demo-api"]
     stored_service = harness.container.repository.list_services("demo")[0]
@@ -354,6 +508,45 @@ def test_pending_queue_then_success_persists_artifact_images_and_swarm_services(
         {"target_port": 8080, "published_port": 18080, "protocol": "tcp", "mode": "ingress"}
     ]
     assert docker_services.calls == [("demo", artifact.compose)]
+
+
+@pytest.mark.parametrize(
+    ("artifact_fields", "error_fragment"),
+    [
+        ({"image": None}, "Jenkins deployment compose services must define images"),
+        ({"build": "."}, "uses unsupported fields: build"),
+        ({"volumes": [".:/workspace"]}, "changed volumes"),
+    ],
+    ids=["missing-final-image", "unconsumed-build-field", "invalid-artifact-mount"],
+)
+def test_source_preflight_does_not_replace_strict_deployment_artifact_validation(
+    artifact_fields: dict, error_fragment: str
+) -> None:
+    artifact_compose = deepcopy(APP_COMPOSE)
+    artifact_compose["services"]["api"].update(artifact_fields)
+    artifact = JenkinsResultArtifact(
+        images=("harbor.example/apps/demo:build-42",),
+        compose=artifact_compose,
+        _payload={"images": ["harbor.example/apps/demo:build-42"], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=42)],
+        build=JenkinsBuild(number=42, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness)
+
+    started = harness.runtime.start_build(build.build_id, task_id="start-task")
+    completed = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    assert started == {"build_id": build.build_id, "status": "building"}
+    assert completed == {"build_id": build.build_id, "status": "failed"}
+    assert error_fragment in harness.container.repository.get_build(build.build_id).error
+    assert docker_services.calls == []
+    assert harness.container.repository.list_user_images("demo") == []
+    assert harness.container.repository.list_services("demo") == []
 
 
 def test_artifact_cannot_drop_source_published_ports() -> None:
@@ -403,7 +596,7 @@ def test_artifact_cannot_drop_source_published_ports() -> None:
 def test_artifact_cannot_change_source_volume_contract_before_deployment(change: str) -> None:
     source = deepcopy(APP_COMPOSE)
     source["services"]["api"]["volumes"] = ["data:/data"]
-    source["volumes"] = {"data": {"external": True, "name": "shared-data"}}
+    source["volumes"] = {"data": {"external": False, "name": "shared-data"}}
     artifact_compose = deepcopy(source)
     artifact_compose["services"]["api"]["image"] = "harbor.example/apps/demo:build-43"
     if change == "missing-declarations":
@@ -415,7 +608,7 @@ def test_artifact_cannot_change_source_volume_contract_before_deployment(change:
     elif change == "missing-external":
         artifact_compose["volumes"]["data"].pop("external")
     elif change == "changed-external":
-        artifact_compose["volumes"]["data"]["external"] = False
+        artifact_compose["volumes"]["data"]["external"] = True
     elif change == "missing-mounts":
         artifact_compose["services"]["api"].pop("volumes")
     else:
@@ -437,8 +630,7 @@ def test_artifact_cannot_change_source_volume_contract_before_deployment(change:
     )
     docker_services = FakeDockerServices(successful_deployment())
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
-    build = queue_build(harness)
-    harness.container.repository.update_app("demo", {"compose": source})
+    build = queue_build(harness, compose=source)
 
     harness.runtime.start_build(build.build_id, task_id="start-task")
     result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
@@ -462,6 +654,7 @@ def test_artifact_preserves_template_volume_identity_and_raw_owner(appid: str, b
     image = f"{harness.runtime._image_repository(appid)}:build-43"
     for definition in artifact_compose["services"].values():
         definition["image"] = image
+        definition.pop("build", None)
     artifact = JenkinsResultArtifact(
         images=(image,),
         compose=artifact_compose,
@@ -474,8 +667,7 @@ def test_artifact_preserves_template_volume_identity_and_raw_owner(appid: str, b
     )
     docker_services = FakeDockerServices(replace(successful_deployment(), appid=appid))
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
-    build = queue_build(harness, appid=appid)
-    harness.container.repository.update_app(appid, {"compose": source})
+    build = queue_build(harness, appid=appid, compose=source)
 
     harness.runtime.start_build(build.build_id, task_id="start-task")
     result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
@@ -536,6 +728,7 @@ def test_failed_jenkins_result_marks_the_build_failed_without_deployment() -> No
     jenkins = FakeJenkins(
         [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=17)],
         build=JenkinsBuild(number=17, building=False, result="FAILURE"),
+        console_log="[Pipeline] { (Checkout)\nfatal: Could not resolve host: git.example\nERROR: script returned exit code 128",
     )
     docker_services = FakeDockerServices(successful_deployment())
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
@@ -550,11 +743,70 @@ def test_failed_jenkins_result_marks_the_build_failed_without_deployment() -> No
     assert stored.status is BuildStatus.FAILED
     assert stored.error is not None
     assert "FAILURE" in stored.error
+    assert stored.error.startswith("Jenkins build finished with FAILURE；Jenkins #17；")
+    assert "阶段=Checkout" in stored.error
+    assert "console L2" in stored.error
+    assert "DNS 解析失败" in stored.error
+    assert "git.example" in stored.error
+    assert "退出码=128" in stored.error
+    assert jenkins.failure_calls == [17]
     assert jenkins.artifact_calls == []
     assert docker_services.calls == []
     assert harness.container.repository.list_user_images("demo") == []
     assert harness.container.repository.list_services("demo") == []
     assert len(harness.container.repository.list_alerts("demo")) == 1
+    assert harness.container.repository.list_alerts("demo")[0].message == stored.error
+    assert set(harness.container.repository.list_alerts("demo")[0].model_dump()) == {
+        "alert_id", "appid", "build_id", "severity", "message", "resolved_at", "created_at",
+    }
+    events = harness.container.repository.list_events("demo")
+    assert next(event for event in events if event.kind == "build.alert").message == stored.error
+    harness.runtime.poll_build(build.build_id, attempt=1, task_id="poll-again")
+    assert jenkins.failure_calls == [17]
+    assert len(harness.container.repository.list_alerts("demo")) == 1
+
+
+@pytest.mark.parametrize("console_log", ["", RuntimeError("untrusted transport with password=never-expose")])
+def test_jenkins_diagnostic_failure_does_not_hide_original_build_failure(console_log):
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=17)],
+        build=JenkinsBuild(number=17, building=False, result="FAILURE"),
+        console_log=console_log,
+    )
+    harness = make_harness(jenkins=jenkins)
+    build = queue_build(harness)
+    harness.runtime.start_build(build.build_id, task_id="start-task")
+    harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+    stored = harness.container.repository.get_build(build.build_id)
+    assert stored.status is BuildStatus.FAILED
+    assert stored.error.startswith("Jenkins build finished with FAILURE；Jenkins #17；")
+    assert "never-expose" not in stored.error
+    assert "未识别出具体错误" in stored.error or "错误详情暂不可用" in stored.error
+
+
+def test_jenkins_failure_redacts_app_environment_settings_and_compose_inputs():
+    secrets = ["not-exposed", "configured-gitlab-token", "compose-inline-value", "build-arg-value"]
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=17)],
+        build=JenkinsBuild(number=17, building=False, result="FAILURE"),
+        console_log="[Pipeline] { (Build And Push)\nERROR: request failed " + " ".join(secrets),
+    )
+    harness = make_harness(jenkins=jenkins)
+    harness.runtime.settings.gitlab_token = secrets[1]
+    compose = deepcopy(APP_COMPOSE)
+    compose["services"]["api"]["environment"] = {"CUSTOM_INPUT": secrets[2]}
+    compose["services"]["api"]["build"] = {
+        "context": ".",
+        "dockerfile": "Dockerfile",
+        "args": ["CUSTOM_INPUT=" + secrets[3]],
+    }
+    build = queue_build(harness, compose=compose)
+    harness.container.repository.update_build(build.build_id, {"status": BuildStatus.BUILDING, "jenkins_queue_url": "https://jenkins.example/queue/item/42/", "jenkins_build_number": 17})
+    harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+    stored = harness.container.repository.get_build(build.build_id)
+    assert "阶段=Build And Push" in stored.error
+    assert all(secret not in stored.error for secret in secrets)
+    assert harness.container.repository.list_alerts("demo")[0].message == stored.error
 
 
 @pytest.mark.parametrize(
@@ -660,3 +912,101 @@ def test_recovery_normalizes_naive_utc_last_polled_at(
 
     assert result["poll_scheduled"] == expected_polls
     assert len(harness.scheduled_polls) == expected_polls
+
+
+def test_worker_does_not_mutate_build_after_losing_trigger_lease(monkeypatch):
+    jenkins = FakeJenkins([], artifact=successful_artifact())
+    harness = make_harness(jenkins=jenkins)
+    build = queue_build(harness)
+    trigger = jenkins.trigger_build
+
+    def lose_lease(request):
+        result = trigger(request)
+        harness.container.repository.update_build_resources(build.build_id, {
+            "lease_owner": "replacement-worker", "lease_expires_at": utc_now() + timedelta(seconds=60),
+        })
+        return result
+
+    monkeypatch.setattr(jenkins, "trigger_build", lose_lease)
+    assert harness.runtime.start_build(build.build_id, "worker")["status"] == "triggering"
+    stored = harness.container.repository.get_build(build.build_id)
+    assert stored.error is None and stored.jenkins_queue_url is None
+    manifest = harness.container.repository.get_build_resources(build.build_id)
+    assert manifest.lease_owner == "replacement-worker" and manifest.jenkins_trigger_pending
+    assert not harness.scheduled_polls
+
+
+def test_cleanup_tombstone_prevents_delayed_deployment_tasks():
+    docker = FakeDockerServices(successful_deployment())
+    harness = make_harness(docker_services=docker)
+    build = queue_build(harness)
+    harness.container.repository.update_build_resources(build.build_id, {"cleanup_status": CleanupStatus.SUCCEEDED})
+    harness.runtime.start_build(build.build_id, "delayed-start")
+    harness.runtime.poll_build(build.build_id, 0, "delayed-poll")
+    assert not docker.calls and not harness.scheduled_polls
+    assert harness.container.repository.get_build(build.build_id).status == BuildStatus.QUEUED
+
+
+def test_recovery_and_worker_wait_until_input_snapshot_is_ready(monkeypatch):
+    harness = make_harness()
+    harness.container.applications.create_app(UserAppCreate(appid="demo", name="Demo", compose=APP_COMPOSE))
+    snapshot = harness.container.workspace.snapshot
+
+    def snapshot_while_recovering(appid, build_id):
+        assert not harness.container.repository.get_build(build_id).inputs_ready
+        assert harness.container.repository.get_build_resources(build_id).lease_owner is not None
+        harness.container.repository.update_build(build_id, {"created_at": utc_now() - timedelta(hours=2)})
+        assert harness.runtime.start_build(build_id, "too-early")["status"] == "queued"
+        assert harness.runtime.recover_builds("recovery") == {"start_scheduled": 0, "poll_scheduled": 0}
+        return snapshot(appid, build_id)
+
+    monkeypatch.setattr(harness.container.workspace, "snapshot", snapshot_while_recovering)
+    build = harness.container.builds.queue_build("demo", BuildCreate())
+    assert build.inputs_ready and not harness.scheduled_starts
+
+
+@pytest.mark.parametrize("violation", ["owner", "digest", "inventory"])
+def test_worker_rejects_invalid_isolated_artifact_contract(violation):
+    jenkins = FakeJenkins([JenkinsQueueItem("https://jenkins.example/queue/item/42/", 42, build_number=42)],
+        build=JenkinsBuild(42, False, "SUCCESS"), artifact=successful_artifact())
+    docker = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker)
+    build = queue_build(harness)
+    assert harness.runtime.start_build(build.build_id, "start")["status"] == "building"
+    artifact = jenkins._artifact
+    payload = deepcopy(artifact._payload)
+    images = artifact.images
+    if violation == "owner":
+        payload["build_id"] = "f" * 32
+    elif violation == "digest":
+        payload["image_digests"] = {}
+    else:
+        reference = f"harbor.example/apps/demo:{build.build_id}-extra"
+        images = (*images, reference)
+        payload["image_digests"][reference] = "sha256:" + "b" * 64
+    jenkins._artifact = JenkinsResultArtifact(images=images, compose=artifact.compose, _payload=payload)
+    assert harness.runtime.poll_build(build.build_id, 0, "poll")["status"] == "failed"
+    assert not docker.calls
+
+
+def test_recovery_finishes_interrupted_input_preparation_without_starting_jenkins():
+    harness = make_harness()
+    build = queue_build(harness)
+    harness.container.repository.update_build(build.build_id, {"inputs_ready": False, "created_at": utc_now() - timedelta(hours=2)})
+    assert harness.runtime.recover_builds("recovery") == {"start_scheduled": 0, "poll_scheduled": 0}
+    assert harness.container.repository.get_build(build.build_id).status == BuildStatus.FAILED
+    assert harness.container.build_resources.request_cleanup(build.build_id)[1] == 202
+
+
+def test_definitively_rejected_trigger_does_not_block_cleanup(monkeypatch):
+    jenkins = FakeJenkins([])
+    harness = make_harness(jenkins=jenkins)
+    build = queue_build(harness)
+
+    def rejected(request):
+        raise JenkinsNotStartedError("Jenkins rejected the build trigger (HTTP 403)")
+
+    monkeypatch.setattr(jenkins, "trigger_build", rejected)
+    assert harness.runtime.start_build(build.build_id, "worker")["status"] == "failed"
+    assert not harness.container.repository.get_build_resources(build.build_id).jenkins_trigger_pending
+    assert harness.container.build_resources.request_cleanup(build.build_id)[1] == 202

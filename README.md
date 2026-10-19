@@ -4,14 +4,18 @@ The orchestrator of docker and jenkins jobs for apps build pipeline.
 ## Local development
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 pytest -q
 uvicorn main:app --reload
 ```
 
 The default settings use an in-memory repository and dispatcher, so the API can be exercised without MongoDB, Celery, Jenkins, Harbor, or Docker Services. The test suite uses fake external adapters and never creates real Jenkins builds or Harbor pushes. Set the `ORCHESTRATOR_*` variables from `.env.example` for deployment; never commit service credentials.
 
-The dependency-free control console is served by the API at [`/ui/`](http://127.0.0.1:8000/ui/). Start the local API with `uvicorn main:app --reload`, open that URL, and use the configured client credentials to obtain OAuth2 tokens. The console covers app management, paginated build history and build detail inspection, event, image, service, service-access, alert, template, and base-image endpoints; it does not add a separate API contract. On the **运行资源** page, choose **访问入口** to see published ports and clickable URLs. A deployed service with `endpoint: null` has no externally published port; add a port such as `18082:3000` to the final Compose artifact and rebuild it.
+The dependency-free control console is served by the API at [`/ui/`](http://127.0.0.1:8000/ui/). Start the local API with `uvicorn main:app --reload`, open that URL, and use the configured client credentials to obtain OAuth2 tokens. The console covers app management, paginated build history and build detail inspection, event, image, service, service-access, alert, template, and base-image endpoints; it does not add a separate API contract. User Compose is required to use local build mode: every service must declare `build.context` and `build.dockerfile`, and that Dockerfile must exist inside the build context. Image-only services are rejected. On the **运行资源** page, choose **访问入口** to see published ports and clickable URLs. A deployed service with `endpoint: null` has no externally published port; add a port such as `18082:3000` to the final Compose artifact and rebuild it.
+
+New builds own independent services, containers, networks, ports, private volumes, immutable workspace inputs, and image references. The **构建资源清理** page queries or asynchronously destroys one build using only its `build_id`; it preserves APP metadata, uploaded staging files, and build history. See [the API contract](docs/api-reference.md#构建隔离与资源清理) and [the implementation plan](docs/build-isolation-and-cleanup-plan.md). Historical APP-scoped resources remain protected. Cleanup never runs global prune, removes shared builder cache, or claims Harbor blob storage is freed before GC.
+
+`ORCHESTRATOR_CLEANUP_TIMEOUT_SECONDS` defaults to 120. Optional `ORCHESTRATOR_CLEANUP_DOCKER_TARGETS` is a JSON mapping from recorded `docker:<daemon-ID>` / `docker-node:<node-ID>` identities to controlled endpoints. Missing or unreachable execution targets produce partial failure, not false success. Coordinate API, Worker, Beat, and Jenkins pipeline upgrades; do not deploy or run destructive live checks without approval.
 
 For the container topology, copy `.env.example` to `.env`, supply every required secret, and validate the rendered deployment before starting it:
 
@@ -28,11 +32,16 @@ Compose discovery always performs a full Git clone before searching the local ch
 
 The console's **应用配置** page supports the same workflow: leave Compose blank when creating an app to import it from GitLab, or use **同步仓库 Compose** on an existing app. It displays the saved Compose file and commit, both synchronization change flags, and the actual commit reported by a build. Sync requires confirmation, uses the app's saved repository/ref, and never starts a build automatically. See [控制台仓库同步操作说明](docs/webui-repository-sync.md).
 
+Use the console's **文件管理** page to complete an app's workspace before building: upload multiple files or a directory, optionally set a relative directory prefix, filter and paginate the file list, or delete individual staging files after confirmation. File changes do not modify existing build snapshots or running services; upload the missing sources and create a new build to address `Workspace mount source is empty`. See [Workspace 文件管理操作说明](docs/workspace.md#控制台文件管理).
+
+Platform timestamp fields in API responses use ISO 8601 with the East Asia UTC+08:00 offset, including historical records read from MongoDB. The console displays dates and refresh times in `Asia/Shanghai` regardless of the browser's local timezone. Database storage, internal comparisons, and JWT expiry calculations remain in UTC; no historical-data migration is required. See [API 时间输出约定](docs/api-reference.md#时间输出).
+
 See [docs/architecture.md](docs/architecture.md) for the system boundaries, API contract, template catalog, task lifecycle, recovery behavior, and feature acceptance criteria.
 
 接口与调用顺序：
 
 - [API Reference](docs/api-reference.md)
+- [Workspace 上传、构建与挂载](docs/workspace.md)
 - [应用访问入口 API](docs/app-access.md)
 - [API Call Flow](docs/api-call-flow.md)
 - 运行中的机器可读说明：`GET /api/v1/system-guide`

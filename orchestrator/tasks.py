@@ -14,6 +14,7 @@ class TaskSubmission:
 class TaskDispatcher(Protocol):
     def dispatch_build(self, build_id: str) -> TaskSubmission: ...
     def dispatch_base_image_sync(self) -> TaskSubmission: ...
+    def dispatch_build_cleanup(self, build_id: str) -> TaskSubmission: ...
 
 
 class InMemoryTaskDispatcher:
@@ -22,6 +23,7 @@ class InMemoryTaskDispatcher:
     def __init__(self) -> None:
         self.dispatched: list[TaskSubmission] = []
         self.build_ids: list[str] = []
+        self.cleanup_build_ids: list[str] = []
 
     def dispatch_build(self, build_id: str) -> TaskSubmission:
         submission = TaskSubmission(task_id=uuid4().hex, task_name="orchestrator.pipeline.start_build")
@@ -32,4 +34,10 @@ class InMemoryTaskDispatcher:
     def dispatch_base_image_sync(self) -> TaskSubmission:
         submission = TaskSubmission(task_id=uuid4().hex, task_name="orchestrator.images.sync_base_images")
         self.dispatched.append(submission)
+        return submission
+
+    def dispatch_build_cleanup(self, build_id: str) -> TaskSubmission:
+        submission = TaskSubmission(task_id=uuid4().hex, task_name="orchestrator.pipeline.cleanup_build")
+        self.dispatched.append(submission)
+        self.cleanup_build_ids.append(build_id)
         return submission

@@ -21,6 +21,20 @@ def poll_build(self, build_id: str, attempt: int = 0) -> dict[str, str]:
     return get_worker_runtime().poll_build(build_id, attempt=attempt, task_id=self.request.id)
 
 
+@celery_app.task(name="orchestrator.pipeline.cleanup_build", bind=True)
+def cleanup_build(self, build_id: str) -> dict[str, str]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().cleanup_build(build_id)
+
+
+@celery_app.task(name="orchestrator.pipeline.recover_cleanups")
+def recover_cleanups() -> dict[str, int]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().recover_cleanups()
+
+
 @celery_app.task(name="orchestrator.pipeline.recover_builds", bind=True)
 def recover_builds(self) -> dict[str, int]:
     from orchestrator.worker_runtime import get_worker_runtime

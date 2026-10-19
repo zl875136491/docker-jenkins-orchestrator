@@ -38,6 +38,7 @@ def test_catalog_covers_requested_components_with_pinned_images(catalog: Templat
         images = catalog.components[name]["images"]
         assert 2 <= len(images) <= 3
         assert all(":latest" not in image for image in images)
+        assert catalog.components[name]["build"] == {"context": ".", "dockerfile": "Dockerfile"}
 
 
 def test_compose_is_deterministic_namespaced_and_injects_internal_hosts(catalog: TemplateCatalog) -> None:
@@ -100,6 +101,7 @@ def test_minimal_legacy_catalog_entries_keep_their_published_port(tmp_path: Path
     document = TemplateCatalog(catalog_path).compose(["example"])
 
     assert document["services"]["example"]["ports"] == ["8080:8080"]
+    assert document["services"]["example"]["build"] == {"context": ".", "dockerfile": "Dockerfile"}
 
 
 def test_common_stack_aliases_resolve_to_canonical_service_names(catalog: TemplateCatalog) -> None:

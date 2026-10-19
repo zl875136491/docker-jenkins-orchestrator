@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import re
+import ssl
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlsplit
 from http.cookiejar import CookieJar
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
 import yaml
 
@@ -74,13 +75,14 @@ class HttpTransport(Protocol):
         *,
         headers: Mapping[str, str],
         body: bytes | None = None,
+        max_bytes: int | None = None,
     ) -> HttpResponse: ...
 
 
 class UrllibHttpTransport:
     """Small production transport; tests should inject an ``HttpTransport`` fake."""
 
-    def __init__(self, timeout: float = 30) -> None:
+    def __init__(self, timeout: float = 30, *, ca_file: str | None = None, persist_cookies: bool = True) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self._timeout = timeout
@@ -89,8 +91,13 @@ class UrllibHttpTransport:
         # adapters share one authenticated HTTP session without exposing it to
         # callers or logs.
         self._opener = build_opener()
+        if ca_file is not None:
+            context = ssl.create_default_context(cafile=ca_file)
+            context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+            self._opener = build_opener(HTTPSHandler(context=context))
         self._cookie_jar = CookieJar()
-        self._opener.add_handler(HTTPCookieProcessor(self._cookie_jar))
+        if persist_cookies:
+            self._opener.add_handler(HTTPCookieProcessor(self._cookie_jar))
 
     def request(
         self,
@@ -99,23 +106,29 @@ class UrllibHttpTransport:
         *,
         headers: Mapping[str, str],
         body: bytes | None = None,
+        max_bytes: int | None = None,
     ) -> HttpResponse:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must not be negative")
         request = Request(url, data=body, headers=dict(headers), method=method.upper())
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
                 return HttpResponse(
                     status_code=response.status,
                     headers=dict(response.headers.items()),
-                    body=response.read(),
+                    body=response.read() if max_bytes is None else response.read(max_bytes),
                 )
         except HTTPError as exc:
             # HTTP status failures are useful to the adapter and contain no
             # reason to surface a server body, which may contain sensitive data.
-            return HttpResponse(
-                status_code=exc.code,
-                headers=dict(exc.headers.items()) if exc.headers else {},
-                body=exc.read(),
-            )
+            try:
+                return HttpResponse(
+                    status_code=exc.code,
+                    headers=dict(exc.headers.items()) if exc.headers else {},
+                    body=exc.read() if max_bytes is None else exc.read(max_bytes),
+                )
+            finally:
+                exc.close()
         except (OSError, TimeoutError, URLError, ValueError):
             raise TransportError("HTTP transport request failed") from None
 

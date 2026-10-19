@@ -30,6 +30,7 @@ x-orchestrator-runtime: &orchestrator-runtime
   ORCHESTRATOR_HARBOR_URL: "${ORCHESTRATOR_HARBOR_URL:?Harbor URL is required}"
   ORCHESTRATOR_HARBOR_USER: "${ORCHESTRATOR_HARBOR_USER:?Harbor user is required}"
   ORCHESTRATOR_HARBOR_PASSWORD: "${ORCHESTRATOR_HARBOR_PASSWORD:?Harbor password is required}"
+  ORCHESTRATOR_HARBOR_CA_FILE: "${ORCHESTRATOR_HARBOR_CA_FILE:-}"
   ORCHESTRATOR_HARBOR_PROJECT: "${ORCHESTRATOR_HARBOR_PROJECT:-apps-orchestrator}"
   ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT: "${ORCHESTRATOR_HARBOR_BOOT_IMAGES_PROJECT:-boot-images}"
   ORCHESTRATOR_DOCKER_BASE_URL: "${ORCHESTRATOR_DOCKER_BASE_URL:-unix:///var/run/docker.sock}"
@@ -38,17 +39,31 @@ x-orchestrator-runtime: &orchestrator-runtime
   ORCHESTRATOR_DEPLOYMENT_READINESS_POLL_INTERVAL_SECONDS: "${ORCHESTRATOR_DEPLOYMENT_READINESS_POLL_INTERVAL_SECONDS:-1}"
   ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_START: "${ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_START:-18000}"
   ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_END: "${ORCHESTRATOR_DEPLOYMENT_PORT_RANGE_END:-18999}"
+  ORCHESTRATOR_CLEANUP_TIMEOUT_SECONDS: "${ORCHESTRATOR_CLEANUP_TIMEOUT_SECONDS:-120}"
+  ORCHESTRATOR_CLEANUP_DOCKER_TARGETS: "${ORCHESTRATOR_CLEANUP_DOCKER_TARGETS:-}"
   ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS: "${ORCHESTRATOR_EXTERNAL_REQUEST_TIMEOUT_SECONDS:-30}"
   ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS: "${ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS:-600}"
   ORCHESTRATOR_PUBLIC_HOST: "${ORCHESTRATOR_PUBLIC_HOST:-}"
   ORCHESTRATOR_PUBLIC_SCHEME: "${ORCHESTRATOR_PUBLIC_SCHEME:-http}"
+  ORCHESTRATOR_WORKSPACE_ROOT: /var/lib/orchestrator/workspaces
+  ORCHESTRATOR_WORKSPACE_HOST_ROOT: "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator-test/workspaces}"
+  ORCHESTRATOR_WORKSPACE_DOWNLOAD_BASE_URL: "${ORCHESTRATOR_WORKSPACE_DOWNLOAD_BASE_URL:-}"
+  ORCHESTRATOR_WORKSPACE_SHARED_STORAGE: "${ORCHESTRATOR_WORKSPACE_SHARED_STORAGE:-false}"
+  ORCHESTRATOR_WORKSPACE_MAX_UPLOAD_BYTES: "${ORCHESTRATOR_WORKSPACE_MAX_UPLOAD_BYTES:-104857600}"
+  ORCHESTRATOR_WORKSPACE_MAX_BYTES: "${ORCHESTRATOR_WORKSPACE_MAX_BYTES:-1073741824}"
+  ORCHESTRATOR_WORKSPACE_MAX_FILES: "${ORCHESTRATOR_WORKSPACE_MAX_FILES:-10000}"
 
 services:
   api:
     build: .
     image: orchestrator-test:local
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    labels:
+      io.docker-jenkins-orchestrator.workspace-manager: api
+      io.docker-jenkins-orchestrator.worker-name: "${ORCHESTRATOR_WORKER_NAME}"
     environment: *orchestrator-runtime
+    volumes:
+      - "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator-test/workspaces}:/var/lib/orchestrator/workspaces"
     ports:
       # The test console must be reachable from the test host network, not only
       # from the host process that starts Compose.
@@ -68,6 +83,9 @@ services:
   worker:
     build: .
     image: orchestrator-test:local
+    labels:
+      io.docker-jenkins-orchestrator.workspace-manager: worker
+      io.docker-jenkins-orchestrator.worker-name: "${ORCHESTRATOR_WORKER_NAME}"
     command:
       [
         "celery",
@@ -80,6 +98,7 @@ services:
       ]
     environment: *orchestrator-runtime
     volumes:
+      - "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator-test/workspaces}:/var/lib/orchestrator/workspaces"
       - type: bind
         source: "${ORCHESTRATOR_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
         target: /var/run/docker.sock

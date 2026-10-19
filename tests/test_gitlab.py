@@ -316,9 +316,9 @@ def test_discover_compose_performs_full_clone_and_prefers_root_compose_file(tmp_
     repository, commit_sha = create_git_repository(
         tmp_path,
         {
-            "nested/docker-compose.yml": "services: {nested: {image: example/nested:1}}\n",
-            "compose.yaml": "services:\n  web:\n    image: nginx:1.27\n",
-            "docker-compose.yml": "services: {legacy: {image: example/legacy:1}}\n",
+            "nested/docker-compose.yml": "services: {nested: {build: {context: ., dockerfile: Dockerfile}, image: example/nested:1}}\n",
+            "compose.yaml": "services:\n  web:\n    build: {context: ., dockerfile: Dockerfile}\n    image: nginx:1.27\n",
+            "docker-compose.yml": "services: {legacy: {build: {context: ., dockerfile: Dockerfile}, image: example/legacy:1}}\n",
         },
     )
     adapter = local_repository_adapter(repository)
@@ -327,7 +327,7 @@ def test_discover_compose_performs_full_clone_and_prefers_root_compose_file(tmp_
 
     assert document.path == "compose.yaml"
     assert document.commit_sha == commit_sha
-    assert document.compose == {"services": {"web": {"image": "nginx:1.27"}}}
+    assert document.compose == {"services": {"web": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "nginx:1.27"}}}
     clone_command = adapter.git_commands[0]
     assert clone_command[:5] == ["git", "clone", "--quiet", "--no-checkout", "--"]
     assert not {"--depth", "--single-branch", "--filter"}.intersection(clone_command)
@@ -338,20 +338,20 @@ def test_discover_compose_uses_legacy_root_filename_precedence(tmp_path: Path) -
     repository, commit_sha = create_git_repository(
         tmp_path,
         {
-            "docker-compose.yaml": "services: {yaml: {image: example/yaml:1}}\n",
-            "docker-compose.yml": "services: {yml: {image: example/yml:1}}\n",
+            "docker-compose.yaml": "services: {yaml: {build: {context: ., dockerfile: Dockerfile}, image: example/yaml:1}}\n",
+            "docker-compose.yml": "services: {yml: {build: {context: ., dockerfile: Dockerfile}, image: example/yml:1}}\n",
         },
     )
 
     document = local_repository_adapter(repository).discover_compose(local_repository_ref(commit_sha))
 
     assert document.path == "docker-compose.yml"
-    assert document.compose == {"services": {"yml": {"image": "example/yml:1"}}}
+    assert document.compose == {"services": {"yml": {"build": {"context": ".", "dockerfile": "Dockerfile"}, "image": "example/yml:1"}}}
 
 
 def test_discover_compose_finds_unique_nested_candidate_in_full_clone(tmp_path: Path) -> None:
     files = {f"docs/file-{index:03}.txt": "not compose\n" for index in range(130)}
-    files["services/api/compose.yml"] = "services: {api: {image: example/api:1}}\n"
+    files["services/api/compose.yml"] = "services: {api: {build: {context: ., dockerfile: Dockerfile}, image: example/api:1}}\n"
     repository, commit_sha = create_git_repository(tmp_path, files)
 
     document = local_repository_adapter(repository).discover_compose(local_repository_ref(commit_sha))
@@ -363,10 +363,10 @@ def test_discover_compose_finds_unique_nested_candidate_in_full_clone(tmp_path: 
 def test_discover_compose_pins_search_to_resolved_commit_sha(tmp_path: Path) -> None:
     repository, original_sha = create_git_repository(
         tmp_path,
-        {"compose.yaml": "services: {web: {image: example/old:1}}\n"},
+        {"compose.yaml": "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/old:1}}\n"},
     )
     (repository / "compose.yaml").write_text(
-        "services: {web: {image: example/new:1}}\n",
+        "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/new:1}}\n",
         encoding="utf-8",
     )
     subprocess.run(["git", "-C", str(repository), "add", "compose.yaml"], check=True)
@@ -412,7 +412,7 @@ def test_discover_compose_pins_search_to_resolved_commit_sha(tmp_path: Path) -> 
 def test_discover_compose_rejects_shallow_clone_before_scanning(tmp_path: Path, monkeypatch) -> None:
     repository, commit_sha = create_git_repository(
         tmp_path,
-        {"compose.yaml": "services: {web: {image: example/web:1}}\n"},
+        {"compose.yaml": "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/web:1}}\n"},
     )
     adapter = local_repository_adapter(repository)
     run_git = adapter._run_git
@@ -449,7 +449,7 @@ def test_discover_compose_rejects_partial_clone_before_scanning(
 ) -> None:
     repository, commit_sha = create_git_repository(
         tmp_path,
-        {"compose.yaml": "services: {web: {image: example/web:1}}\n"},
+        {"compose.yaml": "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/web:1}}\n"},
     )
     adapter = local_repository_adapter(repository)
     run_git = adapter._run_git
@@ -478,7 +478,7 @@ def test_discover_compose_allows_disabled_promisor_config(
 ) -> None:
     repository, commit_sha = create_git_repository(
         tmp_path,
-        {"compose.yaml": "services: {web: {image: example/web:1}}\n"},
+        {"compose.yaml": "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/web:1}}\n"},
     )
     adapter = local_repository_adapter(repository)
     run_git = adapter._run_git
@@ -504,7 +504,7 @@ def test_discover_compose_allows_disabled_promisor_config(
 def test_discover_compose_rechecks_full_clone_after_fallback_fetch(tmp_path: Path, monkeypatch) -> None:
     repository, commit_sha = create_git_repository(
         tmp_path,
-        {"compose.yaml": "services: {web: {image: example/web:1}}\n"},
+        {"compose.yaml": "services: {web: {build: {context: ., dockerfile: Dockerfile}, image: example/web:1}}\n"},
     )
     adapter = local_repository_adapter(repository)
     run_git = adapter._run_git
@@ -658,4 +658,29 @@ def test_urllib_transport_reuses_set_cookie_for_follow_up_requests() -> None:
         assert seen_cookie == ["JSESSIONID=test-session"]
     finally:
         server.shutdown()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("status", [200, 403])
+def test_urllib_transport_bounds_success_and_error_response_bodies(status):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(b"x" * 16384)
+
+        def log_message(self, *_args):
+            return None
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = UrllibHttpTransport(timeout=2)
+        response = transport.request("GET", f"http://127.0.0.1:{server.server_port}/console", headers={}, max_bytes=256)
+        assert response.status_code == status
+        assert response.body == b"x" * 256
+    finally:
+        server.shutdown()
+        server.server_close()
         thread.join(timeout=2)

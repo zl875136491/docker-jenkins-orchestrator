@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 from threading import RLock
 from typing import Any, Protocol, Sequence
 
@@ -10,11 +11,15 @@ from orchestrator.models import (
     AppEvent,
     BaseImage,
     BuildJob,
+    BuildResource,
+    BuildResources,
     BuildStatus,
+    CleanupStatus,
     DeploymentService,
     TechStack,
     UserAppRecord,
     UserImage,
+    utc_now,
 )
 
 
@@ -38,6 +43,19 @@ def _app_update_fields(appid: str, fields: dict[str, Any]) -> dict[str, Any]:
     updates = dict(fields)
     updates.pop("appid", None)
     return updates
+
+
+def _lease_expired(value: datetime | None, now: datetime) -> bool:
+    if value is None:
+        return True
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value <= now
+
+
+def _validate_resource_key(key: str) -> None:
+    if re.fullmatch(r"[a-f0-9]{64}", key) is None:
+        raise ValueError("Invalid resource key")
 
 
 class Repository(Protocol):
@@ -76,6 +94,17 @@ class Repository(Protocol):
     def list_services(self, appid: str) -> list[DeploymentService]: ...
     def create_alert(self, alert: Alert) -> Alert: ...
     def list_alerts(self, appid: str) -> list[Alert]: ...
+    def ensure_build_resources(self, resources: BuildResources) -> BuildResources: ...
+    def get_build_resources(self, build_id: str) -> BuildResources | None: ...
+    def put_build_resource(self, build_id: str, resource: BuildResource, owner: str | None = None) -> BuildResources: ...
+    def update_build_resources(self, build_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> BuildResources | None: ...
+    def claim_build_lease(self, build_id: str, owner: str, expires_at: datetime, statuses: Sequence[CleanupStatus]) -> BuildResources | None: ...
+    def renew_build_lease(self, build_id: str, owner: str, expires_at: datetime) -> bool: ...
+    def release_build_lease(self, build_id: str, owner: str) -> None: ...
+    def list_cleanup_resources(self) -> list[BuildResources]: ...
+    def reserve_port(self, target: str, protocol: str, port: int, build_id: str, service_name: str) -> bool: ...
+    def list_build_ports(self, build_id: str) -> list[dict[str, Any]]: ...
+    def release_port(self, target: str, protocol: str, port: int, build_id: str) -> bool: ...
 
 
 class InMemoryRepository:
@@ -91,6 +120,8 @@ class InMemoryRepository:
         self.tech_stacks: dict[str, TechStack] = {}
         self.services: dict[str, DeploymentService] = {}
         self.alerts: dict[str, Alert] = {}
+        self.build_resources: dict[str, BuildResources] = {}
+        self.port_allocations: dict[tuple[str, str, int], dict[str, str]] = {}
 
     @staticmethod
     def _copy(model):
@@ -261,6 +292,92 @@ class InMemoryRepository:
         with self._lock:
             return [self._copy(alert) for alert in self.alerts.values() if alert.appid == appid]
 
+    def ensure_build_resources(self, resources: BuildResources) -> BuildResources:
+        with self._lock:
+            existing = self.build_resources.setdefault(resources.build_id, self._copy(resources))
+            if existing.appid != resources.appid:
+                raise RepositoryError("Build resource owner mismatch")
+            return self._copy(existing)
+
+    def get_build_resources(self, build_id: str) -> BuildResources | None:
+        with self._lock:
+            resources = self.build_resources.get(build_id)
+            return self._copy(resources) if resources else None
+
+    def put_build_resource(self, build_id: str, resource: BuildResource, owner: str | None = None) -> BuildResources:
+        _validate_resource_key(resource.key)
+        with self._lock:
+            resources = self.build_resources.get(build_id)
+            if resources is None:
+                raise RepositoryError("Build resources not found")
+            if owner is not None and (resources.lease_owner != owner or _lease_expired(resources.lease_expires_at, utc_now())):
+                raise RepositoryError("Build resource lease lost")
+            resources.resources[resource.key] = self._copy(resource)
+            resources.updated_at = utc_now()
+            return self._copy(resources)
+
+    def update_build_resources(self, build_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> BuildResources | None:
+        with self._lock:
+            resources = self.build_resources.get(build_id)
+            if resources is None or any(getattr(resources, key) != value for key, value in (expected or {}).items()):
+                return None
+            if expected and expected.get("lease_owner") is not None and _lease_expired(resources.lease_expires_at, utc_now()):
+                return None
+            updated = resources.model_copy(update={**fields, "updated_at": utc_now()}, deep=True)
+            self.build_resources[build_id] = updated
+            return self._copy(updated)
+
+    def claim_build_lease(self, build_id: str, owner: str, expires_at: datetime, statuses: Sequence[CleanupStatus]) -> BuildResources | None:
+        with self._lock:
+            resources = self.build_resources.get(build_id)
+            if resources is None or resources.cleanup_status not in statuses:
+                return None
+            if resources.lease_owner is not None and not _lease_expired(resources.lease_expires_at, utc_now()):
+                return None
+            resources.lease_owner = owner
+            resources.lease_expires_at = expires_at
+            resources.updated_at = utc_now()
+            return self._copy(resources)
+
+    def renew_build_lease(self, build_id: str, owner: str, expires_at: datetime) -> bool:
+        return self.update_build_resources(build_id, {"lease_expires_at": expires_at}, {"lease_owner": owner}) is not None
+
+    def release_build_lease(self, build_id: str, owner: str) -> None:
+        with self._lock:
+            resources = self.build_resources.get(build_id)
+            if resources is not None and resources.lease_owner == owner:
+                resources.lease_owner = None
+                resources.lease_expires_at = None
+
+    def list_cleanup_resources(self) -> list[BuildResources]:
+        with self._lock:
+            return [self._copy(resources) for resources in self.build_resources.values() if resources.cleanup_status in {CleanupStatus.QUEUED, CleanupStatus.RUNNING}]
+
+    def reserve_port(self, target: str, protocol: str, port: int, build_id: str, service_name: str) -> bool:
+        with self._lock:
+            identity = (target, protocol, port)
+            owner = {"build_id": build_id, "service_name": service_name}
+            previous = self.port_allocations.setdefault(identity, owner)
+            return previous == owner
+
+    def release_port(self, target: str, protocol: str, port: int, build_id: str) -> bool:
+        with self._lock:
+            identity = (target, protocol, port)
+            owner = self.port_allocations.get(identity)
+            if owner is None:
+                return True
+            if owner["build_id"] != build_id:
+                return False
+            del self.port_allocations[identity]
+            return True
+
+    def list_build_ports(self, build_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {"target": identity[0], "protocol": identity[1], "port": identity[2], **owner}
+                for identity, owner in self.port_allocations.items() if owner["build_id"] == build_id
+            ]
+
 
 class MongoRepository:
     """MongoDB repository. The client is owned by this object when supplied."""
@@ -275,6 +392,8 @@ class MongoRepository:
         self.tech_stacks = database["tech_stacks"]
         self.services = database["deployment_services"]
         self.alerts = database["alerts"]
+        self.build_resources = database["build_resources"]
+        self.port_allocations = database["port_allocations"]
 
     @classmethod
     def connect(cls, url: str, database_name: str, timeout_ms: int = 5000) -> "MongoRepository":
@@ -309,6 +428,10 @@ class MongoRepository:
         self.tech_stacks.create_index("tech_stack_id", unique=True, name="unique_tech_stack_id")
         self.services.create_index([("appid", 1), ("build_id", 1), ("service_name", 1)], unique=True, name="unique_deployment_service")
         self.alerts.create_index([("appid", 1), ("created_at", -1)], name="alerts_by_app")
+        self.build_resources.create_index("build_id", unique=True, name="unique_build_resources")
+        self.build_resources.create_index([("cleanup_status", 1), ("lease_expires_at", 1)], name="cleanup_recovery")
+        self.port_allocations.create_index([("target", 1), ("protocol", 1), ("port", 1)], unique=True, name="unique_published_port")
+        self.port_allocations.create_index("build_id", name="ports_by_build")
 
     def close(self) -> None:
         if self._client is not None:
@@ -462,3 +585,100 @@ class MongoRepository:
 
     def list_alerts(self, appid: str) -> list[Alert]:
         return [self._model(Alert, document) for document in self.alerts.find({"appid": appid}).sort("created_at", -1)]
+
+    def ensure_build_resources(self, resources: BuildResources) -> BuildResources:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        try:
+            document = self.build_resources.find_one_and_update(
+                {"build_id": resources.build_id},
+                {"$setOnInsert": self._document(resources)},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+        except DuplicateKeyError:
+            document = self.build_resources.find_one({"build_id": resources.build_id})
+        result = self._model(BuildResources, document)
+        if result is None or result.appid != resources.appid:
+            raise RepositoryError("Build resource owner mismatch")
+        return result
+
+    def get_build_resources(self, build_id: str) -> BuildResources | None:
+        return self._model(BuildResources, self.build_resources.find_one({"build_id": build_id}))
+
+    def put_build_resource(self, build_id: str, resource: BuildResource, owner: str | None = None) -> BuildResources:
+        from pymongo import ReturnDocument
+
+        _validate_resource_key(resource.key)
+        query: dict[str, Any] = {"build_id": build_id}
+        if owner is not None:
+            query.update({"lease_owner": owner, "lease_expires_at": {"$gt": utc_now()}})
+        document = self.build_resources.find_one_and_update(
+            query,
+            {"$set": {f"resources.{resource.key}": self._document(resource), "updated_at": utc_now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        result = self._model(BuildResources, document)
+        if result is None:
+            raise RepositoryError("Build resources not found or lease lost")
+        return result
+
+    def update_build_resources(self, build_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> BuildResources | None:
+        from pymongo import ReturnDocument
+
+        query = {"build_id": build_id, **(expected or {})}
+        if expected and expected.get("lease_owner") is not None:
+            query["lease_expires_at"] = {"$gt": utc_now()}
+        document = self.build_resources.find_one_and_update(
+            query,
+            {"$set": {**fields, "updated_at": utc_now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._model(BuildResources, document)
+
+    def claim_build_lease(self, build_id: str, owner: str, expires_at: datetime, statuses: Sequence[CleanupStatus]) -> BuildResources | None:
+        from pymongo import ReturnDocument
+
+        document = self.build_resources.find_one_and_update(
+            {
+                "build_id": build_id,
+                "cleanup_status": {"$in": [status.value for status in statuses]},
+                "$or": [{"lease_owner": None}, {"lease_expires_at": {"$lte": utc_now()}}],
+            },
+            {"$set": {"lease_owner": owner, "lease_expires_at": expires_at, "updated_at": utc_now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._model(BuildResources, document)
+
+    def renew_build_lease(self, build_id: str, owner: str, expires_at: datetime) -> bool:
+        return self.update_build_resources(build_id, {"lease_expires_at": expires_at}, {"lease_owner": owner}) is not None
+
+    def release_build_lease(self, build_id: str, owner: str) -> None:
+        self.build_resources.update_one({"build_id": build_id, "lease_owner": owner}, {"$set": {"lease_owner": None, "lease_expires_at": None}})
+
+    def list_cleanup_resources(self) -> list[BuildResources]:
+        return [
+            self._model(BuildResources, document)
+            for document in self.build_resources.find({"cleanup_status": {"$in": [CleanupStatus.QUEUED.value, CleanupStatus.RUNNING.value]}})
+        ]
+
+    def reserve_port(self, target: str, protocol: str, port: int, build_id: str, service_name: str) -> bool:
+        from pymongo.errors import DuplicateKeyError
+
+        identity = {"target": target, "protocol": protocol, "port": port}
+        try:
+            self.port_allocations.insert_one({**identity, "build_id": build_id, "service_name": service_name})
+            return True
+        except DuplicateKeyError:
+            existing = self.port_allocations.find_one(identity)
+            return existing is not None and existing.get("build_id") == build_id and existing.get("service_name") == service_name
+
+    def release_port(self, target: str, protocol: str, port: int, build_id: str) -> bool:
+        identity = {"target": target, "protocol": protocol, "port": port}
+        self.port_allocations.delete_one({**identity, "build_id": build_id})
+        return self.port_allocations.find_one(identity) is None
+
+    def list_build_ports(self, build_id: str) -> list[dict[str, Any]]:
+        return [{key: value for key, value in document.items() if key != "_id"}
+                for document in self.port_allocations.find({"build_id": build_id})]

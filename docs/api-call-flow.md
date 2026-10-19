@@ -9,9 +9,11 @@
 4. 使用 `POST /api/v1/docker/template_compose?format=json` 获取 Compose JSON 与完整路径注释，或使用 `?format=yaml` 获取带注释 YAML；也可以提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
 5. 如果仓库 Compose 有更新，调用 `POST /api/v1/jenkins/app_sync/{app_id}`；它不需要请求体，默认同步创建应用时保存的 `git_ref`。
 6. 如需人工覆盖或调整 Compose，调用 `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
-7. `POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并保存返回的 `build_id`。HTTP `202` 表示请求已受理，响应中的 `queued` 只是此刻的状态快照，不能作为之后仍在排队的依据。
+7. 如需 workspace 文件，在 APP 注册之后调用 `POST /api/v1/workspace/{appid}`（兼容 `POST /workspace/{appid}`），以 multipart `files` 字段上传。可重复上传同路径以覆盖暂存文件；全部文件准备好后，`POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并冻结 Compose 和 workspace 快照，保存返回的 `build_id`。HTTP `202` 表示请求已受理，响应中的 `queued` 只是此刻的状态快照，不能作为之后仍在排队的依据。
 8. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。
 9. 成功后查询 `app_images`、`app_services`、`app_access`；失败后查询 `app_events` 和 `app_alerts`。
+10. 通过 `GET /api/v1/jenkins/build_resources/{build_id}` 查看某一构建的独立服务、实际端口和资源；不需要销毁旧版本才能构建新版本。
+11. 确认不再保留该版本后，用同路径 `DELETE` 清理，仅传 `build_id`。收到 202 后轮询 GET；`partial_failed` 可重复 DELETE 重试，`succeeded` 表示逻辑回收完成，Harbor 物理存储可能仍在等待 GC。
 
 访问令牌过期时，调用 `POST /oauth2/refresh`，然后用新 access token 重试业务请求。`/api/me` 不再提供。
 
@@ -25,9 +27,15 @@ WebUI 调用 Control API；MongoDB 保存应用、构建、事件、镜像、服
 
 ## Compose 规则
 
+构建输入采用应用记录中已保存的 Compose 内容，作为参数传给 Jenkins；选择构建分支或提交只决定源码版本，不会在每次构建时自动重新读取该版本仓库的 Compose。仓库 Compose 修改后，应先调用 `app_sync` 或 `PATCH app_info` 更新应用，再创建新构建。每个服务都必须使用本地源码构建模式，显式配置 `build.context` 和 `build.dockerfile`；Dockerfile 必须真实存在于对应 context 内。image-only 服务被拒绝，不能用 `image` 代替应用源码构建。`image` 可作为构建标签或模板提示保留，但最终 Jenkins 部署产物必须包含本次构建生成的不可变镜像。
+
+Worker 在调用 GitLab/Jenkins 前，将 `.:/workspace`、`./config:/config` 等相对 bind source 解析为该 APP 本次构建的 workspace 快照绝对路径。源文件/目录必须已通过 workspace API 上传；不会自动把 Git checkout 当成运行挂载来源。目录为空、文件缺失、`..`、`~`、符号链接均拒绝。Worker 同时检查每个服务是否声明本地 `build.context` 与 `build.dockerfile`；Jenkins 会在 checkout 或 workspace 解包后再次确认上下文和 Dockerfile 真实存在，然后执行 Dockerfile 构建。HTTP `202` 后发现问题时构建变为 `failed`，错误保存在构建信息、事件和告警。已有失败构建不会被改写。
+
+默认构建源为 Git，上传文件作为覆盖层进入独立的构建目录；不改动 checkout 元数据。若只使用上传文件构建，在顶层设置 `x-orchestrator-build-source: workspace`，可不填 `repository_url`，Jenkins 跳过 Git checkout。workspace 模式仍要求每个服务提供 Dockerfile 和本地 build；上传文件只有在 Dockerfile 构建或显式 `volumes` 挂载时才会参与交付。完整协议与部署要求见 [workspace](workspace.md)。
+
 构建前必须保存有效的 `services` mapping。GitLab 自动发现/同步会先把仓库完整克隆到本地，再基于解析出的固定 commit SHA 检出并搜索；运行镜像内必须有 Git 和 CA 证书，克隆超时由 `ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS` 控制。自动发现只识别 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml`，不会改写环境专属参数；发现多个嵌套候选时需要人工通过 `PATCH app_info` 选择或整理 Compose。`ports` 才会申请外部入口，例如 `18082:3000` 表示期望宿主机 18082 转发到容器 3000；worker 会在部署前检查冲突并可能重新分配宿主机 published 端口，实际端口以 `app_access`/`published_ports` 为准。`expose` 仅供容器网络使用。服务必须真正监听 target port。
 
-业务 appid 保留原值且不可改写，外部资源使用独立 namespace。默认 named volume 按应用及逻辑卷身份隔离，显式 `name`/`external` 才表示指定或共享物理卷；升级旧部署前须核对 owner 标签与卷数据，不能仅凭旧的小写名称认领。详细兼容边界见 [App ID 与外部资源命名迁移说明](appid-namespace.md)。
+业务 appid 保留原值且不可改写。新构建的外部资源使用完整 `(appid, build_id)` 派生的 namespace；named volume 即使有显式 `name` 也重新映射为构建私有卷。`external` 卷/网络、自定义共享存储驱动和工作区外绝对 bind 被拒绝。数据库、缓存等应作为同一构建内服务，常见外部状态型连接配置会被预检阻塞。历史 APP 级共享资源不迁移、不认领、不自动销毁；APP 命名历史见 [App ID 与外部资源命名迁移说明](appid-namespace.md)。
 
 ## 排障顺序
 

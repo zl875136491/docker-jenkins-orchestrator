@@ -2,6 +2,14 @@
 
 `GET /healthz` 不需要认证。`POST /oauth2/token` 和 `POST /oauth2/refresh` 用于认证；其余接口需要 `Authorization: Bearer <access_token>`。`/api/me` 已删除。
 
+workspace 的上传、返回格式、Compose 约定及存储配置见 [Workspace](workspace.md)。先注册 APP，再用 multipart `files` 上传；创建构建冻结文件。`.:/workspace` 对应本次构建的上传根目录，不是 Git checkout。
+
+## 时间输出
+
+所有平台业务时间字段（如 `created_at`、`updated_at`、`started_at`、`finished_at`、`last_polled_at`、`synced_at`、`resolved_at`）统一返回带东八区偏移量 `+08:00` 的 ISO 8601 字符串。例如，原 UTC 时间 `2026-10-14T01:55:20.795000` 返回为 `2026-10-14T09:55:20.795000+08:00`；未发生的时间继续返回 `null`。
+
+数据库存储和内部时间运算继续使用 UTC；MongoDB 读取出的无时区历史时间按 UTC 解释后再转换，不需要重写历史数据。JWT 的 `iat` / `exp` 保持标准 Unix 时间戳，`expires_in` 等时长字段不变。前端日期、构建刷新时间和资源查询时间固定使用 `Asia/Shanghai`，不依赖浏览器本地时区。`GET /api/v1/system-guide` 的 `timestamps` 字段提供相同约定。
+
 ## OAuth2
 
 ```http
@@ -39,9 +47,14 @@ Content-Type: application/json
 | 应用列表 | `GET /api/v1/jenkins/app_list` |
 | 应用详情/更新 | `GET/PATCH /api/v1/jenkins/app_info/{app_id}` |
 | 同步 GitLab 仓库与 Compose | `POST /api/v1/jenkins/app_sync/{app_id}` |
+| 上传 workspace 文件 | `POST /api/v1/workspace/{appid}`，兼容 `POST /workspace/{appid}` |
+| 查看 workspace 文件清单 | `GET /api/v1/workspace/{appid}` |
+| 删除 workspace 暂存文件 | `DELETE /api/v1/workspace/{appid}?path=<relative-file-path>`，成功 HTTP 204，不影响构建快照 |
 | 创建构建 | `POST /api/v1/jenkins/build_create/{app_id}` |
 | 构建历史 | `GET /api/v1/jenkins/build_list?app_id=<id>&page=1&page_size=20` |
 | 构建详情 | `GET /api/v1/jenkins/build_info/{build_id}` |
+| 构建资源、独立入口与清理进度 | `GET /api/v1/jenkins/build_resources/{build_id}` |
+| 异步销毁构建私有资源 | `DELETE /api/v1/jenkins/build_resources/{build_id}`，无需 body 或 query |
 | 事件、镜像、服务、入口、告警 | `GET /api/v1/jenkins/app_{events|images|services|access|alerts}/{app_id}` |
 | 模板列表/组合 | `GET /api/v1/docker/template_list`、`POST /api/v1/docker/template_compose[?format=json|yaml]` |
 | 技术栈 CRUD | `GET/POST /api/v1/docker/tech_stack_list`, `/api/v1/docker/tech_stack_create` |
@@ -131,6 +144,24 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/buil
 
 常见错误：`401` 为客户端凭据或 Bearer 令牌无效，`404` 为应用或构建不存在，`409` 为 appid 重复，`422` 为请求或 Compose 无效。
 
+### Jenkins 失败诊断
+
+Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建的限量控制台日志，将可识别的失败阶段、构建节点、日志行号、底层错误与退出码追加到原有错误字符串。告警继续使用原有 `message`，不新增字段；构建详情的 `error` 和 `build.alert` 事件的 `message` 保存相同内容，现有调用方式不变。例如：
+
+```json
+{
+  "message": "Jenkins build finished with FAILURE；Jenkins #67；阶段=Checkout；节点=builder；位置=console L42；原因=DNS 解析失败：fatal: unable to access 'https://gitlab.example/team/app.git/': Could not resolve host: gitlab.example；退出码=128"
+}
+```
+
+诊断直接保留日志证据，不凭最终 `FAILURE` 猜测根因。当前可识别 DNS、连接、TLS、认证/权限、缺少文件、Node engines、存储和端口错误；编译错误保留源码位置，Dockerfile 和 Python traceback 可补充文件行号。跳过的阶段、流水线最终退出包装与 Post Actions 中的后续错误不会覆盖已捕获的主失败。
+
+仅失败终态读取日志，成功构建不增加日志请求。优先用 `HEAD logText/progressiveText` 的 `X-Text-Size` 定位最后 128 KiB，实际响应最多读取 256 KiB；不支持 HEAD 或缺少长度时限量读取开头。尾部片段行号会明确标注为片段内行号及字节起点，不冒充全日志绝对行号。错误字符串上限 1500 字符。
+
+日志内容在进入告警前会移除终端控制序列，脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，追加可读的兜底提示，不阻止构建失败状态持久化。
+
+本机制在新版 worker 运行后对后续失败生效，不自动改写历史告警，也不要求调整应用 Compose、Dockerfile 或 Jenkins 共享 job。
+
 ### Compose 组合输出格式
 
 `POST /api/v1/docker/template_compose` 的请求体仍为：
@@ -138,6 +169,11 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/buil
 ```json
 {"components": ["react", "mongodb"], "dependencies": {"react": ["mongodb"]}}
 ```
+
+组合输出和应用构建输入统一要求本地源码构建模式：`services` 下每个服务必须包含
+`build.context` 与 `build.dockerfile`，两者都必须是安全的相对路径；Dockerfile 必须真实存在
+于对应 build context 内。缺少 `build`、使用 image-only，或让 `dockerfile` 通过绝对路径/`..`
+跳出上下文的 Compose 会被拒绝。`image` 只能作为构建标签或模板提示保留，不能替代 Dockerfile。
 
 可通过 query 参数选择交付材料：
 
@@ -150,3 +186,41 @@ Compose 中的宿主机 published 端口只是用户申请值。部署 worker �
 ## 应用访问入口
 
 主程序消费 `GET /api/v1/jenkins/app_access/{app_id}` 时，应以应用级 `access_available` 和 `access_urls` 决定是否展示入口；服务级无入口对数据库、缓存、搜索等内部依赖是正常状态。完整字段契约、Linkwarden 多服务示例和 TypeScript 调用方式见 [应用访问入口 API](app-access.md)。
+
+## 构建隔离与资源清理
+
+新构建的 service、task container、network、named volume、workspace 快照、外部端口预留与镜像引用均归属完整 `build_id`。同 APP 的不同构建可以保留独立入口；新构建不替换或清理旧构建服务。APP 元信息、仓库来源和上传暂存区仍共享。查询特定版本时使用 `build_resources`，而不是从 APP 的所有入口中猜测最新版本。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/jenkins/build_resources/$BUILD_ID"
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "$API/api/v1/jenkins/build_resources/$BUILD_ID"
+```
+
+DELETE 只传路径中的 `build_id`，不是停止接口：它将停止本构建服务并销毁私有数据。后端自行解析执行节点、容器、镜像和目录，不能提交任意资源 ID、目录或 `force` 参数。
+
+| 情况 | HTTP / 语义 |
+|---|---|
+| 未认证 / 构建不存在 | `401` / `404` |
+| 构建尚未结束、Jenkins 仍在执行、触发结果不确定或部署租约仍有效 | `409`，不启动清理 |
+| 首次受理或重复查询已排队/执行中的清理 | `202`，通过同一个 GET 轮询 |
+| 已完成清理后重复 DELETE | `200`，返回原结果，不重新销毁 |
+| 部分失败后再次 DELETE | `202`，只补做未完成项 |
+| 无法保存受理状态、队列不可用或无法核验外部执行状态 | `503`，不得视为已成功受理 |
+
+GET 与 DELETE 返回同一 `BuildResourceReport`：
+
+- `build_id`、`appid`、`build_status`：保留历史构建结果，清理不会把 succeeded 改成 failed。
+- `isolated`：新构建为 true；旧 APP 级共享资源为 false，不能推断某个历史 Build 独占资源。
+- `cleanup_status`：`not_started`、`queued`、`running`、`succeeded`、`partial_failed`。
+- `resources`：每项包含 `kind`、`name`、`target`、`native_id`、`managed`、`state`、`metadata`、`error` 和时间；`state` 为 `planned/present/removed/blocked/error`。
+- `services`：该 Build 的实际 published 端口与入口；正在清理或已回收的服务不再标记为可访问。
+- `cleanup_allowed`、`cleanup_reason`、`started_at`、`finished_at`、`last_error`：供控制台启停按钮、轮询与排障使用；所有时间输出 `+08:00`。
+- `registry_storage_status`：`not_applicable`、`waiting_gc` 或 `shared_retained`；`reclaimed_bytes` 当前为 null，不估算物理磁盘释放量。
+
+清理按 service → task/container → 私有卷/快照 → network → 端口 → 本地镜像引用 → Harbor tag 执行。逐项验证 owner 标签、原生 ID、卷创建身份和使用关系；资源已不存在按幂等处理。未知节点、权限不足、使用中资源或归属变化均保留并报告 `partial_failed`，不使用全局 prune 或强制删除。
+
+Harbor 只删除该 Build 的 tag，并按 digest 定位、复核 tag 已消失；共享 artifact 和层保留。逻辑成功不等于 blob 物理释放，GC 由现有 Harbor 运维策略执行。本接口不触发全局 GC，也不清理共享 BuildKit 缓存。旧 APP 级 service、network、volume 和不明镜像列为受保护项，无绕过开关。
+
+控制台的「构建资源清理」分页支持查询、不可逆确认、进度轮询及部分失败重试；切换 Build ID 或退出登录会取消旧结果展示和轮询。

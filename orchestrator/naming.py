@@ -79,6 +79,17 @@ def external_namespace(appid: str) -> str:
     return f"{NAMESPACE_PREFIX}{raw.encode('utf-8').hex()}"
 
 
+def validate_build_id(build_id: str) -> str:
+    if not isinstance(build_id, str) or re.fullmatch(r"[a-f0-9]{32}", build_id) is None:
+        raise NamingError("Build identifier must contain 32 lowercase hexadecimal characters")
+    return build_id
+
+
+def build_namespace(appid: str, build_id: str) -> str:
+    identity = json.dumps([validate_appid(appid), validate_build_id(build_id)], separators=(",", ":"))
+    return f"build-v1-{sha256(identity.encode('utf-8')).hexdigest()[:32]}"
+
+
 def bounded_resource_name(prefix: str, suffix: str | None = None, *, max_length: int = MAX_DOCKER_RESOURCE_NAME_LENGTH) -> str:
     """Build a deterministic bounded Docker resource name.
 

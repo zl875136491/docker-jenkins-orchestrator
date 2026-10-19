@@ -88,8 +88,10 @@
           </div>
           <nav class="side-nav" aria-label="控制台区域">
             <a href="#appSection">应用</a>
+            <a href="#workspaceSection">文件管理</a>
             <a href="#buildSection">构建</a>
             <a href="#historySection">历史任务</a>
+            <a href="#buildResourcesSection">构建资源清理</a>
             <a href="#resourcesSection">运行资源</a>
             <a href="#templatesSection">模板</a>
             <a href="#baseImagesSection">基础镜像</a>
@@ -101,7 +103,7 @@
             <div>
               <p class="eyebrow">DELIVERY WORKSPACE</p>
               <h2>应用交付控制台</h2>
-              <p class="intro-copy">连接后管理应用配置、构建任务和 Docker Services 状态。</p>
+              <p class="intro-copy">连接后管理应用配置、构建任务和 Docker Services 状态。时间统一使用东八区（UTC+08:00）。</p>
             </div>
             <div class="intro-meta">
               <span class="meta-label">API</span>
@@ -194,6 +196,72 @@
               <pre id="appSyncOutput" class="json-output" aria-label="同步接口完整响应">等待同步操作</pre>
             </section>
             <pre id="appOutput" class="json-output" aria-live="polite">等待应用操作</pre>
+          </section>
+
+          <section id="workspaceSection" class="workspace-section" aria-labelledby="workspaceTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">APP / WORKSPACE FILES</p>
+                <h2 id="workspaceTitle">文件管理</h2>
+              </div>
+              <a id="workspaceSelectAppButton" class="button button-quiet modal-trigger" href="#appContextModal">选择应用</a>
+            </div>
+            <p class="muted small">当前 App ID：<strong id="workspaceAppId">未设置</strong>。文件按应用独立存储；先上传源码和配置，再创建新的构建。</p>
+            <p class="field-help">Compose 中的 <code>.:/workspace</code> 指向当前应用的上传文件根目录。上传或删除仅修改暂存区，不影响已有构建快照、运行实例或历史告警；补全文件后请重新构建。</p>
+            <form id="workspaceUploadForm" class="form-grid">
+              <label>
+                选择文件（支持多选）
+                <input id="workspaceFiles" type="file" multiple />
+              </label>
+              <label>
+                或选择整个目录
+                <input id="workspaceDirectory" type="file" webkitdirectory multiple />
+                <span class="field-help">以所选目录为根，保留内部子目录结构，不包含所选目录自身的名称。</span>
+              </label>
+              <label class="span-2">
+                目标目录前缀（可选）
+                <input id="workspaceUploadPath" placeholder="留空上传到根目录，例如 config 或 src" autocomplete="off" />
+                <span class="field-help">只允许相对 POSIX 路径，禁止 ..、.git、绝对路径及符号链接。同路径文件会被覆盖；zip/tar 不会自动解压。</span>
+              </label>
+              <div class="form-actions span-2">
+                <button id="workspaceUploadButton" class="button button-primary" type="submit">上传文件</button>
+                <button id="workspaceRefreshButton" class="button button-secondary" type="button">刷新文件列表</button>
+                <button id="workspaceBuildButton" class="button button-quiet" type="button">前往构建</button>
+                <span id="workspaceSelection" class="muted small">尚未选择文件</span>
+              </div>
+            </form>
+            <p id="workspaceStatus" class="operation-status muted small" role="status" aria-live="polite">请选择已注册应用后查看或上传文件。</p>
+            <div class="workspace-file-toolbar">
+              <label>
+                筛选文件路径
+                <input id="workspaceSearch" type="search" placeholder="输入文件名或目录" />
+              </label>
+              <label>
+                每页数量
+                <select id="workspacePageSize">
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+              <p id="workspaceSummary" class="muted small" aria-live="polite">文件列表尚未加载</p>
+            </div>
+            <div id="workspaceFileList" class="workspace-file-list" aria-busy="false">
+              <div class="workspace-file-table-wrap">
+                <table class="workspace-file-table">
+                  <thead>
+                    <tr><th scope="col">相对路径</th><th scope="col">大小</th><th scope="col">SHA256</th><th scope="col">操作</th></tr>
+                  </thead>
+                  <tbody id="workspaceFileRows"></tbody>
+                </table>
+              </div>
+              <p id="workspaceEmpty" class="muted small workspace-file-empty">请选择已注册应用。</p>
+            </div>
+            <div class="history-pagination">
+              <button id="workspacePreviousButton" class="button button-quiet" type="button" disabled>上一页</button>
+              <span id="workspacePageLabel" class="muted small">第 1 / 1 页</span>
+              <button id="workspaceNextButton" class="button button-quiet" type="button" disabled>下一页</button>
+            </div>
           </section>
 
           <section id="buildSection" class="workspace-section">
@@ -348,6 +416,25 @@
                 </div>
               </div>
             </section>
+          </section>
+
+          <section id="buildResourcesSection" class="workspace-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">BUILD RESOURCE LIFECYCLE</p>
+                <h2>构建资源与清理</h2>
+                <p class="muted">按 Build ID 查看独立服务入口和资源。清理将停止该构建的服务并删除私有数据，不删除 APP 信息和上传暂存文件。</p>
+              </div>
+            </div>
+            <form id="buildResourcesForm" class="form-grid">
+              <label>Build ID<input id="buildResourcesId" required pattern="[a-f0-9]{32}" maxlength="32" placeholder="输入构建 ID" /></label>
+              <div class="history-filter-actions">
+                <button id="loadBuildResourcesButton" class="button button-secondary" type="submit">查询构建资源</button>
+                <button id="cleanupBuildResourcesButton" class="button button-quiet" type="button" disabled>清理该构建资源</button>
+              </div>
+            </form>
+            <p id="buildResourcesStatus" class="muted small" aria-live="polite">尚未查询</p>
+            <pre id="buildResourcesOutput" class="json-output tall">等待查询</pre>
           </section>
 
           <section id="resourcesSection" class="workspace-section">

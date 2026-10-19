@@ -43,6 +43,8 @@ def mongo_app_repository() -> tuple[MongoRepository, FakeAppCollection]:
             "tech_stacks",
             "deployment_services",
             "alerts",
+            "build_resources",
+            "port_allocations",
         )
     }
     database["user_apps"] = collection

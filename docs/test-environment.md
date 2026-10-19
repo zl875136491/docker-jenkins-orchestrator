@@ -86,3 +86,47 @@ when available. GitLab ref validation is enabled only when its hostname is
 resolvable from the test host; otherwise Jenkins remains responsible for the
 repository checkout and the test environment starts with GitLab validation
 disabled.
+
+## Existing shared environment releases
+
+Do not rerun the preparation script for an existing shared environment: preserve
+the dotenv, Mongo database, JWT/Fernet keys, Redis and uploaded workspaces. Update
+only the API, Worker and Beat after builds have drained; do not stop existing
+Swarm application services or use global Docker prune operations.
+
+Harbor cleanup verifies HTTPS. For a private registry, mount a certificate file
+read-only into the Worker and set `ORCHESTRATOR_HARBOR_CA_FILE` to its container
+path in the release override. It accepts an independently verified private CA,
+intermediate CA or pinned server certificate as an explicit trust anchor;
+hostname and validity checks remain enabled. Never disable TLS verification.
+An empty setting retains the system trust store. A pinned server certificate
+must be replaced and reverified when the registry certificate rotates.
+
+The Harbor service account needs project-scoped Maintainer permissions for tag
+deletion; public pull access or Jenkins push credentials do not grant cleanup
+permissions to the platform account. The cleanup adapter uses stateless Basic
+authentication without browser-session cookies, avoiding session CSRF failures.
+
+The Compose API and Worker carry workspace-manager and worker-identity labels.
+Only their exact host-root-to-container-root management mount is exempt from
+build directory occupancy checks. Other consumers, including an unrelated
+container mounting an ancestor or a build snapshot, continue to block deletion.
+
+## Restricted-network Jenkins builders
+
+Configure registry egress on the actual Jenkins builder, not just its controller.
+Docker daemon proxy settings cover base-image metadata, authentication and layer
+downloads. Package downloads inside Dockerfile `RUN` instructions additionally
+need Docker client build proxy settings in the node's `config.json` under
+`proxies`; configuring the daemon alone does not provide that build input.
+Keep internal GitLab, Harbor and local addresses in the appropriate `noProxy`
+list. Validate daemon changes and drain builds before a required Docker restart.
+
+The Build And Push stage retains a private, temporary Docker configuration for
+each build's Harbor login. It copies only the node client's `proxies` section
+into that private configuration; host `auths`, credential helpers and other
+settings are not copied. Existing private login credentials are preserved and
+the temporary directory is still removed afterward. The original client path
+is captured before changing `DOCKER_CONFIG`; nodes without configured proxies
+keep their existing behavior. This does not change APP Compose, repository
+files, Jenkins parameter defaults or application runtime environment variables.

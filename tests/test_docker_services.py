@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from hashlib import sha256
 
@@ -6,6 +7,13 @@ import pytest
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
 from orchestrator.naming import external_namespace, managed_volume_name, template_volume_alias
 from orchestrator.templates import TemplateCatalog
+
+
+def runtime_compose(compose: dict) -> dict:
+    result = deepcopy(compose)
+    for service in result["services"].values():
+        service.pop("build", None)
+    return result
 
 
 class NotFound(Exception):
@@ -1069,7 +1077,7 @@ def test_generic_template_volumes_are_app_scoped_and_match_app_bound_template(ap
     physical_names: list[str] = []
 
     for appid in appids:
-        generic_deployment = adapter.deploy(appid, generic_compose)
+        generic_deployment = adapter.deploy(appid, runtime_compose(generic_compose))
         service_name = generic_deployment.services[0].service_name
         physical_name = managed_volume_name(external_namespace(appid), alias)
         physical_names.append(physical_name)
@@ -1079,7 +1087,7 @@ def test_generic_template_volumes_are_app_scoped_and_match_app_bound_template(ap
 
         bound_compose = catalog.compose(["mongodb"], appid=appid)
         assert bound_compose["volumes"] == {physical_name: {"name": physical_name}}
-        bound_deployment = adapter.deploy(appid, bound_compose)
+        bound_deployment = adapter.deploy(appid, runtime_compose(bound_compose))
         assert bound_deployment.services[0].service_name == service_name
         assert bound_deployment.services[0].action == "updated"
         assert docker.services.items[service_name].update_calls[0]["mounts"] == [f"{physical_name}:/data/db"]
@@ -1106,7 +1114,7 @@ def test_canonical_template_refuses_to_replace_existing_historical_volume(
     )
 
     with pytest.raises(DockerServiceError, match="refusing to rebind historical data automatically"):
-        DockerSwarmAdapter(docker_client=docker).deploy("demo", compose)
+        DockerSwarmAdapter(docker_client=docker).deploy("demo", runtime_compose(compose))
 
     assert service.update_calls == []
     assert service.attrs["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"][0]["Source"] == historical_name
@@ -1140,24 +1148,47 @@ def test_template_service_and_volume_names_are_not_prefixed_twice(appid: str) ->
     docker = FakeDocker()
 
     adapter = DockerSwarmAdapter(docker_client=docker)
-    deployment = adapter.deploy(appid, compose)
+    deployment = adapter.deploy(appid, runtime_compose(compose))
 
     assert deployment.services[0].service_name == service_name
     assert docker.services.create_calls[0][1]["mounts"] == [f"{volume_name}:/data/db"]
     assert docker.services.create_calls[0][1]["labels"]["io.docker-jenkins-orchestrator.appid"] == appid
-    repeated = adapter.deploy(appid, compose)
+    repeated = adapter.deploy(appid, runtime_compose(compose))
     assert repeated.services[0].service_name == service_name
     assert repeated.services[0].action == "updated"
     assert docker.services.items[service_name].update_calls[0]["mounts"] == [f"{volume_name}:/data/db"]
 
 
-def test_long_canonical_template_preserves_legacy_swarm_service_name() -> None:
+def test_long_canonical_template_preserves_legacy_swarm_service_name(tmp_path) -> None:
+    from io import BytesIO
+    from orchestrator.workspaces import WorkspaceStore
+
     appid = "a" * 64
     compose = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml").compose(["go"], appid=appid)
+    workspace = WorkspaceStore(tmp_path)
+    workspace.upload(appid, [("main.go", BytesIO(b"package main"))])
+    workspace.snapshot(appid, "a" * 32)
+    compose = workspace.resolve_compose(appid, "a" * 32, compose)
     adapter = DockerSwarmAdapter(docker_client=FakeDocker())
     legacy_digest = sha256(f"{appid}:{appid}-go".encode()).hexdigest()[:10]
     expected_legacy_name = f"{legacy_digest}-{appid[:51]}"
 
-    deployment = adapter.deploy(appid, compose)
+    deployment = adapter.deploy(appid, runtime_compose(compose))
 
     assert deployment.services[0].service_name == expected_legacy_name
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_workspace_mounts_use_storage_node_unless_shared(shared):
+    docker = FakeDocker()
+    docker.info = lambda: {"Swarm": {"NodeID": "storage-node"}}
+    adapter = DockerSwarmAdapter(docker_client=docker, workspace_host_root=Path("/srv/workspaces"), workspace_shared_storage=shared)
+    adapter.deploy("demo", {"services": {"web": {"image": "nginx", "volumes": ["/srv/workspaces/demo/snapshots/build/files:/workspace"]}}})
+    kwargs = docker.services.create_calls[0][1]
+    assert kwargs.get("constraints") == (None if shared else ["node.id==storage-node"])
+
+
+def test_remote_workspace_mounts_require_shared_storage():
+    adapter = DockerSwarmAdapter(base_url="tcp://remote:2376", docker_client=FakeDocker(), workspace_host_root=Path("/srv/workspaces"))
+    with pytest.raises(DockerServiceError, match="require configured shared"):
+        adapter.deploy("demo", {"services": {"web": {"image": "nginx", "volumes": ["/srv/workspaces/demo/files:/workspace"]}}})

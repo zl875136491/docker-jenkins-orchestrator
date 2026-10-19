@@ -5,6 +5,7 @@
   const REFRESH_TOKEN_KEY = "orchestrator.control.refresh-token";
   const APP_KEY = "orchestrator.control.appid";
   const APP_NAME_KEY = "orchestrator.control.appname";
+  const DISPLAY_TIME_ZONE = "Asia/Shanghai";
   const TOAST_TIMEOUT_MS = 5000;
   const BUILD_POLL_INTERVAL_MS = 5000;
   const BUILD_POLL_MAX_RETRY_MS = 30000;
@@ -38,6 +39,18 @@
     appContextVersion: 0,
     appOperation: null,
     syncRefreshPendingAppid: "",
+    workspaceAppid: "",
+    workspaceFiles: [],
+    workspaceTotalBytes: 0,
+    workspaceLoaded: false,
+    workspacePage: 1,
+    workspacePageSize: 20,
+    workspaceOperation: null,
+    resourceBuildReport: null,
+    resourceBuildController: null,
+    resourceBuildTimer: null,
+    resourceBuildGeneration: 0,
+    resourceBuildBusy: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -126,6 +139,7 @@
     status.textContent = online ? "已连接" : "未连接";
     status.className = `status-dot ${online ? "online" : "offline"}`;
     $("sessionDetail").textContent = detail || (online ? "JWT 已保存到当前浏览器。" : "请输入 client 凭据获取 JWT。");
+    renderWorkspace();
   }
 
   function setCurrentApp(name = "") {
@@ -198,6 +212,7 @@
       if (active) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
+    activateWorkspace();
   }
 
   function bindNavigation() {
@@ -233,7 +248,11 @@
   function formatDate(value) {
     if (!value) return "--";
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { timeZone: DISPLAY_TIME_ZONE, hourCycle: "h23" });
+  }
+
+  function formatTime(value = new Date()) {
+    return value.toLocaleTimeString("zh-CN", { timeZone: DISPLAY_TIME_ZONE, hourCycle: "h23" });
   }
 
   function parsedJson(text, label, allowEmpty = false) {
@@ -260,6 +279,7 @@
   }
 
   function resetAppView() {
+    resetWorkspaceView();
     stopBuildCreation();
     stopBuildPolling("应用已切换，自动查询已停止。", "muted");
     resetBuildView();
@@ -326,7 +346,7 @@
         control.disabled = true;
       }
     });
-    ["openAppContextModal", "openConnectionModal"].forEach((id) => {
+    ["openAppContextModal", "openConnectionModal", "workspaceSelectAppButton"].forEach((id) => {
       const link = $(id);
       if (!link) return;
       operation.links.push([link, link.getAttribute("aria-disabled"), link.getAttribute("tabindex")]);
@@ -336,6 +356,7 @@
     $("appForm").setAttribute("aria-busy", "true");
     $("composeSourcePanel").setAttribute("aria-busy", "true");
     $("syncAppButton").textContent = label;
+    renderWorkspace();
     return operation;
   }
 
@@ -354,6 +375,8 @@
     $("syncAppButton").textContent = "同步仓库 Compose";
     state.appOperation = null;
     updateBuildSubmitState();
+    renderWorkspace();
+    activateWorkspace();
   }
 
   async function withAppOperation(label, appid, action) {
@@ -377,6 +400,7 @@
     $("appId").value = value;
     const selector = $("contextAppSelect");
     if (selector) selector.value = value;
+    renderWorkspace();
     return value;
   }
 
@@ -405,6 +429,212 @@
       state.syncRefreshPendingAppid = "";
       setSyncStatus("仓库同步成功，并已重新读取应用配置和来源。未触发构建，确认后请显式提交构建。", "success");
     }
+    renderWorkspace();
+  }
+
+  function formatBytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  }
+
+  function workspaceEntries() {
+    const files = Array.from($("workspaceFiles").files);
+    const directory = Array.from($("workspaceDirectory").files);
+    return (files.length ? files : directory).map((file) => ({
+      file,
+      path: file.webkitRelativePath ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name,
+    }));
+  }
+
+  function workspaceRelativePath(value, allowRoot = false) {
+    const parts = value.split("/").filter((part) => part && part !== ".");
+    if (value.length > 1024 || /^[\/~]/.test(value) || /[\\:\u0000-\u001f]/.test(value)
+      || parts.some((part) => part === ".." || part === ".git") || (!allowRoot && !parts.length)) {
+      throw new Error("文件路径必须是相对 POSIX 路径，禁止 ..、.git、绝对路径、反斜杠和控制字符");
+    }
+    return parts.join("/");
+  }
+
+  function setWorkspaceStatus(message, tone = "") {
+    $("workspaceStatus").textContent = message;
+    $("workspaceStatus").className = `operation-status small ${tone ? `activity-${tone}` : "muted"}`;
+  }
+
+  function renderWorkspace() {
+    const loaded = state.workspaceLoaded && state.workspaceAppid === state.appid;
+    const files = loaded ? state.workspaceFiles : [];
+    const busy = Boolean(state.workspaceOperation);
+    const disabled = busy || Boolean(state.appOperation) || !state.token || !state.appid;
+    const entries = workspaceEntries();
+    const search = $("workspaceSearch").value.trim().toLowerCase();
+    const filtered = files.filter((file) => file.path.toLowerCase().includes(search));
+    const pages = Math.max(1, Math.ceil(filtered.length / state.workspacePageSize));
+    state.workspacePage = Math.max(1, Math.min(state.workspacePage, pages));
+    $("workspaceAppId").textContent = state.appid || "未设置";
+    $("workspaceSelection").textContent = entries.length
+      ? `已选择 ${entries.length} 个文件，共 ${formatBytes(entries.reduce((total, entry) => total + entry.file.size, 0))}`
+      : "尚未选择文件";
+    ["workspaceFiles", "workspaceDirectory", "workspaceUploadPath", "workspaceRefreshButton"].forEach((id) => {
+      $(id).disabled = disabled;
+    });
+    $("workspaceUploadButton").disabled = disabled || !entries.length;
+    $("workspaceSearch").disabled = busy || !loaded;
+    $("workspacePageSize").disabled = busy || !loaded;
+    $("workspacePreviousButton").disabled = disabled || !loaded || state.workspacePage <= 1;
+    $("workspaceNextButton").disabled = disabled || !loaded || state.workspacePage >= pages;
+    $("workspacePageLabel").textContent = `第 ${state.workspacePage} / ${pages} 页`;
+    $("workspaceSummary").textContent = loaded
+      ? `共 ${files.length} 个文件 / ${formatBytes(state.workspaceTotalBytes)}${search ? `，匹配 ${filtered.length} 个` : ""}`
+      : "文件列表尚未加载";
+    $("workspaceFileList").setAttribute("aria-busy", String(busy));
+    $("workspaceUploadForm").setAttribute("aria-busy", String(busy));
+    const rows = $("workspaceFileRows");
+    rows.replaceChildren();
+    const offset = (state.workspacePage - 1) * state.workspacePageSize;
+    const appid = state.appid;
+    filtered.slice(offset, offset + state.workspacePageSize).forEach((file) => {
+      const row = document.createElement("tr");
+      const path = document.createElement("td");
+      path.textContent = file.path;
+      const size = document.createElement("td");
+      size.textContent = formatBytes(file.size);
+      size.title = `${file.size} bytes`;
+      const hash = document.createElement("td");
+      hash.textContent = file.sha256 ? `${file.sha256.slice(0, 12)}…` : "--";
+      hash.title = file.sha256 || "";
+      const actions = document.createElement("td");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "button button-quiet button-danger";
+      remove.textContent = "删除";
+      remove.setAttribute("aria-label", `删除 ${file.path}`);
+      remove.disabled = disabled;
+      remove.addEventListener("click", () => withFeedback(() => deleteWorkspaceFile(file.path, appid), null));
+      actions.appendChild(remove);
+      row.append(path, size, hash, actions);
+      rows.appendChild(row);
+    });
+    $("workspaceEmpty").hidden = filtered.length > 0;
+    $("workspaceEmpty").textContent = !state.token ? "请先连接控制端。"
+      : !state.appid ? "请选择已注册应用。"
+        : !loaded ? (busy ? "正在处理文件，请稍候…" : "请刷新文件列表。")
+          : files.length ? "没有匹配的文件。" : "Workspace 为空，请上传文件后再创建构建。";
+  }
+
+  function resetWorkspaceView(message = "应用上下文已重置，请刷新文件列表或上传文件。") {
+    state.workspaceOperation?.controller.abort();
+    state.workspaceOperation = null;
+    state.workspaceAppid = "";
+    state.workspaceFiles = [];
+    state.workspaceTotalBytes = 0;
+    state.workspaceLoaded = false;
+    state.workspacePage = 1;
+    ["workspaceFiles", "workspaceDirectory", "workspaceUploadPath", "workspaceSearch"].forEach((id) => { $(id).value = ""; });
+    setWorkspaceStatus(message);
+    renderWorkspace();
+  }
+
+  function workspaceContextMatches(operation) {
+    return state.workspaceOperation === operation && state.appid === operation.appid
+      && Boolean(state.token) && !operation.controller.signal.aborted;
+  }
+
+  async function withWorkspaceOperation(label, action) {
+    ensureAppIdle();
+    if (!state.token) throw new Error("请先连接控制端");
+    if (!state.appid) throw new Error("请先选择已注册应用");
+    if (state.workspaceOperation) throw new Error("文件操作进行中，请等待完成");
+    const operation = { appid: state.appid, controller: new AbortController(), changed: false };
+    state.workspaceOperation = operation;
+    setWorkspaceStatus(label);
+    renderWorkspace();
+    try {
+      return await action(operation);
+    } catch (error) {
+      if (!workspaceContextMatches(operation) || error?.name === "AbortError") return null;
+      if (operation.changed) {
+        state.workspaceLoaded = false;
+        state.workspaceFiles = [];
+        state.workspaceTotalBytes = 0;
+      }
+      setWorkspaceStatus(`${operation.changed ? "文件变更已完成，但列表刷新失败" : "文件操作失败"}：${errorMessage(error)}。请刷新文件列表确认服务器上的文件状态。`, "error");
+      throw error;
+    } finally {
+      if (state.workspaceOperation === operation) {
+        state.workspaceOperation = null;
+        renderWorkspace();
+      }
+    }
+  }
+
+  async function readWorkspace(operation) {
+    const value = await request(`/api/v1/workspace/${encodeURIComponent(operation.appid)}`, { signal: operation.controller.signal });
+    if (!workspaceContextMatches(operation)) return null;
+    if (value?.appid !== operation.appid || !Array.isArray(value.files)) throw new Error("文件列表与当前应用不匹配");
+    state.workspaceAppid = operation.appid;
+    state.workspaceFiles = value.files;
+    state.workspaceTotalBytes = value.total_bytes;
+    state.workspaceLoaded = true;
+    renderWorkspace();
+    return value;
+  }
+
+  async function loadWorkspace() {
+    return withWorkspaceOperation("正在加载文件列表…", async (operation) => {
+      const value = await readWorkspace(operation);
+      if (!value) return null;
+      setWorkspaceStatus(value.files.length ? "文件列表已刷新。文件全部准备好后，请显式创建新的构建。" : "Workspace 为空：请先上传源码和配置，避免构建时报 Workspace mount source is empty。", value.files.length ? "success" : "");
+      return value;
+    });
+  }
+
+  function activateWorkspace() {
+    if (state.activeSection !== "workspaceSection" || !state.token || !state.appid || state.appOperation || state.workspaceOperation) return;
+    if (state.workspaceLoaded && state.workspaceAppid === state.appid) return;
+    withFeedback(loadWorkspace, null);
+  }
+
+  async function uploadWorkspace() {
+    const entries = workspaceEntries();
+    if (!entries.length) throw new Error("请先选择要上传的文件或目录");
+    const prefix = workspaceRelativePath($("workspaceUploadPath").value.trim(), true);
+    const form = new FormData();
+    const paths = new Set();
+    if (prefix) form.append("path", prefix);
+    entries.forEach((entry) => {
+      const path = workspaceRelativePath(entry.path);
+      const target = workspaceRelativePath(prefix ? `${prefix}/${path}` : path);
+      if (paths.has(target)) throw new Error(`存在重复文件路径：${target}`);
+      paths.add(target);
+      form.append("files", entry.file, path);
+    });
+    return withWorkspaceOperation(`正在上传 ${entries.length} 个文件，请稍候…`, async (operation) => {
+      await request(`/api/v1/workspace/${encodeURIComponent(operation.appid)}`, { method: "POST", body: form, signal: operation.controller.signal });
+      if (!workspaceContextMatches(operation)) return null;
+      operation.changed = true;
+      $("workspaceFiles").value = "";
+      $("workspaceDirectory").value = "";
+      const value = await readWorkspace(operation);
+      if (!value) return null;
+      setWorkspaceStatus(`已上传 ${entries.length} 个文件，列表已刷新。补全文件后请创建新的构建；此前的失败构建和告警不会因此自动变为成功。`, "success");
+      return value;
+    });
+  }
+
+  async function deleteWorkspaceFile(path, appid) {
+    if (appid !== state.appid) return null;
+    if (!window.confirm(`删除应用 ${appid} 的暂存文件 ${path}？\n\n仅删除此文件，不会修改已有构建快照或运行实例。删除后如需发布变更，请创建新的构建。`)) return null;
+    return withWorkspaceOperation(`正在删除 ${path}…`, async (operation) => {
+      await request(`/api/v1/workspace/${encodeURIComponent(appid)}?${new URLSearchParams({ path })}`, { method: "DELETE", signal: operation.controller.signal });
+      if (!workspaceContextMatches(operation)) return null;
+      operation.changed = true;
+      const value = await readWorkspace(operation);
+      if (!value) return null;
+      setWorkspaceStatus(`已删除 ${path}，列表已刷新。${value.files.length ? "已有构建快照和运行实例不受影响。" : "Workspace 已为空，请上传文件后再创建构建。"}`, "success");
+      return value;
+    });
   }
 
   async function loadAppChoices() {
@@ -563,7 +793,7 @@
       state.buildPollFailures = 0;
       applyBuild(value, expectedAppid);
       pretty("buildOutput", value);
-      const refreshedAt = new Date().toLocaleTimeString();
+      const refreshedAt = formatTime();
       state.buildLastRefreshedAt = refreshedAt;
       if (!$("historyDetailPanel").hidden && $("historyDetailTitle").textContent === `任务详情：${buildId}`) {
         pretty("historyDetailBuild", value);
@@ -602,7 +832,7 @@
 
   function startBuildPolling(build, { accepted = false, inspect = false, appid = $("appId").value.trim() || state.appid } = {}) {
     const generation = stopBuildPolling("准备查询构建状态...");
-    if (!accepted) state.buildLastRefreshedAt = new Date().toLocaleTimeString();
+    if (!accepted) state.buildLastRefreshedAt = formatTime();
     if (isTerminalBuild(build)) {
       setBuildPollStatus(`最近刷新：${state.buildLastRefreshedAt}；状态 ${build.status} 为终态，自动查询已停止。${build.error ? ` 原因：${build.error}` : ""}`, build.status === "succeeded" ? "success" : "error");
       return;
@@ -683,6 +913,8 @@
           stopHistoryPolling();
           stopBuildCreation();
           stopHistoryDetailLoading();
+          resetWorkspaceView("访问令牌已失效，请重新连接后刷新文件列表。");
+          resetBuildResources();
           markBuildStale();
           stopBuildPolling("访问令牌失效，自动查询已停止，请重新连接。", "error");
           setSession(false, "访问令牌已失效，请重新连接。");
@@ -721,6 +953,7 @@
     localStorage.setItem(TOKEN_KEY, state.token);
     if (state.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
     setSession(true, `访问令牌有效 ${payload.expires_in || "未知"} 秒`);
+    activateWorkspace();
     closeModal("connectionModal");
     await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ resetPage: true, silent: true })]);
     updateHistoryPolling();
@@ -1235,6 +1468,8 @@
     state.historyDetailOperation = operation;
     state.buildId = buildId;
     $("buildId").value = buildId;
+    resetBuildResources();
+    $("buildResourcesId").value = buildId;
     $("historyDetailPanel").hidden = false;
     $("historyDetailTitle").textContent = `任务详情：${buildId}`;
     $("historyDetailMeta").textContent = `App ID：${selectedAppid}`;
@@ -1285,6 +1520,64 @@
     }
   }
 
+  function resetBuildResources() {
+    state.resourceBuildGeneration += 1;
+    if (state.resourceBuildTimer) clearTimeout(state.resourceBuildTimer);
+    if (state.resourceBuildController) state.resourceBuildController.abort();
+    state.resourceBuildTimer = null;
+    state.resourceBuildController = null;
+    state.resourceBuildReport = null;
+    state.resourceBuildBusy = false;
+    $("cleanupBuildResourcesButton").disabled = true;
+    $("buildResourcesOutput").textContent = "{}";
+    $("buildResourcesStatus").textContent = "请查询当前 Build 的资源；清理会停止服务并删除私有数据。";
+  }
+
+  async function loadBuildResources(cleanup = false) {
+    const buildId = $("buildResourcesId").value.trim();
+    if (!/^[a-f0-9]{32}$/.test(buildId)) throw new Error("请输入有效的 32 位 Build ID");
+    if (state.resourceBuildBusy) return;
+    if (cleanup) {
+      const report = state.resourceBuildReport;
+      if (!report || report.build_id !== buildId || !report.cleanup_allowed) throw new Error("请先查询可清理的构建资源");
+      if (!window.confirm(`确认清理构建 ${buildId}？这将停止该构建服务，并永久删除其私有数据、挂载存储及镜像引用。`)) return;
+    }
+    if (state.resourceBuildTimer) clearTimeout(state.resourceBuildTimer);
+    const generation = state.resourceBuildGeneration;
+    const controller = new AbortController();
+    state.resourceBuildController = controller;
+    state.resourceBuildBusy = true;
+    $("cleanupBuildResourcesButton").disabled = true;
+    $("buildResourcesStatus").textContent = cleanup ? "正在提交构建清理..." : "正在查询构建资源...";
+    try {
+      const report = await request(`/api/v1/jenkins/build_resources/${encodeURIComponent(buildId)}`, {
+        method: cleanup ? "DELETE" : "GET", signal: controller.signal,
+      });
+      if (generation !== state.resourceBuildGeneration || $("buildResourcesId").value.trim() !== buildId) return;
+      if (report.build_id !== buildId) throw new Error("接口返回的构建资源与查询 Build ID 不一致");
+      state.resourceBuildReport = report;
+      $("buildResourcesOutput").textContent = JSON.stringify(report, null, 2);
+      $("buildResourcesStatus").textContent = `清理状态：${report.cleanup_status}；镜像存储：${report.registry_storage_status}；刷新：${formatTime()}${report.last_error ? `；${report.last_error}` : ""}${report.cleanup_reason ? `；${report.cleanup_reason}` : ""}`;
+      $("cleanupBuildResourcesButton").disabled = !report.cleanup_allowed;
+      if (["queued", "running"].includes(report.cleanup_status)) {
+        state.resourceBuildTimer = setTimeout(() => {
+          loadBuildResources().catch((error) => {
+            if (generation === state.resourceBuildGeneration) $("buildResourcesStatus").textContent = `清理状态查询失败，请手动刷新：${error.message}`;
+          });
+        }, BUILD_POLL_INTERVAL_MS);
+      }
+    } catch (error) {
+      if (generation !== state.resourceBuildGeneration || error.name === "AbortError") return;
+      $("buildResourcesStatus").textContent = `操作失败：${error.message}。请重新查询；清理请求可能已经受理。`;
+      throw error;
+    } finally {
+      if (generation === state.resourceBuildGeneration) {
+        state.resourceBuildBusy = false;
+        state.resourceBuildController = null;
+      }
+    }
+  }
+
   function updateHistoryPolling() {
     stopHistoryPolling();
     if (!state.token || !$("historyAutoRefresh").checked) return;
@@ -1310,7 +1603,7 @@
     const value = await request(`/api/v1/jenkins/${resourcePath}/${encodeURIComponent(appid)}`);
     if (!sameAppContext(appid, version)) return null;
     $("resourceTitle").textContent = labels[resource] || resource;
-    $("resourceTimestamp").textContent = new Date().toLocaleTimeString();
+    $("resourceTimestamp").textContent = formatTime();
     pretty("resourceOutput", value);
     if (resource === "services" && Array.isArray(value)) $("metricServices").textContent = String(value.length);
     if (resource === "access") renderServiceAccess(value);
@@ -1644,6 +1937,12 @@
   }
 
   function bindEvents() {
+    $("buildResourcesForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      withFeedback(() => loadBuildResources(), null);
+    });
+    $("buildResourcesId").addEventListener("input", resetBuildResources);
+    $("cleanupBuildResourcesButton").addEventListener("click", () => withFeedback(() => loadBuildResources(true), null));
     $("connectForm").addEventListener("submit", (event) => {
       event.preventDefault();
       withFeedback(connect, null);
@@ -1657,6 +1956,8 @@
       stopHistoryPolling();
       stopBuildCreation();
       stopHistoryDetailLoading();
+      resetWorkspaceView("已退出登录，请重新连接后查看文件。");
+      resetBuildResources();
       markBuildStale();
       stopBuildPolling("已退出登录，自动查询已停止。", "muted");
       setSession(false, "已清除当前浏览器中的访问令牌。");
@@ -1667,14 +1968,16 @@
       $("metricHealth").textContent = value.status || "ok";
       return value;
     }, null));
-    ["openAppContextModal", "openConnectionModal"].forEach((id) => {
+    ["openAppContextModal", "openConnectionModal", "workspaceSelectAppButton"].forEach((id) => {
       $(id).addEventListener("click", (event) => {
         if (state.appOperation) event.preventDefault();
       });
     });
-    $("openAppContextModal").addEventListener("click", () => {
-      if (state.appOperation) return;
-      if (state.token) withFeedback(() => loadAppChoices(), null);
+    ["openAppContextModal", "workspaceSelectAppButton"].forEach((id) => {
+      $(id).addEventListener("click", () => {
+        if (state.appOperation) return;
+        if (state.token) withFeedback(() => loadAppChoices(), null);
+      });
     });
     $("refreshContextAppsButton").addEventListener("click", () => withFeedback(loadAppChoices, null));
     $("loadContextButton").addEventListener("click", () => {
@@ -1701,6 +2004,26 @@
     });
     $("environment").addEventListener("input", () => { state.environmentDirty = true; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
+    $("workspaceUploadForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      withFeedback(uploadWorkspace, null);
+    });
+    $("workspaceRefreshButton").addEventListener("click", () => withFeedback(loadWorkspace, null));
+    $("workspaceBuildButton").addEventListener("click", () => { window.location.hash = "buildSection"; });
+    ["workspaceFiles", "workspaceDirectory"].forEach((id) => {
+      $(id).addEventListener("change", () => {
+        if ($(id).files.length) $(id === "workspaceFiles" ? "workspaceDirectory" : "workspaceFiles").value = "";
+        renderWorkspace();
+      });
+    });
+    $("workspaceSearch").addEventListener("input", () => { state.workspacePage = 1; renderWorkspace(); });
+    $("workspacePageSize").addEventListener("change", () => {
+      state.workspacePageSize = Number($("workspacePageSize").value);
+      state.workspacePage = 1;
+      renderWorkspace();
+    });
+    $("workspacePreviousButton").addEventListener("click", () => { state.workspacePage -= 1; renderWorkspace(); });
+    $("workspaceNextButton").addEventListener("click", () => { state.workspacePage += 1; renderWorkspace(); });
     $("getAppButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
     $("patchAppButton").addEventListener("click", () => withFeedback(patchApp, "appOutput"));
     $("syncAppButton").addEventListener("click", () => {
@@ -1804,9 +2127,11 @@
   setSession(Boolean(state.token));
   setCurrentApp(state.appid ? state.appName : "");
   window.addEventListener("pagehide", () => {
+    resetBuildResources();
     stopHistoryPolling();
     stopBuildCreation();
     stopHistoryDetailLoading();
+    resetWorkspaceView("页面已关闭，文件操作结果请重新打开后刷新确认。");
     stopBuildPolling("页面已关闭，自动查询已停止。", "muted");
   });
   restoreSession();

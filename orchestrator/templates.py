@@ -11,6 +11,11 @@ from typing import Any
 
 import yaml
 
+from orchestrator.compose_contract import (
+    ComposeBuildContractError,
+    normalize_local_build,
+    validate_local_build_compose,
+)
 from orchestrator.naming import (
     NamingError,
     bounded_resource_name,
@@ -155,7 +160,10 @@ class TemplateCatalog:
         for name in selected:
             component = self.components[name]
             service_name = service_names[name]
-            service: dict[str, Any] = {"image": component["images"][0]}
+            service: dict[str, Any] = {
+                "build": deepcopy(component["build"]),
+                "image": component["images"][0],
+            }
 
             ports = component["ports"]
             service["expose"] = [str(port) for port in ports]
@@ -285,6 +293,12 @@ class TemplateCatalog:
                 return "按项目实际运行所需声明服务，不要为了凑模板增加无关服务。"
             if path.endswith(".image"):
                 return "固定版本镜像；确认架构、运行时版本和 Harbor 交付镜像是否匹配。"
+            if path.endswith(".build"):
+                return "本地源码构建配置；每个服务都必须提供独立 build.context 和 build.dockerfile。"
+            if path.endswith(".build.context"):
+                return "该服务的相对构建上下文；必须位于仓库或上传 workspace 根目录内。"
+            if path.endswith(".build.dockerfile"):
+                return "该服务构建上下文内必须真实存在的 Dockerfile；不能省略或指向上下文外路径。"
             if path.endswith(".ports"):
                 return "外部端口申请；系统部署时会统一检查并重新分配 published 端口，YAML 中的宿主机端口不保证原值交付，容器 target 端口必须准确。"
             if ".ports[" in path:
@@ -307,7 +321,7 @@ class TemplateCatalog:
             if path.endswith(".healthcheck") or ".healthcheck." in path:
                 return "可执行健康检查；应验证真实服务协议和就绪状态，而不只是进程存在。"
             if path.endswith(".working_dir"):
-                return "容器内工作目录；启动命令和相对路径以此目录为基准。"
+                return "容器内工作目录；/workspace 模板会挂载 APP 上传文件的构建快照，必须先注册 APP 并通过 workspace 接口上传源码。启动命令和相对路径以此目录为基准。"
             if path.endswith(".command") or ".command[" in path:
                 return "启动命令配置；必须与镜像入口点、项目启动参数和监听端口一致。"
             if path.endswith(".restart"):
@@ -473,6 +487,10 @@ class TemplateCatalog:
                     raise TemplateError(
                         f"Service {name} requires {dependency} to be healthy, but it has no healthcheck"
                     )
+        try:
+            validate_local_build_compose(document)
+        except ComposeBuildContractError as exc:
+            raise TemplateError(str(exc)) from exc
 
     def _validate_component(self, name: str, component: Any) -> dict[str, Any]:
         if not isinstance(component, Mapping):
@@ -483,6 +501,12 @@ class TemplateCatalog:
             raise TemplateError(f"Component {name} must define at least one image")
         if any(image.endswith(":latest") for image in images):
             raise TemplateError(f"Component {name} must not use an unpinned latest image")
+
+        raw_build = component.get("build", {"context": ".", "dockerfile": "Dockerfile"})
+        try:
+            build = normalize_local_build(raw_build, name)
+        except ComposeBuildContractError as exc:
+            raise TemplateError(str(exc)) from exc
 
         raw_ports = component.get("ports")
         if raw_ports is None:
@@ -537,6 +561,7 @@ class TemplateCatalog:
 
         return {
             "images": list(images),
+            "build": build,
             # Retain the original single-port metadata for callers that read
             # catalog entries directly; multi-port services use the first port.
             "port": ports[0],
@@ -744,6 +769,8 @@ class TemplateCatalog:
     ) -> tuple[list[str], dict[str, dict[str, Any]]]:
         rendered: list[str] = []
         declared: dict[str, dict[str, Any]] = {}
+        if component["working_dir"] == "/workspace" and not any(volume["target"] == "/workspace" for volume in component["volumes"]):
+            rendered.append(".:/workspace")
         for volume in component["volumes"]:
             try:
                 alias = template_volume_alias(component_name, volume["source"])

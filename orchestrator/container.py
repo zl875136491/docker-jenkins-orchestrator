@@ -10,6 +10,8 @@ from orchestrator.secrets import SecretBox
 from orchestrator.services import ApplicationService, BuildService, TechStackService
 from orchestrator.tasks import InMemoryTaskDispatcher, TaskDispatcher
 from orchestrator.templates import TemplateCatalog
+from orchestrator.workspaces import WorkspaceStore
+from orchestrator.build_resources import BuildResourceService
 
 
 @dataclass
@@ -22,6 +24,8 @@ class ApplicationContainer:
     dispatcher: TaskDispatcher
     catalog: TemplateCatalog
     tech_stacks: TechStackService
+    workspace: WorkspaceStore
+    build_resources: BuildResourceService
 
     def close(self) -> None:
         self.repository.close()
@@ -49,7 +53,8 @@ def create_container(
             dispatcher = InMemoryTaskDispatcher()
     if catalog is None:
         catalog = TemplateCatalog(Path(__file__).parents[1] / "templates" / "catalog.yaml")
-    applications = ApplicationService(repository, secret_box)
+    workspace = WorkspaceStore.from_settings(settings)
+    applications = ApplicationService(repository, secret_box, workspace=workspace)
     if settings.gitlab_url and settings.gitlab_token:
         applications.gitlab = GitLabHttpAdapter.from_settings(settings)
     tech_stacks = TechStackService(repository, catalog)
@@ -62,4 +67,12 @@ def create_container(
         dispatcher=dispatcher,
         catalog=catalog,
         tech_stacks=tech_stacks,
+        workspace=workspace,
+        build_resources=BuildResourceService(repository, dispatcher, workspace, jenkins_factory=lambda: _jenkins(settings)),
     )
+
+
+def _jenkins(settings: Settings):
+    from orchestrator.jenkins import JenkinsHttpAdapter
+
+    return JenkinsHttpAdapter.from_settings(settings)

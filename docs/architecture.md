@@ -97,7 +97,7 @@ API 启用全开放跨域：允许任意 Origin、方法和请求头；不启用
 
 控制台的“运行资源”页面提供“访问入口”查询按钮，会将每个服务的端口和 URL 渲染为表格；没有入口时直接显示原因和 Compose 修复示例，原始 JSON 仍保留在下方供排障。
 
-创建应用时可以暂不填写 `compose`。配置 GitLab 后，系统先把分支解析为固定 commit SHA，再使用运行镜像内安装的 Git 对该仓库执行完整克隆（不做浅克隆/部分克隆），检出该 SHA，并在本地工作树中按 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml` 顺序查找根目录文件；根目录没有候选时才接受唯一的嵌套候选。仓库树枚举与文件读取完全基于克隆结果，不依赖 GitLab tree API 分页。也可以调用 `POST /api/v1/jenkins/app_sync/{app_id}` 重新拉取该分支的最新 commit 并更新 `app_info.compose`。提交构建前仍必须确保 Compose 包含 `services` 且适合目标环境；仓库也继续作为 Jenkins checkout/build context 使用。也可以先调用模板组合 API 生成 Compose，再保存到应用。源 Compose 可以包含 Jenkins 需要的 `build` context 或 `env_file`；Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。
+创建应用时可以暂不填写 `compose`。配置 GitLab 后，系统先把分支解析为固定 commit SHA，再使用运行镜像内安装的 Git 对该仓库执行完整克隆（不做浅克隆/部分克隆），检出该 SHA，并在本地工作树中按 `compose.yaml`、`compose.yml`、`docker-compose.yml`、`docker-compose.yaml` 顺序查找根目录文件；根目录没有候选时才接受唯一的嵌套候选。仓库树枚举与文件读取完全基于克隆结果，不依赖 GitLab tree API 分页。自动发现的 Compose 必须让每个服务声明相对 `build.context` 和 `build.dockerfile`，且 Dockerfile 位于对应上下文内；image-only 服务不再被接受。也可以调用 `POST /api/v1/jenkins/app_sync/{app_id}` 重新拉取该分支的最新 commit 并更新 `app_info.compose`。提交构建前仍必须确保 Compose 包含 `services` 且适合目标环境；仓库也继续作为 Jenkins checkout/build context 使用。也可以先调用模板组合 API 生成 Compose，再保存到应用。Jenkins 完成源码构建和变量展开后，`orchestrator-result.json` 中的最终 Compose 必须符合 Docker Swarm 适配器支持范围。
 
 ## 5. 构建状态机
 
@@ -111,7 +111,7 @@ queued -> validating -> triggering -> building -> deploying -> succeeded
 
 Celery 执行步骤：
 
-1. 读取应用和构建记录，校验 conductor 提供的 Compose 服务结构；仓库内不存在可交付的 Compose 时，构建请求必须在入口处失败；
+1. 读取应用和构建记录，校验 conductor 提供的 Compose 服务结构、本地 build context 和每个 Dockerfile 声明；仓库内不存在可交付的 Compose 时，构建请求必须在入口处失败；
 2. 可选调用 GitLab API 验证仓库及 Git 引用；解析成功时将提交 SHA 写入 `build_jobs`，Jenkins 使用该 SHA 构建；
 3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose、环境变量和目标 Harbor 镜像仓库；
 4. 定时 Celery 任务轮询 Jenkins queue/build 状态；
@@ -132,7 +132,7 @@ Jenkins job 必须输出 `orchestrator-result.json`：
 }
 ```
 
-`images` 必须非空，最终 `compose.services` 必须非空且每个服务都包含镜像引用。产物缺失或格式无效时，worker 不部署未知镜像，任务失败并产生可查询告警。
+`images` 必须非空，最终 `compose.services` 必须非空且每个服务都包含镜像引用。源 Compose 的每个服务必须经过本地 Dockerfile 构建；产物缺失或格式无效时，worker 不部署未知镜像，任务失败并产生可查询告警。
 
 ## 6. 模板与基础镜像
 

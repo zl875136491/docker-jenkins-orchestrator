@@ -12,6 +12,9 @@ components:
       - python:3.11.11-slim-bookworm
       - python:3.12.8-slim-bookworm
       - python:3.13.1-slim-bookworm
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 8000
     publish_ports: true
     working_dir: /workspace
@@ -30,6 +33,9 @@ components:
       - golang:1.22.10-alpine3.20
       - golang:1.23.4-alpine3.20
       - golang:1.24.0-alpine3.21
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 8080
     publish_ports: true
     working_dir: /workspace
@@ -47,6 +53,9 @@ components:
       - eclipse-temurin:17.0.13_11-jre-jammy
       - eclipse-temurin:21.0.5_11-jre-jammy
       - eclipse-temurin:23.0.1_11-jre-jammy
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 8080
     publish_ports: true
     working_dir: /workspace
@@ -64,6 +73,9 @@ components:
       - gcc:12.4.0-bookworm
       - gcc:13.3.0-bookworm
       - gcc:14.2.0-bookworm
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 8080
     publish_ports: true
     working_dir: /workspace
@@ -81,6 +93,9 @@ components:
       - node:20.18.1-alpine3.20
       - node:22.11.0-alpine3.20
       - node:24.0.0-alpine3.21
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 3000
     publish_ports: true
     working_dir: /workspace
@@ -98,6 +113,9 @@ components:
       - node:20.18.1-alpine3.20
       - node:22.11.0-alpine3.20
       - node:24.0.0-alpine3.21
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 3000
     publish_ports: true
     working_dir: /workspace
@@ -115,6 +133,9 @@ components:
       - node:20.18.1-alpine3.20
       - node:22.11.0-alpine3.20
       - node:24.0.0-alpine3.21
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 3000
     publish_ports: true
     working_dir: /workspace
@@ -132,6 +153,9 @@ components:
       - nginx:1.26.3-alpine
       - nginx:1.27.4-alpine
       - nginx:1.28.0-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 80
     publish_ports: true
     restart: unless-stopped
@@ -152,6 +176,9 @@ components:
       - mongo:7.0.16-jammy
       - mongo:8.0.4-noble
       - mongo:8.0.5-noble
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 27017
     publish_ports: false
     restart: unless-stopped
@@ -179,6 +206,9 @@ components:
       - mysql:8.0.40
       - mysql:8.4.3
       - mysql:9.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 3306
     publish_ports: false
     restart: unless-stopped
@@ -207,6 +237,9 @@ components:
       - postgres:15.11-bookworm
       - postgres:16.7-bookworm
       - postgres:17.3-bookworm
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 5432
     publish_ports: false
     restart: unless-stopped
@@ -234,6 +267,9 @@ components:
       - redis:7.2.7-alpine3.20
       - redis:7.4.2-alpine3.21
       - redis:8.0.0-alpine3.21
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 6379
     publish_ports: false
     restart: unless-stopped
@@ -257,6 +293,9 @@ components:
       - minio/minio:RELEASE.2024-06-13T22-53-53Z
       - minio/minio:RELEASE.2024-10-13T13-34-11Z
       - minio/minio:RELEASE.2025-01-20T14-49-01Z
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports: [9000, 9001]
     publish_ports: true
     command: ["server", "/data", "--console-address", ":9001"]
@@ -284,6 +323,9 @@ components:
       - quay.io/coreos/etcd:v3.5.15
       - quay.io/coreos/etcd:v3.5.16
       - quay.io/coreos/etcd:v3.5.17
+    build:
+      context: .
+      dockerfile: Dockerfile
     port: 2379
     publish_ports: false
     restart: unless-stopped

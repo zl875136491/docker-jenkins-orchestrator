@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import re
 from typing import Any
@@ -16,6 +17,7 @@ from orchestrator.models import BuildCreate, BuildStatus, UserAppCreate, UserApp
 from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
 from orchestrator.config import Settings
+from tests.test_build_resources import FakeDocker as IsolatedFakeDocker
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "complex_projects"
@@ -93,6 +95,17 @@ class FakeJenkins:
 
     def trigger_build(self, request: JenkinsBuildRequest) -> JenkinsQueueItem:
         self.requests.append(request)
+        if request.build_id:
+            compose = deepcopy(self.artifact.compose)
+            images = []
+            for name, service in compose["services"].items():
+                image = f"{request.image_repository}:{request.build_id}-{name}"
+                service["image"] = image
+                images.append(image)
+            self.artifact = JenkinsResultArtifact(images=tuple(images), compose=compose, _payload={
+                "build_id": request.build_id, "images": images, "compose": compose,
+                "image_digests": {image: "sha256:" + "a" * 64 for image in images},
+            })
         return JenkinsQueueItem("https://jenkins.example/queue/item/1/", 1)
 
     def get_queue_item(self, queue_url: str) -> JenkinsQueueItem:
@@ -149,8 +162,20 @@ def test_searxng_test_settings_avoid_network_initialization() -> None:
 
 
 @pytest.mark.parametrize("project", PROJECTS)
-def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(project: str) -> None:
+def test_build_private_compose_delivers_each_project_through_the_generic_pipeline(project: str, tmp_path: Path) -> None:
     manifest, compose = load_project(project)
+    compose = deepcopy(compose)
+    for service_name, service in compose["services"].items():
+        mounts = []
+        for index, mount in enumerate(service.get("volumes", [])):
+            parts = mount.split(":")
+            if parts[0].startswith("/"):
+                alias = f"private-{service_name}-{index}"
+                compose.setdefault("volumes", {})[alias] = {}
+                parts[0] = alias
+            mounts.append(":".join(parts))
+        if "volumes" in service:
+            service["volumes"] = mounts
     DockerSwarmAdapter.validate_compose(compose)
     images = tuple(service["image"] for service in compose["services"].values())
     artifact = JenkinsResultArtifact(
@@ -164,9 +189,10 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
         task_dispatcher="memory",
         harbor_url="https://harbor.example",
         celery_poll_interval_seconds=1,
+        workspace_root=tmp_path / "workspace",
     )
     container = create_container(settings)
-    docker = FakeDocker()
+    docker = IsolatedFakeDocker()
     jenkins = FakeJenkins(artifact)
     runtime = WorkerRuntime(
         settings,
@@ -213,15 +239,20 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
 
 
 @pytest.mark.parametrize(
-    ("project", "compose"),
+    ("project", "compose", "failure_stage"),
     [
-        ("immich", None),
-        ("plane", {"services": {"web": {"image": "plane/web:source", "build": {"context": "."}}}}),
-        ("paperless-ngx", {"services": {"webserver": {"image": "paperless:test", "env_file": ["docker-compose.env"]}}}),
-        ("umami", {"services": {"umami": {"image": "umami:source", "init": True}}}),
+        ("immich", None, "submission"),
+        ("plane", {"services": {"web": {"image": "plane/web:source", "build": {"context": "."}}}}, "artifact"),
+        (
+            "paperless-ngx",
+            {"services": {"webserver": {"image": "paperless:test", "env_file": ["docker-compose.env"]}}},
+            "source",
+        ),
+        ("umami", {"services": {"umami": {"image": "umami:source", "init": True}}}, "source"),
         (
             "searxng",
             {"services": {"core": {"image": "searxng:source", "container_name": "searxng-core", "env_file": [".env"]}}},
+            "source",
         ),
         (
             "open-webui",
@@ -233,14 +264,18 @@ def test_user_role_compose_delivers_each_project_through_the_generic_pipeline(pr
                     }
                 }
             },
+            "artifact",
         ),
         (
             "linkwarden",
             {"services": {"linkwarden": {"image": "linkwarden:source", "env_file": [".env"], "volumes": ["./data:/data"]}}},
+            "source",
         ),
     ],
 )
-def test_unportable_project_shape_requires_user_role_adjustment(project: str, compose: dict[str, Any] | None) -> None:
+def test_unportable_project_shape_requires_user_role_adjustment(
+    project: str, compose: dict[str, Any] | None, failure_stage: str
+) -> None:
     settings = Settings(
         environment="test",
         storage_backend="memory",
@@ -258,15 +293,17 @@ def test_unportable_project_shape_requires_user_role_adjustment(project: str, co
             )
         )
         if compose is None:
+            assert failure_stage == "submission"
             with pytest.raises(BuildInputError, match="Compose document"):
                 container.builds.queue_build(f"{project}-raw", BuildCreate())
             assert container.repository.list_active_builds() == []
             assert getattr(container.dispatcher, "build_ids", []) == []
             return
 
-        # Source Compose may legitimately contain a build context or env_file;
-        # Jenkins has the repository/filesystem context needed to process it.
-        # The Swarm boundary is checked against the final artifact instead.
+        # Source build contexts are processed by Jenkins, but env_file must
+        # already be resolved into environment. Unsupported runtime fields
+        # fail source preflight before Jenkins; an unconsumed build field is
+        # still rejected at the final artifact boundary.
         build = container.builds.queue_build(f"{project}-raw", BuildCreate())
         artifact = JenkinsResultArtifact(
             images=("example/raw:failed",),
@@ -274,23 +311,36 @@ def test_unportable_project_shape_requires_user_role_adjustment(project: str, co
             _payload={"images": ["example/raw:failed"], "compose": compose},
         )
         docker = FakeDocker()
+        jenkins = FakeJenkins(artifact)
         runtime = WorkerRuntime(
             settings,
             repository=container.repository,
             build_service=container.builds,
             catalog=container.catalog,
-            jenkins=FakeJenkins(artifact),
+            jenkins=jenkins,
             docker_services=DockerSwarmAdapter(docker_client=docker),
             poll_scheduler=lambda *_: None,
         )
         started = runtime.start_build(build.build_id, task_id=f"start-{project}")
-        assert started["status"] == "building", container.repository.get_build(build.build_id).model_dump()
-        result = runtime.poll_build(build.build_id, attempt=0, task_id=f"poll-{project}")
+        if failure_stage == "artifact":
+            assert started == {"build_id": build.build_id, "status": "building"}
+            assert len(jenkins.requests) == 1
+            assert jenkins.requests[0].compose == compose
+            result = runtime.poll_build(build.build_id, attempt=0, task_id=f"poll-{project}")
+        else:
+            assert failure_stage == "source"
+            assert started == {"build_id": build.build_id, "status": "failed"}
+            assert jenkins.requests == []
+            result = started
         assert result == {"build_id": build.build_id, "status": "failed"}
         stored = container.repository.get_build(build.build_id)
         assert stored is not None and stored.error is not None
-        assert any(fragment in stored.error for fragment in ("unsupported", "env_file", "relative bind"))
+        assert stored.status is BuildStatus.FAILED
+        if failure_stage == "artifact":
+            assert "uses unsupported fields: build" in stored.error
+        assert any(fragment in stored.error for fragment in ("unsupported", "env_file", "relative bind", "Workspace mount source"))
         assert docker.networks.items == {}
+        assert docker.services.items == {}
         assert docker.services.create_calls == []
     finally:
         container.close()

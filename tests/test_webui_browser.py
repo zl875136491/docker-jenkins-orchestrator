@@ -10,8 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass
+from email.parser import BytesParser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +21,7 @@ import re
 import shutil
 from threading import Thread
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -65,6 +67,7 @@ class ApiCall:
     query: str
     raw_body: str | None
     body: Any
+    headers: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class MockApi:
 
     def __init__(self) -> None:
         self.apps = {name: app_record(name) for name in ("alpha", "beta")}
+        self.workspace_files: dict[str, dict[str, bytes]] = {}
         self.calls: list[ApiCall] = []
         self.overrides: dict[tuple[str, str], Reply | Callable[[ApiCall], Reply]] = {}
         self.paused: set[tuple[str, str]] = set()
@@ -90,13 +94,28 @@ class MockApi:
     def handle(self, route: Any) -> None:
         request = route.request
         url = urlsplit(request.url)
-        raw_body = request.post_data
+        raw_bytes = request.post_data_buffer or b""
+        raw_body = raw_bytes.decode("utf-8", errors="replace") or None
+        content_type = request.headers.get("content-type", "")
+        body = None
+        if raw_body and content_type.startswith("application/json"):
+            body = json.loads(raw_body)
+        elif content_type.startswith("multipart/form-data"):
+            message = BytesParser().parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + raw_bytes)
+            body = {"files": [], "path": ""}
+            for part in message.get_payload():
+                name = part.get_param("name", header="content-disposition")
+                if name == "path":
+                    body["path"] = part.get_payload(decode=True).decode()
+                elif name == "files":
+                    body["files"].append({"path": part.get_filename(), "content": part.get_payload(decode=True)})
         call = ApiCall(
             method=request.method,
             path=unquote(url.path),
             query=url.query,
             raw_body=raw_body,
-            body=json.loads(raw_body) if raw_body else None,
+            body=body,
+            headers=request.headers,
         )
         self.calls.append(call)
         if (call.method, call.path) in self.paused:
@@ -106,7 +125,7 @@ class MockApi:
 
     @staticmethod
     def fulfill(route: Any, reply: Reply) -> None:
-        route.fulfill(status=reply.status, content_type="application/json", body=json.dumps(reply.payload))
+        route.fulfill(status=reply.status, content_type="application/json", body="" if reply.status == 204 else json.dumps(reply.payload))
 
     def release(self, *, reply: Reply | None = None) -> None:
         route, call = self.pending.pop(0)
@@ -138,6 +157,27 @@ class MockApi:
         override = self.overrides.get((call.method, call.path))
         if override is not None:
             return override(call) if callable(override) else override
+        if call.path.startswith("/api/v1/workspace/"):
+            appid = call.path.removeprefix("/api/v1/workspace/")
+            if appid not in self.apps:
+                return Reply({"detail": "App not found"}, 404)
+            files = self.workspace_files.setdefault(appid, {})
+            if call.method == "DELETE":
+                path = parse_qs(call.query)["path"][0]
+                if path not in files:
+                    return Reply({"detail": "Workspace file not found"}, 404)
+                del files[path]
+                return Reply(None, 204)
+            if call.method == "POST":
+                for file in call.body["files"]:
+                    path = f'{call.body["path"]}/{file["path"]}' if call.body["path"] else file["path"]
+                    files[path] = file["content"]
+            return Reply({
+                "appid": appid,
+                "files": [{"path": path, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                          for path, content in sorted(files.items())],
+                "total_bytes": sum(len(content) for content in files.values()),
+            }, 201 if call.method == "POST" else 200)
         if call.path == "/api/v1/jenkins/app_list":
             return Reply(list(self.apps.values()))
         if call.path == "/api/v1/docker/template_list":
@@ -277,8 +317,8 @@ class Console:
 
 
 @pytest.fixture
-def console(browser: Any, static_origin: str) -> Iterator[Console]:
-    context = browser.new_context()
+def console(browser: Any, static_origin: str, request: pytest.FixtureRequest) -> Iterator[Console]:
+    context = browser.new_context(timezone_id=getattr(request, "param", None))
     context.add_init_script("localStorage.setItem('orchestrator.control.token', 'mock-browser-token');")
     page = context.new_page()
     page.set_default_timeout(5000)
@@ -310,6 +350,83 @@ def pause_clock(page: Any) -> None:
 
     page.clock.install(time="2026-10-12T00:00:00Z")
     page.clock.pause_at("2026-10-12T00:00:00.100Z")
+
+
+def resource_report(build_id: str, status: str = "not_started") -> dict[str, Any]:
+    return {"build_id": build_id, "appid": "alpha", "build_status": "succeeded", "isolated": True,
+        "cleanup_status": status, "cleanup_allowed": status in {"not_started", "partial_failed"},
+        "resources": [], "services": [], "registry_storage_status": "waiting_gc" if status == "succeeded" else "not_applicable"}
+
+
+def test_build_cleanup_requires_confirmation_sends_only_build_id_and_polls(console: Console):
+    build_id = "a" * 32
+    path = "/api/v1/jenkins/build_resources/" + build_id
+    console.api.overrides[("GET", path)] = Reply(resource_report(build_id))
+    console.page.locator('a[href="#buildResourcesSection"]').click()
+    console.page.locator("#buildResourcesId").fill(build_id)
+    console.page.locator("#loadBuildResourcesButton").click()
+    expect(console.page.locator("#cleanupBuildResourcesButton")).to_be_enabled()
+    console.page.once("dialog", lambda dialog: dialog.dismiss())
+    console.page.locator("#cleanupBuildResourcesButton").click()
+    assert not console.api.matching("DELETE", path)
+    pause_clock(console.page)
+
+    def accepted(call):
+        console.api.overrides[("GET", path)] = Reply(resource_report(build_id, "succeeded"))
+        return Reply(resource_report(build_id, "queued"), 202)
+
+    console.api.overrides[("DELETE", path)] = accepted
+    messages = []
+
+    def confirm(dialog):
+        messages.append(dialog.message)
+        dialog.accept()
+
+    console.page.once("dialog", confirm)
+    console.page.locator("#cleanupBuildResourcesButton").click()
+    expect(console.page.locator("#buildResourcesStatus")).to_contain_text("queued")
+    expect(console.page.locator("#cleanupBuildResourcesButton")).to_be_disabled()
+    console.page.clock.fast_forward(5100)
+    expect(console.page.locator("#buildResourcesStatus")).to_contain_text("succeeded")
+    call = console.api.matching("DELETE", path)[0]
+    assert not call.query and call.raw_body is None
+    assert "永久删除" in messages[0]
+    assert len(console.api.matching("GET", path)) == 2
+
+
+def test_build_resource_stale_responses_do_not_replace_new_build(console: Console):
+    old_id, new_id = "a" * 32, "b" * 32
+    old_key = ("GET", "/api/v1/jenkins/build_resources/" + old_id)
+    new_key = ("GET", "/api/v1/jenkins/build_resources/" + new_id)
+    console.api.paused.add(old_key)
+    console.api.overrides[old_key] = Reply(resource_report(old_id))
+    console.api.overrides[new_key] = Reply(resource_report(new_id))
+    console.page.locator('a[href="#buildResourcesSection"]').click()
+    console.page.locator("#buildResourcesId").fill(old_id)
+    console.page.locator("#loadBuildResourcesButton").click()
+    expect(console.page.locator("#buildResourcesStatus")).to_contain_text("正在查询")
+    console.page.locator("#buildResourcesId").fill(new_id)
+    console.page.locator("#loadBuildResourcesButton").click()
+    expect(console.page.locator("#buildResourcesOutput")).to_contain_text(new_id)
+    console.api.paused.remove(old_key)
+    console.api.release()
+    expect(console.page.locator("#buildResourcesOutput")).not_to_contain_text(old_id)
+
+
+def test_logout_stops_resource_cleanup_polling_and_clears_report(console: Console):
+    build_id = "a" * 32
+    key = ("GET", "/api/v1/jenkins/build_resources/" + build_id)
+    console.api.overrides[key] = Reply(resource_report(build_id, "running"))
+    pause_clock(console.page)
+    console.page.locator('a[href="#buildResourcesSection"]').click()
+    console.page.locator("#buildResourcesId").fill(build_id)
+    console.page.locator("#loadBuildResourcesButton").click()
+    expect(console.page.locator("#buildResourcesStatus")).to_contain_text("running")
+    console.page.locator("#disconnectButton").click()
+    expect(console.page.locator("#sessionStatus")).to_have_text("未连接")
+    expect(console.page.locator("#buildResourcesOutput")).to_have_text("{}")
+    console.page.clock.fast_forward(16000)
+    assert len(console.api.matching(*key)) == 1
 
 
 def build_record(build_id: str, status: str, *, appid: str = "alpha") -> dict[str, Any]:
@@ -1113,3 +1230,274 @@ def test_access_region_is_populated_has_legacy_fallback_and_resets_with_app_cont
     console.page.locator("#appId").fill("beta")
     expect(console.page.locator("#serviceAccessRegion")).to_have_text("--")
     expect(console.page.locator("#composeSourceCommit")).to_have_text("--")
+
+
+def open_workspace(console: Console) -> None:
+    console.load_app()
+    console.page.locator('.side-nav a[href="#workspaceSection"]').click()
+    expect(console.page.locator("#workspaceAppId")).to_have_text("alpha")
+    expect(console.page.locator("#workspaceRefreshButton")).to_be_enabled()
+
+
+def test_workspace_page_loads_empty_state_and_uploads_multiple_binary_files(console: Console) -> None:
+    open_workspace(console)
+    expect(console.page.locator("#workspaceEmpty")).to_contain_text("Workspace 为空")
+    expect(console.page.locator("#workspaceUploadButton")).to_be_disabled()
+    console.page.locator("#workspaceFiles").set_input_files([
+        {"name": "main.py", "mimeType": "text/plain", "buffer": b"print('hello')"},
+        {"name": "data.bin", "mimeType": "application/octet-stream", "buffer": b"\x00\xff\xfe"},
+    ])
+    console.page.locator("#workspaceUploadPath").fill("src")
+    expect(console.page.locator("#workspaceSelection")).to_contain_text("2 个文件")
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(2)
+    expect(console.page.locator("#workspaceFileRows")).to_contain_text("src/main.py")
+    expect(console.page.locator("#workspaceFileRows")).to_contain_text("src/data.bin")
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("已上传 2 个文件")
+    call = console.api.matching("POST", "/api/v1/workspace/alpha")[0]
+    assert call.headers["authorization"] == "Bearer mock-browser-token"
+    assert "multipart/form-data; boundary=" in call.headers["content-type"]
+    assert call.body["path"] == "src"
+    assert call.body["files"][1]["content"] == b"\x00\xff\xfe"
+    assert not console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")
+    expect(console.page.locator("#workspaceSelection")).to_have_text("尚未选择文件")
+
+
+def test_workspace_directory_upload_preserves_nested_paths_without_local_root(console: Console) -> None:
+    open_workspace(console)
+    console.page.locator("#workspaceDirectory").evaluate("""control => {
+      const selection = new DataTransfer();
+      const entries = [
+        {name: "settings.json", path: "config/settings.json", content: "{}"},
+        {name: "main.py", path: "main.py", content: "print('hi')"},
+      ];
+      entries.forEach(entry => {
+        const file = new File([entry.content], entry.name, {type: "text/plain"});
+        Object.defineProperty(file, "webkitRelativePath", {value: `local-project/${entry.path}`});
+        selection.items.add(file);
+      });
+      control.files = selection.files;
+      control.dispatchEvent(new Event("change", {bubbles: true}));
+    }""")
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(2)
+    assert set(console.api.workspace_files["alpha"]) == {"config/settings.json", "main.py"}
+    expect(console.page.locator("#workspaceFileRows")).not_to_contain_text("local-project")
+
+
+def test_workspace_pagination_filter_and_delete_clamp_last_page(console: Console) -> None:
+    console.api.workspace_files["alpha"] = {f"src/file-{index:02d}.txt": b"file" for index in range(21)}
+    open_workspace(console)
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(20)
+    expect(console.page.locator("#workspacePageLabel")).to_have_text("第 1 / 2 页")
+    console.page.locator("#workspaceNextButton").click()
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(1)
+    console.page.once("dialog", lambda dialog: dialog.accept())
+    console.page.get_by_role("button", name="删除 src/file-20.txt", exact=True).click()
+    expect(console.page.locator("#workspacePageLabel")).to_have_text("第 1 / 1 页")
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(20)
+    expect(console.page.locator("#workspaceSummary")).to_contain_text("共 20 个文件 / 80 B")
+    console.page.locator("#workspacePageSize").select_option("50")
+    console.page.locator("#workspaceSearch").fill("file-01")
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(1)
+    console.page.locator("#workspaceSearch").fill("missing")
+    expect(console.page.locator("#workspaceEmpty")).to_have_text("没有匹配的文件。")
+
+
+def test_workspace_delete_confirms_and_encodes_special_paths(console: Console) -> None:
+    path = "config/配置 #&?.json"
+    console.api.workspace_files["alpha"] = {path: b"{}"}
+    open_workspace(console)
+    console.page.once("dialog", lambda dialog: dialog.dismiss())
+    console.page.get_by_role("button", name=f"删除 {path}", exact=True).click()
+    assert not console.api.matching("DELETE", "/api/v1/workspace/alpha")
+    messages = []
+
+    def confirm(dialog: Any) -> None:
+        messages.append(dialog.message)
+        dialog.accept()
+
+    console.page.once("dialog", confirm)
+    console.page.get_by_role("button", name=f"删除 {path}", exact=True).click()
+    expect(console.page.locator("#workspaceEmpty")).to_contain_text("Workspace 为空")
+    assert path in messages[0] and "alpha" in messages[0]
+    call = console.api.matching("DELETE", "/api/v1/workspace/alpha")[0]
+    assert parse_qs(call.query) == {"path": [path]}
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("Workspace 已为空")
+
+
+def test_workspace_upload_reports_invalid_prefix_and_quota_failure_without_losing_selection(console: Console) -> None:
+    open_workspace(console)
+    console.page.locator("#workspaceFiles").set_input_files({"name": "main.py", "mimeType": "text/plain", "buffer": b"hi"})
+    console.page.locator("#workspaceUploadPath").fill("../escape")
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#toastRegion")).to_contain_text("文件路径必须是相对 POSIX 路径")
+    assert not console.api.matching("POST", "/api/v1/workspace/alpha")
+    console.api.overrides[("POST", "/api/v1/workspace/alpha")] = Reply({"detail": "Workspace upload byte limit exceeded"}, 413)
+    console.page.locator("#workspaceUploadPath").fill("")
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("Workspace upload byte limit exceeded")
+    expect(console.page.locator("#workspaceUploadButton")).to_be_enabled()
+    expect(console.page.locator("#workspaceSelection")).to_contain_text("1 个文件")
+    assert len(console.api.matching("GET", "/api/v1/workspace/alpha")) == 1
+
+
+def test_workspace_upload_serializes_operations_and_refreshes_after_success(console: Console) -> None:
+    open_workspace(console)
+    key = ("POST", "/api/v1/workspace/alpha")
+    console.api.paused.add(key)
+    console.page.locator("#workspaceFiles").set_input_files({"name": "main.py", "mimeType": "text/plain", "buffer": b"hi"})
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceUploadButton")).to_be_disabled()
+    expect(console.page.locator("#workspaceRefreshButton")).to_be_disabled()
+    expect(console.page.locator("#workspaceFiles")).to_be_disabled()
+    console.api.release()
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("已上传 1 个文件")
+    expect(console.page.locator("#workspaceRefreshButton")).to_be_enabled()
+    assert len(console.api.matching(*key)) == 1
+
+
+@pytest.mark.parametrize("end", ["switch", "logout"])
+def test_workspace_does_not_display_late_results_after_context_end(console: Console, end: str) -> None:
+    console.load_app()
+    console.api.workspace_files["alpha"] = {"private-alpha.txt": b"old"}
+    console.api.workspace_files["beta"] = {"beta.txt": b"new"}
+    key = ("GET", "/api/v1/workspace/alpha")
+    console.api.paused.add(key)
+    console.page.locator('.side-nav a[href="#workspaceSection"]').click()
+    expect(console.page.locator("#workspaceFileList")).to_have_attribute("aria-busy", "true")
+    if end == "switch":
+        console.page.locator("#openAppContextModal").click()
+        console.page.locator("#contextAppSelect").select_option("beta")
+        console.page.locator("#loadContextButton").click()
+        expect(console.page.locator("#workspaceAppId")).to_have_text("beta")
+        expect(console.page.locator("#workspaceFileRows")).to_contain_text("beta.txt")
+    else:
+        console.page.locator("#disconnectButton").click()
+        expect(console.page.locator("#workspaceEmpty")).to_contain_text("请先连接控制端")
+        expect(console.page.locator("#workspaceFiles")).to_be_disabled()
+    console.api.release()
+    expect(console.page.locator("#workspaceFileRows")).not_to_contain_text("private-alpha.txt")
+
+
+def test_workspace_reports_refresh_failure_after_upload_without_claiming_mutation_failed(console: Console) -> None:
+    open_workspace(console)
+    console.api.overrides[("GET", "/api/v1/workspace/alpha")] = Reply({"detail": "Workspace storage is unavailable"}, 503)
+    console.page.locator("#workspaceFiles").set_input_files({"name": "main.py", "mimeType": "text/plain", "buffer": b"hi"})
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("文件变更已完成，但列表刷新失败")
+    expect(console.page.locator("#workspaceSummary")).to_have_text("文件列表尚未加载")
+    assert console.api.workspace_files["alpha"] == {"main.py": b"hi"}
+    expect(console.page.locator("#workspaceRefreshButton")).to_be_enabled()
+
+
+def test_workspace_page_selects_app_and_retains_mobile_layout(console: Console) -> None:
+    console.page.locator('.side-nav a[href="#workspaceSection"]').click()
+    expect(console.page.locator("#workspaceUploadButton")).to_be_disabled()
+    console.page.locator("#workspaceSelectAppButton").click()
+    console.page.locator("#contextAppSelect").select_option("alpha")
+    console.page.locator("#loadContextButton").click()
+    expect(console.page.locator("#workspaceAppId")).to_have_text("alpha")
+    expect(console.page.locator("#workspaceEmpty")).to_contain_text("Workspace 为空")
+    console.page.set_viewport_size({"width": 390, "height": 844})
+    expect(console.page.locator("#workspaceUploadForm")).to_be_visible()
+    assert console.page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    console.page.locator("#workspaceBuildButton").click()
+    expect(console.page.locator("#buildSection")).to_be_visible()
+
+
+def test_workspace_delete_failure_keeps_existing_rows(console: Console) -> None:
+    console.api.workspace_files["alpha"] = {"main.py": b"keep"}
+    console.api.overrides[("DELETE", "/api/v1/workspace/alpha")] = Reply({"detail": "Workspace storage is unavailable"}, 503)
+    open_workspace(console)
+    console.page.once("dialog", lambda dialog: dialog.accept())
+    console.page.get_by_role("button", name="删除 main.py", exact=True).click()
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("Workspace storage is unavailable")
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(1)
+    expect(console.page.get_by_role("button", name="删除 main.py", exact=True)).to_be_enabled()
+    assert console.api.workspace_files["alpha"] == {"main.py": b"keep"}
+
+
+def test_workspace_rejects_list_from_wrong_app(console: Console) -> None:
+    console.api.overrides[("GET", "/api/v1/workspace/alpha")] = Reply({
+        "appid": "beta", "files": [{"path": "private-beta.txt", "size": 1, "sha256": "a" * 64}], "total_bytes": 1,
+    })
+    open_workspace(console)
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("文件列表与当前应用不匹配")
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(0)
+
+
+def test_workspace_multipart_upload_retries_with_refreshed_bearer_token(console: Console) -> None:
+    open_workspace(console)
+    console.api.overrides[("POST", "/oauth2/token")] = Reply({
+        "access_token": "initial-token", "refresh_token": "refresh-token", "expires_in": 120,
+    })
+    console.api.overrides[("POST", "/oauth2/refresh")] = Reply({
+        "access_token": "refreshed-token", "refresh_token": "next-refresh-token", "expires_in": 120,
+    })
+    console.page.locator("#openConnectionModal").click()
+    console.page.locator('#connectForm button[type="submit"]').click()
+    expect(console.page.locator("#connectionModal")).not_to_be_visible()
+    key = ("POST", "/api/v1/workspace/alpha")
+
+    def expire_once(call: ApiCall) -> Reply:
+        console.api.overrides.pop(key)
+        return Reply({"detail": "Expired token"}, 401)
+
+    console.api.overrides[key] = expire_once
+    console.page.locator("#workspaceFiles").set_input_files({"name": "main.py", "mimeType": "text/plain", "buffer": b"hi"})
+    console.page.locator("#workspaceUploadButton").click()
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("已上传 1 个文件")
+    calls = console.api.matching(*key)
+    assert len(calls) == 2
+    assert calls[0].body == calls[1].body
+    assert calls[0].headers["authorization"] == "Bearer initial-token"
+    assert calls[1].headers["authorization"] == "Bearer refreshed-token"
+    assert len(console.api.matching("POST", "/oauth2/refresh")) == 1
+
+
+def test_workspace_unauthorized_response_clears_file_list_and_selection(console: Console) -> None:
+    console.api.workspace_files["alpha"] = {"private.txt": b"secret"}
+    open_workspace(console)
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(1)
+    console.page.locator("#workspaceFiles").set_input_files({"name": "main.py", "mimeType": "text/plain", "buffer": b"hi"})
+    console.api.overrides[("GET", "/api/v1/workspace/alpha")] = Reply({"detail": "Invalid token"}, 401)
+    console.page.locator("#workspaceRefreshButton").click()
+    expect(console.page.locator("#sessionStatus")).to_have_text("未连接")
+    expect(console.page.locator("#workspaceFileRows tr")).to_have_count(0)
+    expect(console.page.locator("#workspaceSelection")).to_have_text("尚未选择文件")
+    expect(console.page.locator("#workspaceStatus")).to_contain_text("访问令牌已失效")
+
+
+@pytest.mark.parametrize("console", ["UTC", "America/New_York"], indirect=True)
+def test_console_sync_and_refresh_times_use_east_eight_in_other_browser_timezones(console: Console) -> None:
+    console.load_app()
+    pause_clock(console.page)
+
+    def synchronize(call: ApiCall) -> Reply:
+        result = console.api.sync_result()
+        result["updated_at"] = "2026-10-14T09:55:20.795000+08:00"
+        console.api.apps["alpha"]["updated_at"] = result["updated_at"]
+        return Reply(result)
+
+    console.api.overrides[("POST", "/api/v1/jenkins/app_sync/alpha")] = synchronize
+    console.sync()
+    expect(console.page.locator("#syncUpdatedAt")).to_contain_text("09:55:20")
+    build_query(console, "timezone-build")
+    expect(console.page.locator("#buildPollStatus")).to_contain_text("最近刷新：08:00:00")
+    console.api.overrides[("GET", "/api/v1/jenkins/app_alerts/alpha")] = Reply([])
+    console.page.locator('.side-nav a[href="#resourcesSection"]').click()
+    console.page.locator('button[data-resource="alerts"]').click()
+    expect(console.page.locator("#resourceTimestamp")).to_have_text("08:00:00")
+
+
+@pytest.mark.parametrize("console", ["UTC", "America/New_York"], indirect=True)
+@pytest.mark.parametrize("timestamp", ["2026-10-14T01:55:20.795000Z", "2026-10-14T09:55:20.795000+08:00"])
+def test_console_history_dates_use_east_eight_without_double_conversion(console: Console, timestamp: str) -> None:
+    console.load_app()
+    record = build_record("timezone-history", "failed")
+    record["created_at"] = timestamp
+    console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [record], "page": 1, "page_size": 20, "total": 1})
+    console.page.locator('.side-nav a[href="#historySection"]').click()
+    console.page.locator("#historyRefreshButton").click()
+    expect(console.page.locator("#historyTableBody")).to_contain_text("09:55:20")
