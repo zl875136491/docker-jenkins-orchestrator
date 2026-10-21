@@ -323,6 +323,7 @@ def test_pipeline_builds_validated_destinations_and_preserves_volume_metadata(
     assert artifact["compose"]["services"]["API"]["image"].endswith(":45-API")
     assert "build" not in artifact["compose"]["services"]["web"]
     assert calls[0][:2] == ["docker", "build"]
+    assert all("--pull" not in command for command in calls if command[1] == "build")
     assert [command[1] for command in calls] == ["build", "push", "build", "push"]
     assert {command[-1] for command in calls if command[1] == "push"} == set(artifact["images"])
 

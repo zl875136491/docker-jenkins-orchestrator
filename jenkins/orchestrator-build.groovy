@@ -305,7 +305,7 @@ for item in plan:
     context = item.get("context")
     if context is None:
         raise SystemExit(f"service {name} is missing a local build context")
-    command = ["docker", "build", "--pull", "-t", destination]
+    command = ["docker", "build", "-t", destination]
     dockerfile = item["dockerfile"]
     command.extend(["-f", dockerfile, context])
     subprocess.run(command, check=True)
