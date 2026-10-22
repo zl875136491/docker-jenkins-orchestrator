@@ -47,18 +47,57 @@ def test_control_console_sidebar_navigation_targets_each_workspace_section() -> 
     navigation = re.search(r'<nav class="side-nav"[^>]*>(.*?)</nav>', page.text, flags=re.DOTALL)
     assert navigation is not None
     navigation_markup = navigation.group(1)
-    section_ids = (
-        "appSection",
-        "workspaceSection",
-        "buildSection",
-        "historySection",
-        "resourcesSection",
-        "templatesSection",
-        "baseImagesSection",
-    )
-    for section_id in section_ids:
+    for section_id in (
+        "appSection", "buildSection", "routeChecksSection", "workspaceSection", "historySection",
+        "buildResourcesSection", "resourcesSection", "templatesSection", "baseImagesSection", "agentSettingsSection",
+    ):
         assert f'href="#{section_id}"' in navigation_markup
         assert f'id="{section_id}"' in page.text
+    assert 'id="appListNavigation"' not in navigation_markup
+    assert 'href="#operationSection"' not in navigation_markup
+    assert 'id="applicationTab"' in navigation_markup
+    assert 'id="globalTab"' in navigation_markup
+    assert "应用详情" in navigation_markup
+    assert "应用构建" in navigation_markup
+    assert "应用检查" in navigation_markup
+    assert "资源回收" in navigation_markup
+    assert "模板设置" in navigation_markup
+    assert "镜像设置" in navigation_markup
+    assert "Agent 设置" in navigation_markup
+
+
+def test_control_console_exposes_static_and_dynamic_route_check_controls() -> None:
+    page = client.get("/ui/")
+    script = client.get("/ui/app.js")
+    assert page.status_code == 200
+    for marker in (
+        'id="requireRoute"',
+        'name="require_route"',
+        'id="routeChecksSection"',
+        'id="routeCheckAppId"',
+        'id="routeCheckCommitId"',
+        'id="staticRouteCheckButton"',
+        'id="refreshRouteChecksButton"',
+        'id="routeCheckBuildId"',
+        'id="dynamicRouteCheckButton"',
+        'id="refreshDynamicCheckResultButton"',
+        'id="staticCheckResults"',
+        'id="dynamicCheckResults"',
+    ):
+        assert marker in page.text
+    assert page.text.index('id="routeCheckContextTitle"') < page.text.index('id="staticRouteCheckTitle"')
+    assert 'class="route-check-columns"' in page.text
+    assert 'class="route-check-column"' in page.text
+    assert 'class="intro-band"' not in page.text
+    assert 'id="selectedAppBanner"' not in page.text
+    assert "/static-checks`" in script.text
+    assert "/dynamic-checks`" in script.text
+    assert "/check-results`" in script.text
+    assert "/api/v1/jenkins/build_info/" in script.text
+    assert "static_agent_role_version" in script.text
+    stylesheet = client.get("/ui/styles.css")
+    assert ".form-grid { align-items: start;" in stylesheet.text
+    assert "height: 40px;" in stylesheet.text
 
 
 def test_control_console_exposes_workspace_upload_listing_deletion_and_pagination() -> None:
@@ -80,34 +119,27 @@ def test_control_console_exposes_workspace_upload_listing_deletion_and_paginatio
     assert "workspaceContextMatches" in script.text
 
 
-def test_control_console_has_connection_and_app_context_modals() -> None:
+def test_control_console_has_login_modal_and_no_implicit_app_context_modal() -> None:
     page = client.get("/ui/")
     assert page.status_code == 200
 
-    for modal_id, title_id in (
-        ("connectionModal", "connectionModalTitle"),
-        ("appContextModal", "appContextModalTitle"),
-    ):
-        modal = re.search(fr'<section id="{modal_id}"[^>]*>', page.text)
-        assert modal is not None
-        modal_markup = modal.group(0)
-        assert 'class="modal-shell"' in modal_markup
-        assert 'role="dialog"' in modal_markup
-        assert 'aria-modal="true"' in modal_markup
-        assert f'aria-labelledby="{title_id}"' in modal_markup
-        assert f'id="{title_id}"' in page.text
+    modal = re.search(r'<section id="loginModal"[^>]*>', page.text)
+    assert modal is not None
+    assert 'class="modal-shell"' in modal.group(0)
+    assert 'role="dialog"' in modal.group(0)
+    assert 'aria-modal="true"' in modal.group(0)
+    assert 'aria-labelledby="loginModalTitle"' in modal.group(0)
+    assert 'id="loginForm"' in page.text
     for marker in (
-        'id="openConnectionModal"',
-        'href="#connectionModal"',
-        'id="closeConnectionModal"',
-        'id="openAppContextModal"',
-        'href="#appContextModal"',
-        'id="closeAppContextModal"',
+        'id="openLoginModal"',
+        'href="#loginModal"',
+        'id="closeLoginModal"',
     ):
         assert marker in page.text
-    assert 'id="connectForm"' in page.text
-    assert 'id="contextAppSelect"' in page.text
-    assert 'id="refreshContextAppsButton"' in page.text
+    assert 'id="appContextModal"' not in page.text
+    assert 'id="contextAppSelect"' not in page.text
+    assert 'id="openConnectionModal"' not in page.text
+    assert "连接设置" not in page.text
 
 
 def test_control_console_exposes_topbar_session_and_app_status_markers() -> None:
@@ -119,39 +151,71 @@ def test_control_console_exposes_topbar_session_and_app_status_markers() -> None
     assert script.status_code == 200
 
     for marker in (
-        'class="topbar-context"',
-        'id="currentAppStatus"',
-        'id="metricApp"',
+        'id="appSelector"',
+        'id="sessionMenu"',
+        'id="sessionMenuToggle"',
         'id="sessionStatus"',
+        'id="healthButton"',
+        'id="openLoginModal"',
+        'id="disconnectButton"',
     ):
         assert marker in page.text
     assert 'class="status-dot offline"' in page.text
-    assert 'id="metricApp">未设置</strong>' in page.text
     assert ".status-dot.offline::before" in stylesheet.text
     assert "function setSession" in script.text
     assert '$("sessionStatus")' in script.text
-    assert '$("metricApp")' in script.text
+    assert 'id="selectedAppTitle"' not in page.text
+    assert "CONTROL PLANE" not in page.text
 
 
 def test_control_console_declares_east_eight_display_timezone() -> None:
     page = client.get("/ui/")
     script = client.get("/ui/app.js")
-    assert "时间统一使用东八区（UTC+08:00）" in page.text
     assert 'const DISPLAY_TIME_ZONE = "Asia/Shanghai"' in script.text
     assert 'timeZone: DISPLAY_TIME_ZONE' in script.text
     assert "toLocaleTimeString()" not in script.text
     assert "toLocaleString()" not in script.text
 
 
-def test_control_console_loads_existing_apps_for_context_selection() -> None:
+def test_control_console_loads_apps_from_the_application_list() -> None:
     page = client.get("/ui/")
     script = client.get("/ui/app.js")
     assert page.status_code == 200
-    assert 'id="contextAppSelect"' in page.text
-    assert 'id="loadContextButton"' in page.text
+    assert 'id="appListSection"' in page.text
+    assert 'id="appList"' in page.text
+    assert 'id="refreshAppsButton"' in page.text
+    assert 'id="newAppButton"' in page.text
     assert "/api/v1/jenkins/app_list" in script.text
     assert "/api/v1/docker/compose_prompt" in script.text
-    assert "loadAppChoices" in script.text
+    assert "function loadApps" in script.text
+    assert "function openApplication" in script.text
+    assert 'localStorage.removeItem("orchestrator.control.appid")' in script.text
+
+
+def test_app_workspaces_are_nested_under_the_application_list() -> None:
+    page = client.get("/ui/")
+    stylesheet = client.get("/ui/styles.css")
+    script = client.get("/ui/app.js")
+    for section in ("appSection", "buildSection", "routeChecksSection", "workspaceSection", "historySection", "buildResourcesSection", "resourcesSection"):
+        assert f'href="#{section}" data-navigation-scope="application"' in page.text
+    assert 'id="historyAppId" placeholder="从应用列表打开应用" autocomplete="off" readonly' in page.text
+    assert 'id="appSelector"' in page.text
+    assert 'id="routeCheckCommitId"' in page.text and '<select id="routeCheckCommitId"' in page.text
+    assert 'id="buildId" required disabled' in page.text and '<select id="buildId"' in page.text
+    assert 'id="buildResourcesId" required disabled' in page.text and '<select id="buildResourcesId"' in page.text
+    assert 'id="allHistoryNavigation"' not in page.text
+    assert '全部任务' not in page.text
+    assert '全部应用' not in page.text
+    assert 'id="agentRoleForm"' in page.text
+    assert 'id="agentRoleSelect"' in page.text
+    assert 'id="agentRoleSchema"' in page.text
+    assert "state.historyScope" not in script.text
+    assert "历史任务响应包含其他应用的数据，已拒绝显示" in script.text
+    assert "路由检查仅允许操作顶部当前选择的应用" in script.text
+    assert "GET /api/v1/apps/{app_id}/identifiers" in script.text or "/identifiers" in script.text
+    assert "html, body { height: 100%; overflow: hidden; }" in stylesheet.text
+    assert ".workspace {" in stylesheet.text and "overflow-y: auto" in stylesheet.text
+    assert "打开应用后加载该应用的历史任务" in script.text
 
 
 def test_control_console_exposes_compose_discovery_and_repository_sync_results() -> None:
@@ -206,7 +270,7 @@ def test_build_requests_share_identity_validation_and_keep_submission_separate_f
     assert 'form.setAttribute("aria-busy", "true")' in script
     assert 'Object.prototype.hasOwnProperty.call(build, "appid")' in script
     assert "appid !== undefined && build.appid !== appid" in script
-    assert "state.latestBuild?.build_id === buildId ? state.buildAppid : undefined" in script
+    assert "if (!state.appIdentifiers.builds.some((build) => build.build_id === buildId))" in script
     assert "validateBuildResponse(value, buildId, expectedAppid)" in script
     assert "validateBuildResponse(value, buildId, selectedAppid)" in script
 

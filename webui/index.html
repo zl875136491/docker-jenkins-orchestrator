@@ -13,37 +13,40 @@
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark" aria-hidden="true">O</span>
-          <div>
-            <p class="eyebrow">CONTROL PLANE</p>
-            <h1>Orchestrator</h1>
-          </div>
+          <h1>Orchestrator</h1>
         </div>
-        <div class="topbar-context" aria-label="当前控制台上下文">
-          <div id="currentAppStatus" class="topbar-context-item">
-            <span class="topbar-context-label">当前应用</span>
-            <strong id="metricApp">未设置</strong>
-          </div>
-          <span id="sessionStatus" class="status-dot offline">未连接</span>
-        </div>
+        <label class="app-selector-label" for="appSelector">
+          <span>当前应用</span>
+          <select id="appSelector" aria-label="选择当前应用" disabled>
+            <option value="">应用列表 / 选择应用</option>
+          </select>
+        </label>
         <div class="topbar-actions">
-          <a id="openConnectionModal" class="button button-quiet modal-trigger" href="#connectionModal">连接设置</a>
-          <a id="openAppContextModal" class="button button-quiet modal-trigger" href="#appContextModal">当前应用</a>
-          <button id="healthButton" class="button button-quiet" type="button">健康检查</button>
-          <button id="disconnectButton" class="button button-quiet" type="button">退出</button>
+          <details id="sessionMenu" class="session-menu">
+            <summary id="sessionMenuToggle" aria-label="账户菜单">
+              <span id="sessionStatus" class="status-dot offline">未登录</span>
+              <svg class="session-chevron" aria-hidden="true" viewBox="0 0 16 16" focusable="false"><path d="m4 6 4 4 4-4" /></svg>
+            </summary>
+            <div class="session-menu-panel" aria-label="账户操作">
+              <button id="healthButton" class="session-menu-item" type="button">健康检查</button>
+              <a id="openLoginModal" class="session-menu-item modal-trigger" href="#loginModal">登录</a>
+              <button id="disconnectButton" class="session-menu-item" type="button" hidden>退出登录</button>
+            </div>
+          </details>
         </div>
       </header>
 
-      <section id="connectionModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="connectionModalTitle">
-        <a id="connectionModalBackdrop" class="modal-backdrop" href="#" aria-label="关闭连接设置"></a>
+      <section id="loginModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
+        <a id="loginModalBackdrop" class="modal-backdrop" href="#" aria-label="关闭登录"></a>
         <div class="modal-card">
           <div class="modal-header">
             <div>
               <p class="eyebrow">SESSION</p>
-              <h2 id="connectionModalTitle">连接控制端</h2>
+              <h2 id="loginModalTitle">登录控制端</h2>
             </div>
-            <a id="closeConnectionModal" class="modal-close" href="#" aria-label="关闭连接设置">关闭</a>
+            <a id="closeLoginModal" class="modal-close" href="#" aria-label="关闭登录">关闭</a>
           </div>
-          <form id="connectForm" class="stack-form">
+          <form id="loginForm" class="stack-form">
             <label>
               Client ID
               <input id="workerName" name="clientId" value="local-worker" autocomplete="username" required />
@@ -52,31 +55,9 @@
               Client Secret
               <input id="workerSecret" name="clientSecret" type="password" value="local-worker-secret" autocomplete="current-password" required />
             </label>
-            <button class="button button-primary" type="submit">获取访问令牌</button>
+            <button class="button button-primary" type="submit">登录</button>
           </form>
-          <p id="sessionDetail" class="muted small">本地开发默认凭据已填入。</p>
-        </div>
-      </section>
-
-      <section id="appContextModal" class="modal-shell" role="dialog" aria-modal="true" aria-labelledby="appContextModalTitle">
-        <a class="modal-backdrop" href="#" aria-label="关闭当前应用设置"></a>
-        <div class="modal-card">
-          <div class="modal-header">
-            <div>
-              <p class="eyebrow">WORKSPACE</p>
-              <h2 id="appContextModalTitle">当前应用</h2>
-            </div>
-            <a id="closeAppContextModal" class="modal-close" href="#" aria-label="关闭当前应用设置">关闭</a>
-          </div>
-          <label>
-            已有应用
-            <select id="contextAppSelect" required>
-              <option value="">连接后加载应用列表</option>
-            </select>
-          </label>
-          <button id="refreshContextAppsButton" class="button button-quiet full-width" type="button">刷新应用列表</button>
-          <button id="loadContextButton" class="button button-secondary full-width" type="button">选择应用</button>
-          <p id="contextAppHint" class="muted small">选择后会同步当前应用和资源查询上下文。</p>
+          <p id="sessionDetail" class="muted small">输入客户端凭据登录控制端。</p>
         </div>
       </section>
 
@@ -84,33 +65,31 @@
         <aside class="sidebar">
           <div class="sidebar-intro">
             <p class="eyebrow">CONTROL AREAS</p>
-            <p class="muted small">选择一个区域开始管理交付流程。</p>
+            <p id="navigationHint" class="muted small">从顶部选择应用，或切换到全局设置。</p>
           </div>
-          <nav class="side-nav" aria-label="控制台区域">
-            <a href="#appSection">应用</a>
-            <a href="#workspaceSection">文件管理</a>
-            <a href="#buildSection">构建</a>
-            <a href="#historySection">历史任务</a>
-            <a href="#buildResourcesSection">构建资源清理</a>
-            <a href="#resourcesSection">运行资源</a>
-            <a href="#templatesSection">模板</a>
-            <a href="#baseImagesSection">基础镜像</a>
+          <nav class="side-nav" aria-label="控制台导航">
+            <div class="navigation-tabs" role="tablist" aria-label="导航范围">
+              <button id="applicationTab" class="navigation-tab active" type="button" role="tab" aria-selected="true" aria-controls="applicationNavigation">应用</button>
+              <button id="globalTab" class="navigation-tab" type="button" role="tab" aria-selected="false" aria-controls="globalNavigation">全局</button>
+            </div>
+            <div id="applicationNavigation" class="navigation-panel" role="tabpanel" aria-labelledby="applicationTab">
+              <a href="#appSection" data-navigation-scope="application">应用详情</a>
+              <a href="#buildSection" data-navigation-scope="application">应用构建</a>
+              <a href="#routeChecksSection" data-navigation-scope="application">应用检查</a>
+              <a href="#workspaceSection" data-navigation-scope="application">文件管理</a>
+              <a href="#historySection" data-navigation-scope="application">历史任务</a>
+              <a href="#buildResourcesSection" data-navigation-scope="application">资源回收</a>
+              <a href="#resourcesSection" data-navigation-scope="application">运行资源</a>
+            </div>
+            <div id="globalNavigation" class="navigation-panel" role="tabpanel" aria-labelledby="globalTab" hidden>
+              <a href="#templatesSection" data-navigation-scope="global">模板设置</a>
+              <a href="#baseImagesSection" data-navigation-scope="global">镜像设置</a>
+              <a href="#agentSettingsSection" data-navigation-scope="global">Agent 设置</a>
+            </div>
           </nav>
         </aside>
 
         <main class="workspace">
-          <section class="intro-band">
-            <div>
-              <p class="eyebrow">DELIVERY WORKSPACE</p>
-              <h2>应用交付控制台</h2>
-              <p class="intro-copy">连接后管理应用配置、构建任务和 Docker Services 状态。时间统一使用东八区（UTC+08:00）。</p>
-            </div>
-            <div class="intro-meta">
-              <span class="meta-label">API</span>
-              <code id="apiOrigin"></code>
-            </div>
-          </section>
-
           <section class="metric-strip" aria-label="当前状态摘要">
             <div class="metric-cell">
               <span class="metric-label">最近构建</span>
@@ -126,13 +105,29 @@
             </div>
           </section>
 
-          <section id="appSection" class="workspace-section default-section">
+          <section id="appListSection" class="workspace-section default-section" aria-labelledby="appListTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">APPLICATIONS</p>
+                <h2 id="appListTitle">应用列表</h2>
+              </div>
+              <div class="button-row">
+                <button id="refreshAppsButton" class="button button-secondary" type="button">刷新列表</button>
+                <button id="newAppButton" class="button button-primary" type="button">新建应用</button>
+              </div>
+            </div>
+            <p id="appListStatus" class="muted small" role="status" aria-live="polite">登录后加载应用列表。</p>
+            <div id="appList" class="app-list" aria-live="polite"></div>
+            <p id="appListEmpty" class="history-empty muted" hidden>暂无应用。可以创建一个新应用开始使用。</p>
+          </section>
+
+          <section id="appSection" class="workspace-section">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">01 / APPLICATION</p>
-                <h2>应用配置</h2>
+                <h2>应用详情</h2>
               </div>
-              <span class="section-note">保存仓库、变量和 Compose 输入</span>
+              <span class="section-note">查看和维护仓库、变量及 Compose 配置</span>
             </div>
             <form id="appForm" class="form-grid">
               <label>
@@ -154,6 +149,11 @@
               <label>
                 技术栈组件（逗号分隔）
                 <input id="components" name="components" placeholder="python,mongodb,react" />
+              </label>
+              <label class="span-2">
+                必须实现的路由（require_route）
+                <input id="requireRoute" name="require_route" placeholder="/health" autocomplete="off" />
+                <span class="field-help">设置后，构建前会要求静态检查通过；此处只接受单一路径，例如 /health。</span>
               </label>
               <label class="span-2">
                 环境变量 JSON
@@ -204,7 +204,6 @@
                 <p class="eyebrow">APP / WORKSPACE FILES</p>
                 <h2 id="workspaceTitle">文件管理</h2>
               </div>
-              <a id="workspaceSelectAppButton" class="button button-quiet modal-trigger" href="#appContextModal">选择应用</a>
             </div>
             <p class="muted small">当前 App ID：<strong id="workspaceAppId">未设置</strong>。文件按应用独立存储；先上传源码和配置，再创建新的构建。</p>
             <p class="field-help">Compose 中的 <code>.:/workspace</code> 指向当前应用的上传文件根目录。上传或删除仅修改暂存区，不影响已有构建快照、运行实例或历史告警；补全文件后请重新构建。</p>
@@ -283,7 +282,9 @@
               <form id="buildQueryForm" class="stack-form">
                 <label>
                   Build ID
-                  <input id="buildId" placeholder="粘贴 build_id" required />
+                  <select id="buildId" required disabled>
+                    <option value="">请先选择应用</option>
+                  </select>
                 </label>
                 <button class="button button-secondary" type="submit">查询构建</button>
               </form>
@@ -312,18 +313,135 @@
             <pre id="buildOutput" class="json-output" aria-live="polite">等待构建操作</pre>
           </section>
 
+          <section id="routeChecksSection" class="workspace-section" aria-labelledby="routeChecksTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">ROUTE VALIDATION</p>
+                <h2 id="routeChecksTitle">路由检查</h2>
+                <p class="muted">静态检查验证仓库中的目标路由；动态重验针对已部署的 Build ID。提交后可在对应结果栏查询最终状态。</p>
+              </div>
+            </div>
+            <section class="route-check-context" aria-labelledby="routeCheckContextTitle">
+              <div class="route-check-card-heading">
+                <div>
+                  <p class="eyebrow">SHARED CONTEXT</p>
+                  <h3 id="routeCheckContextTitle">共同参数</h3>
+                </div>
+              </div>
+              <div class="route-check-context-fields">
+                <label>
+                  当前应用
+                  <select id="routeCheckAppId" aria-label="当前应用 ID" disabled>
+                    <option value="">请先在顶部选择应用</option>
+                  </select>
+                </label>
+                <label>
+                  完整 Git commit SHA
+                  <select id="routeCheckCommitId" disabled>
+                    <option value="">使用应用当前分支 HEAD</option>
+                  </select>
+                  <span class="field-help">静态检查留空时使用应用当前分支 HEAD；也可选择此应用已有的完整 SHA。</span>
+                </label>
+              </div>
+            </section>
+
+            <div class="route-check-columns">
+              <div class="route-check-column" aria-label="静态检查">
+                <section class="route-check-card" aria-labelledby="staticRouteCheckTitle">
+                  <div class="route-check-card-heading">
+                    <div>
+                      <p class="eyebrow">STATIC CHECK</p>
+                      <h3 id="staticRouteCheckTitle">静态检查</h3>
+                    </div>
+                  </div>
+                  <p class="route-check-card-copy">检查所选 Commit 中是否实现了应用要求的路由。</p>
+                  <div class="form-actions">
+                    <button id="staticRouteCheckButton" class="button button-primary" type="button">提交静态检查</button>
+                  </div>
+                  <p id="staticRouteCheckStatus" class="operation-status small muted" role="status" aria-live="polite">选择应用后可提交静态检查。</p>
+                </section>
+                <section class="route-check-card" aria-labelledby="staticCheckResultTitle">
+                  <div class="route-check-card-heading">
+                    <div>
+                      <p class="eyebrow">STATIC RESULTS</p>
+                      <h3 id="staticCheckResultTitle">静态检查结果</h3>
+                    </div>
+                    <button id="refreshRouteChecksButton" class="button button-secondary" type="button">查询结果</button>
+                  </div>
+                  <p id="staticCheckResultStatus" class="operation-status small muted" role="status" aria-live="polite">尚未查询静态检查结果。</p>
+                  <div id="staticCheckResults" class="route-check-results" aria-live="polite">
+                    <p class="route-check-empty muted">尚未查询静态检查结果。</p>
+                  </div>
+                </section>
+              </div>
+
+              <div class="route-check-column" aria-label="动态检查">
+                <section class="route-check-card" aria-labelledby="dynamicRouteCheckTitle">
+                  <div class="route-check-card-heading">
+                    <div>
+                      <p class="eyebrow">DYNAMIC CHECK</p>
+                      <h3 id="dynamicRouteCheckTitle">动态检查</h3>
+                    </div>
+                  </div>
+                  <label>
+                    已部署 Build ID
+                    <select id="routeCheckBuildId" disabled>
+                      <option value="">请先选择应用</option>
+                    </select>
+                  </label>
+                  <p class="field-help">动态重验仅适用于当前应用已有的构建。</p>
+                  <div class="form-actions">
+                    <button id="dynamicRouteCheckButton" class="button button-primary" type="button">提交动态重验</button>
+                  </div>
+                  <p id="dynamicRouteCheckStatus" class="operation-status small muted" role="status" aria-live="polite">选择应用和构建后可提交动态重验。</p>
+                </section>
+                <section class="route-check-card" aria-labelledby="dynamicCheckResultTitle">
+                  <div class="route-check-card-heading">
+                    <div>
+                      <p class="eyebrow">DYNAMIC RESULTS</p>
+                      <h3 id="dynamicCheckResultTitle">动态检查结果</h3>
+                    </div>
+                    <button id="refreshDynamicCheckResultButton" class="button button-secondary" type="button">查询结果</button>
+                  </div>
+                  <p id="dynamicCheckResultStatus" class="operation-status small muted" role="status" aria-live="polite">尚未查询动态检查结果。</p>
+                  <div id="dynamicCheckResults" class="route-check-results" aria-live="polite">
+                    <p class="route-check-empty muted">请选择构建并查询动态检查结果。</p>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <section id="operationSection" class="workspace-section" aria-labelledby="operationTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">04 / OPERATIONS</p>
+                <h2 id="operationTitle">应用操作</h2>
+                <p class="muted">选择已打开应用下的工作区。操作数据会限定在应用 <strong id="operationAppName">未选择</strong>。</p>
+              </div>
+            </div>
+            <div class="operation-card-grid">
+              <button class="operation-card" type="button" data-operation-section="workspaceSection"><strong>文件管理</strong><span>上传源码和配置文件，维护应用构建暂存区。</span></button>
+              <button class="operation-card" type="button" data-operation-section="historySection"><strong>历史任务</strong><span>查看该应用的构建历史、运行状态和任务详情。</span></button>
+              <button class="operation-card" type="button" data-operation-section="resourcesSection"><strong>运行资源</strong><span>查看服务、镜像、事件、告警和访问入口。</span></button>
+              <button class="operation-card" type="button" data-operation-section="buildResourcesSection"><strong>构建资源</strong><span>按 Build ID 查询资源，并按需清理。</span></button>
+              <button class="operation-card" type="button" data-operation-section="templatesSection"><strong>模板</strong><span>管理技术栈目录并组合生成 Compose。</span></button>
+              <button class="operation-card" type="button" data-operation-section="baseImagesSection"><strong>基础镜像</strong><span>查看和同步构建可用的基础镜像。</span></button>
+            </div>
+          </section>
+
           <section id="historySection" class="workspace-section">
             <div class="section-heading">
               <div>
                 <p class="eyebrow">03 / HISTORY</p>
-                <h2>历史任务</h2>
+                <h2 id="historyTitle">历史任务</h2>
               </div>
-              <span class="section-note">按应用和状态查询已持久化构建</span>
+              <span id="historyScopeNote" class="section-note">仅显示当前打开应用的已持久化构建</span>
             </div>
             <form id="historyFilterForm" class="history-controls">
               <label>
-                App ID
-                <input id="historyAppId" placeholder="留空查询全部应用" autocomplete="off" />
+                应用
+                <input id="historyAppId" placeholder="从应用列表打开应用" autocomplete="off" readonly />
               </label>
               <label>
                 状态
@@ -427,7 +545,7 @@
               </div>
             </div>
             <form id="buildResourcesForm" class="form-grid">
-              <label>Build ID<input id="buildResourcesId" required pattern="[a-f0-9]{32}" maxlength="32" placeholder="输入构建 ID" /></label>
+              <label>Build ID<select id="buildResourcesId" required disabled><option value="">请先选择应用</option></select></label>
               <div class="history-filter-actions">
                 <button id="loadBuildResourcesButton" class="button button-secondary" type="submit">查询构建资源</button>
                 <button id="cleanupBuildResourcesButton" class="button button-quiet" type="button" disabled>清理该构建资源</button>
@@ -476,7 +594,7 @@
                   </thead>
                   <tbody id="serviceAccessTableBody"></tbody>
                 </table>
-                <p id="serviceAccessEmpty" class="access-empty muted">请先连接并选择 App ID，再查询访问入口。</p>
+                <p id="serviceAccessEmpty" class="access-empty muted">请先登录并从应用列表打开应用，再查询访问入口。</p>
               </div>
             </section>
             <div class="resource-viewer">
@@ -484,7 +602,7 @@
                 <span id="resourceTitle">请选择资源</span>
                 <span id="resourceTimestamp" class="muted small"></span>
               </div>
-              <pre id="resourceOutput" class="json-output tall" aria-live="polite">需要先连接并选择 App ID</pre>
+              <pre id="resourceOutput" class="json-output tall" aria-live="polite">需要先登录并从应用列表打开应用</pre>
             </div>
           </section>
 
@@ -520,7 +638,7 @@
                   <input id="techStackSearch" type="search" placeholder="按 ID 或名称筛选" autocomplete="off" />
                 </label>
                 <div id="techStackList" class="tech-stack-list" role="listbox" aria-label="技术栈列表">
-                  <p class="muted small">连接后刷新技术栈目录。</p>
+                  <p class="muted small">登录后刷新技术栈目录。</p>
                 </div>
               </aside>
 
@@ -575,7 +693,7 @@
                   <div>
                     <span class="field-label">组件选择</span>
                     <div id="templateComponents" class="component-list">
-                      <span class="muted small">连接后加载可组合组件</span>
+                      <span class="muted small">登录后加载可组合组件</span>
                     </div>
                   </div>
                   <label>
@@ -620,6 +738,42 @@
               <button id="syncBaseImagesButton" class="button button-primary" type="button">同步基础镜像</button>
             </div>
             <pre id="baseImagesOutput" class="json-output tall">等待基础镜像操作</pre>
+          </section>
+
+          <section id="agentSettingsSection" class="workspace-section last-section" aria-labelledby="agentSettingsTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">GLOBAL / AGENT</p>
+                <h2 id="agentSettingsTitle">Agent 设置</h2>
+                <p class="muted">配置后续检查任务使用的角色提示词、输出结构和运行参数；已提交任务保留提交时的版本。</p>
+              </div>
+              <span id="agentRoleVersion" class="section-note">未加载</span>
+            </div>
+            <form id="agentRoleForm" class="stack-form agent-role-form">
+              <label>
+                Agent 角色
+                <select id="agentRoleSelect" required disabled>
+                  <option value="">登录后加载角色</option>
+                </select>
+              </label>
+              <label>
+                提示词
+                <textarea id="agentRolePrompt" rows="12" spellcheck="false" required disabled></textarea>
+              </label>
+              <label>
+                输出 JSON Schema
+                <textarea id="agentRoleSchema" rows="10" spellcheck="false" required disabled></textarea>
+              </label>
+              <label>
+                运行参数 JSON
+                <textarea id="agentRoleRuntime" rows="8" spellcheck="false" required disabled></textarea>
+              </label>
+              <div class="form-actions">
+                <button id="saveAgentRoleButton" class="button button-primary" type="submit" disabled>保存 Agent 设置</button>
+                <button id="reloadAgentRolesButton" class="button button-secondary" type="button" disabled>重新加载</button>
+              </div>
+              <p id="agentRoleStatus" class="operation-status muted small" role="status" aria-live="polite">登录后加载 Agent 角色配置。</p>
+            </form>
           </section>
 
           <footer class="workspace-footer">

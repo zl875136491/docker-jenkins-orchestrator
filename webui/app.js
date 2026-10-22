@@ -3,8 +3,10 @@
 
   const TOKEN_KEY = "orchestrator.control.token";
   const REFRESH_TOKEN_KEY = "orchestrator.control.refresh-token";
-  const APP_KEY = "orchestrator.control.appid";
-  const APP_NAME_KEY = "orchestrator.control.appname";
+  // Older releases persisted an implicit app context. Drop it during upgrade;
+  // application selection now happens explicitly in the topbar selector.
+  localStorage.removeItem("orchestrator.control.appid");
+  localStorage.removeItem("orchestrator.control.appname");
   const DISPLAY_TIME_ZONE = "Asia/Shanghai";
   const TOAST_TIMEOUT_MS = 5000;
   const BUILD_POLL_INTERVAL_MS = 5000;
@@ -13,9 +15,14 @@
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY) || "",
-    appid: localStorage.getItem(APP_KEY) || "",
-    appName: localStorage.getItem(APP_NAME_KEY) || "",
-    activeSection: "appSection",
+    appid: "",
+    appName: "",
+    apps: [],
+    appIdentifiers: { appId: "", builds: [], commitShas: [] },
+    agentRoles: [],
+    selectedAgentRoleKey: "",
+    creatingApp: false,
+    activeSection: "appListSection",
     buildId: "",
     buildAppid: "",
     latestBuild: null,
@@ -30,6 +37,7 @@
     historyPageSize: 20,
     historyTotal: 0,
     historyLoading: false,
+    historyGeneration: 0,
     historyTimer: null,
     techStacks: [],
     selectedTechStackId: "",
@@ -51,11 +59,11 @@
     resourceBuildTimer: null,
     resourceBuildGeneration: 0,
     resourceBuildBusy: false,
+    routeCheckGeneration: 0,
+    currentAppCommit: "",
   };
 
   const $ = (id) => document.getElementById(id);
-  const apiOrigin = window.location.origin;
-  $("apiOrigin").textContent = apiOrigin;
 
   class ApiError extends Error {
     constructor(status, payload) {
@@ -136,21 +144,149 @@
 
   function setSession(online, detail = "") {
     const status = $("sessionStatus");
-    status.textContent = online ? "已连接" : "未连接";
+    status.textContent = online ? "已登录" : "未登录";
     status.className = `status-dot ${online ? "online" : "offline"}`;
-    $("sessionDetail").textContent = detail || (online ? "JWT 已保存到当前浏览器。" : "请输入 client 凭据获取 JWT。");
+    $("sessionDetail").textContent = detail || (online ? "已登录，访问令牌保存在当前浏览器。" : "请输入客户端凭据登录控制端。");
+    const loginLink = $("openLoginModal");
+    if (loginLink) loginLink.textContent = online ? "重新登录" : "登录";
+    $("disconnectButton").hidden = !online;
+    $("appSelector").disabled = !online;
+    $("refreshAppsButton").disabled = !online;
+    $("newAppButton").disabled = !online;
+    updateAgentRoleControls();
     renderWorkspace();
   }
 
   function setCurrentApp(name = "") {
     state.appName = String(name || "").trim();
-    if (state.appName) {
-      localStorage.setItem(APP_NAME_KEY, state.appName);
-    } else {
-      localStorage.removeItem(APP_NAME_KEY);
+    const selected = Boolean(state.appid && !state.creatingApp);
+    const title = selected ? (state.appName ? `${state.appName} (${state.appid})` : state.appid) : "";
+    $("operationAppName").textContent = title || "未选择";
+    $("appSelector").value = selected ? state.appid : "";
+    $("appId").readOnly = selected;
+    renderAppIdentifierSelectors();
+    updateHistoryPresentation();
+    $("navigationHint").textContent = selected
+      ? `当前应用：${title}`
+      : "从顶部选择应用，或切换到全局设置。";
+  }
+
+  function renderAppIdentifierSelectors() {
+    const appSelector = $("routeCheckAppId");
+    const appValue = state.appid && !state.creatingApp ? state.appid : "";
+    appSelector.replaceChildren(new Option(appValue || "请先选择应用", appValue));
+    appSelector.value = appValue;
+    appSelector.disabled = true;
+
+    const previousCommit = $("routeCheckCommitId").value;
+    const commitSelector = $("routeCheckCommitId");
+    commitSelector.replaceChildren(new Option("使用应用当前分支 HEAD", ""));
+    state.appIdentifiers.commitShas.forEach((sha) => {
+      const current = sha === state.currentAppCommit ? "（当前源码）" : "";
+      commitSelector.add(new Option(`${sha}${current}`, sha));
+    });
+    commitSelector.value = state.appIdentifiers.commitShas.includes(previousCommit) ? previousCommit : "";
+    commitSelector.disabled = !appValue;
+
+    const previousBuilds = {
+      build: $("buildId").value,
+      route: $("routeCheckBuildId").value,
+      resources: $("buildResourcesId").value,
+    };
+    const buildSelectors = [$("buildId"), $("routeCheckBuildId"), $("buildResourcesId")];
+    buildSelectors.forEach((selector, index) => {
+      const selected = previousBuilds[["build", "route", "resources"][index]];
+      selector.replaceChildren(new Option(appValue ? "选择此应用的构建" : "请先选择应用", ""));
+      state.appIdentifiers.builds.forEach((build) => {
+        const suffix = [build.status, build.git_commit_sha?.slice(0, 8)].filter(Boolean).join(" · ");
+        selector.add(new Option(suffix ? `${build.build_id} (${suffix})` : build.build_id, build.build_id));
+      });
+      selector.value = state.appIdentifiers.builds.some((build) => build.build_id === selected) ? selected : "";
+      selector.disabled = !appValue || !state.appIdentifiers.builds.length;
+    });
+  }
+
+  function addCommitChoice(commitId) {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(String(commitId || ""))) return;
+    if (!state.appIdentifiers.commitShas.includes(commitId)) {
+      state.appIdentifiers.commitShas.push(commitId);
+      state.appIdentifiers.commitShas.sort((left, right) => right.localeCompare(left));
     }
-    const target = $("metricApp");
-    if (target) target.textContent = state.appName || "未设置";
+  }
+
+  function addBuildChoice(build) {
+    if (!build?.build_id || !state.appid || (build.appid && build.appid !== state.appid)) return;
+    const existing = state.appIdentifiers.builds.findIndex((item) => item.build_id === build.build_id);
+    const choice = { build_id: build.build_id, appid: state.appid, status: build.status || "unknown", git_commit_sha: build.git_commit_sha || null };
+    if (existing < 0) state.appIdentifiers.builds.unshift(choice);
+    else state.appIdentifiers.builds[existing] = { ...state.appIdentifiers.builds[existing], ...choice };
+    addCommitChoice(build.git_commit_sha);
+    renderAppIdentifierSelectors();
+  }
+
+  async function loadAppIdentifiers(appid, currentCommit = "") {
+    state.appIdentifiers = { appId: appid, builds: [], commitShas: [] };
+    state.currentAppCommit = currentCommit || "";
+    addCommitChoice(currentCommit);
+    renderAppIdentifierSelectors();
+    try {
+      const value = await request(`/api/v1/apps/${encodeURIComponent(appid)}/identifiers`);
+      if (state.appid !== appid || value?.app_id !== appid) return null;
+      state.appIdentifiers = {
+        appId: appid,
+        builds: Array.isArray(value.builds) ? value.builds.filter((build) => build?.build_id) : [],
+        commitShas: Array.isArray(value.commit_shas) ? value.commit_shas.filter((sha) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)) : [],
+      };
+      state.currentAppCommit = currentCommit || "";
+      addCommitChoice(currentCommit);
+      renderAppIdentifierSelectors();
+      return state.appIdentifiers;
+    } catch (error) {
+      if (state.appid !== appid) return null;
+      setRouteCheckStatus(`已载入应用，但构建/Commit 选项加载失败：${errorMessage(error)}。可刷新应用后重试。`, "error");
+      renderAppIdentifierSelectors();
+      return null;
+    }
+  }
+
+  function renderAppSelector() {
+    const selector = $("appSelector");
+    const current = state.appid;
+    selector.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "应用列表 / 选择应用";
+    selector.appendChild(placeholder);
+    state.apps.forEach((app) => {
+      const option = document.createElement("option");
+      option.value = app.appid;
+      option.textContent = `${app.name || app.appid} (${app.appid})`;
+      selector.appendChild(option);
+    });
+    selector.value = current;
+    if (selector.value !== current) selector.value = "";
+  }
+
+  function updateHistoryPresentation() {
+    const selected = Boolean(state.appid && !state.creatingApp);
+    const title = selected ? (state.appName ? `${state.appName} (${state.appid})` : state.appid) : "";
+    $("historyTitle").textContent = "历史任务";
+    $("historyScopeNote").textContent = "仅显示当前打开应用的已持久化构建";
+    $("historyAppId").value = selected ? title : "";
+  }
+
+  function clearHistoryView(message = "打开应用后加载该应用的历史任务") {
+    state.historyGeneration += 1;
+    state.historyLoading = false;
+    state.historyPage = 1;
+    state.historyTotal = 0;
+    $("historyStatus").value = "";
+    $("historyTableBody").replaceChildren();
+    $("historyTable").hidden = true;
+    $("historyEmpty").hidden = false;
+    $("historySummary").textContent = message;
+    $("historyLoading").textContent = "";
+    renderHistoryPagination();
   }
 
   function sectionFromHash() {
@@ -167,7 +303,8 @@
     const modal = $(modalId);
     if (!modal) return;
     if (window.location.hash === `#${modalId}`) {
-      window.location.hash = state.activeSection || "appSection";
+      const restoreSection = state.activeSection || "appListSection";
+      window.location.hash = restoreSection;
     }
     modal.removeAttribute("data-open");
   }
@@ -198,25 +335,45 @@
   }
 
   function syncNavigation() {
-    const section = sectionFromHash();
+    let section = sectionFromHash();
+    if (section === "appListSection" && (state.appid || state.creatingApp)) {
+      resetAppView();
+    }
+    const appSections = new Set([
+      "appSection", "buildSection", "routeChecksSection", "operationSection", "workspaceSection", "historySection",
+      "buildResourcesSection", "resourcesSection",
+    ]);
+    const globalSections = new Set(["templatesSection", "baseImagesSection", "agentSettingsSection"]);
+    if (appSections.has(section) && !state.appid && !(section === "appSection" && state.creatingApp)) {
+      section = "appListSection";
+      window.location.hash = section;
+    }
+    if (!section) section = state.activeSection || "appListSection";
     if (section) state.activeSection = section;
-    const activeSection = section || state.activeSection || "appSection";
     document.querySelectorAll(".workspace-section").forEach((item) => {
-      const active = item.id === activeSection;
+      const active = item.id === section;
       item.classList.toggle("active", active);
       item.toggleAttribute("aria-hidden", !active);
     });
-    document.querySelectorAll(".side-nav a[href^='#']").forEach((link) => {
-      const active = link.getAttribute("href") === `#${activeSection}`;
+    document.querySelectorAll(".navigation-panel a[href^='#']").forEach((link) => {
+      const targetSection = link.getAttribute("href").slice(1);
+      const active = targetSection === section;
       link.classList.toggle("active", active);
-      if (active) link.setAttribute("aria-current", "page");
+      if (targetSection === section) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
+    const globalActive = globalSections.has(section);
+    $("globalTab").classList.toggle("active", globalActive);
+    $("applicationTab").classList.toggle("active", !globalActive);
+    $("globalTab").setAttribute("aria-selected", String(globalActive));
+    $("applicationTab").setAttribute("aria-selected", String(!globalActive));
+    $("globalNavigation").hidden = !globalActive;
+    $("applicationNavigation").hidden = globalActive;
     activateWorkspace();
   }
 
   function bindNavigation() {
-    document.querySelectorAll(".side-nav a[href^='#']").forEach((link) => {
+    document.querySelectorAll(".navigation-panel a[href^='#']").forEach((link) => {
       link.addEventListener("click", () => {
         const sectionId = link.getAttribute("href").slice(1);
         if ($(sectionId)?.classList.contains("workspace-section")) {
@@ -224,6 +381,16 @@
           syncNavigation();
         }
       });
+    });
+    $("applicationTab").addEventListener("click", () => {
+      window.location.hash = state.appid ? "appSection" : "appListSection";
+      syncNavigation();
+    });
+    $("globalTab").addEventListener("click", () => {
+      if (!["templatesSection", "baseImagesSection", "agentSettingsSection"].includes(state.activeSection)) {
+        window.location.hash = "templatesSection";
+      }
+      syncNavigation();
     });
     window.addEventListener("hashchange", syncNavigation);
     syncNavigation();
@@ -279,23 +446,60 @@
   }
 
   function resetAppView() {
+    stopHistoryPolling();
+    stopHistoryDetailLoading();
+    clearHistoryView();
+    state.appid = "";
+    state.creatingApp = false;
     resetWorkspaceView();
     stopBuildCreation();
     stopBuildPolling("应用已切换，自动查询已停止。", "muted");
+    resetBuildResources();
     resetBuildView();
     state.loadedApp = null;
     state.syncRefreshPendingAppid = "";
     state.environmentDirty = false;
     state.environmentBaseline = "{}";
     state.appContextVersion += 1;
+    state.appName = "";
+    $("appName").value = "";
+    $("repositoryUrl").value = "";
+    $("gitRef").value = "main";
+    $("components").value = "";
+    $("compose").value = "";
+    $("appId").readOnly = false;
     $("environment").value = "{}";
+    $("requireRoute").value = "";
+    $("routeCheckAppId").value = "";
+    $("routeCheckCommitId").value = "";
+    $("routeCheckBuildId").value = "";
+    $("buildResourcesId").value = "";
+    state.appIdentifiers = { appId: "", builds: [], commitShas: [] };
+    state.currentAppCommit = "";
+    state.routeCheckGeneration += 1;
     $("environment").placeholder = "{}";
     $("environmentHelp").textContent = "创建时使用此 JSON；读取应用只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。";
     $("composeSourceStatus").textContent = "尚未读取当前应用，来源未确认。编辑器中的内容可能是未保存草稿。";
     ["composeSourceFile", "composeSourceCommit", "composeSourceRef"].forEach((id) => { $(id).textContent = "--"; });
     $("composeSourcePanel").removeAttribute("data-appid");
     $("serviceAccessRegion").textContent = "--";
+    $("serviceAccessSummary").textContent = "查询后显示已发布端口和可访问 URL。";
+    $("serviceAccessTableBody").replaceChildren();
+    $("serviceAccessTable").hidden = true;
+    $("serviceAccessEmpty").hidden = false;
+    $("serviceAccessEmpty").textContent = "请先登录并从应用列表打开应用，再查询访问入口。";
+    $("resourceTitle").textContent = "请选择资源";
+    $("resourceTimestamp").textContent = "";
+    pretty("resourceOutput", "需要先登录并从应用列表打开应用");
+    $("metricServices").textContent = "--";
+    clearRouteCheckResults();
+    setRouteCheckStatus("选择应用后可提交静态检查。", "muted", "staticRouteCheckStatus");
+    setRouteCheckStatus("尚未查询静态检查结果。", "muted", "staticCheckResultStatus");
+    setRouteCheckStatus("选择应用和构建后可提交动态重验。", "muted", "dynamicRouteCheckStatus");
+    setRouteCheckStatus("尚未查询动态检查结果。", "muted", "dynamicCheckResultStatus");
     $("syncResultPanel").hidden = true;
+    $("historyAppId").value = "";
+    setCurrentApp("");
     pretty("appSyncOutput", "等待同步操作");
     setSyncStatus("同步使用已保存的仓库和 Git 引用，覆盖已保存的 Compose；不会自动构建。");
   }
@@ -335,7 +539,9 @@
       timer: null,
     };
     state.appOperation = operation;
-    document.querySelectorAll("#appForm input, #appForm textarea, #appForm button, #appForm select, #appContextModal button, #appContextModal select, #buildForm input, #buildForm button, #connectForm input, #connectForm button, #templateForm button").forEach((control) => {
+    operation.appSelectorWasDisabled = $("appSelector").disabled;
+    $("appSelector").disabled = true;
+    document.querySelectorAll("#appForm input, #appForm textarea, #appForm button, #appForm select, #buildForm input, #buildForm button, #loginForm input, #loginForm button, #templateForm button").forEach((control) => {
       operation.controls.push([control, control.disabled]);
       control.disabled = true;
     });
@@ -346,7 +552,7 @@
         control.disabled = true;
       }
     });
-    ["openAppContextModal", "openConnectionModal", "workspaceSelectAppButton"].forEach((id) => {
+    ["openLoginModal"].forEach((id) => {
       const link = $(id);
       if (!link) return;
       operation.links.push([link, link.getAttribute("aria-disabled"), link.getAttribute("tabindex")]);
@@ -370,6 +576,8 @@
       if (tabIndex === null) link.removeAttribute("tabindex");
       else link.setAttribute("tabindex", tabIndex);
     });
+    $("appSelector").disabled = !state.token || operation.appSelectorWasDisabled;
+    renderAppSelector();
     $("appForm").removeAttribute("aria-busy");
     $("composeSourcePanel").removeAttribute("aria-busy");
     $("syncAppButton").textContent = "同步仓库 Compose";
@@ -391,15 +599,10 @@
   function appidFromInput() {
     const value = $("appId").value.trim() || state.appid;
     if (!value) throw new Error("请先填写 App ID");
-    if (value !== state.appid) {
-      setCurrentApp("");
-      resetAppView();
-    }
+    if (state.appid && value !== state.appid) throw new Error("应用 ID 已锁定；请返回应用列表切换应用。");
     state.appid = value;
-    localStorage.setItem(APP_KEY, value);
     $("appId").value = value;
-    const selector = $("contextAppSelect");
-    if (selector) selector.value = value;
+    setCurrentApp(state.appName);
     renderWorkspace();
     return value;
   }
@@ -407,16 +610,23 @@
   function applyApp(app) {
     if (state.appid !== app.appid) resetAppView();
     state.appid = app.appid || "";
-    localStorage.setItem(APP_KEY, state.appid);
+    state.creatingApp = false;
+    updateHistoryPresentation();
     setCurrentApp(app.name || "");
     $("appId").value = app.appid || "";
-    const selector = $("contextAppSelect");
-    if (selector) selector.value = app.appid || "";
+    $("appId").readOnly = Boolean(state.appid);
     $("appName").value = app.name || "";
     $("repositoryUrl").value = app.repository_url || "";
     $("gitRef").value = app.git_ref || "main";
     $("components").value = (app.components || []).join(",");
+    $("requireRoute").value = app.require_route || "";
     $("compose").value = app.compose !== null && app.compose !== undefined ? JSON.stringify(app.compose, null, 2) : "";
+    $("routeCheckAppId").value = app.appid || "";
+    state.currentAppCommit = app.compose_source_commit || "";
+    addCommitChoice(state.currentAppCommit);
+    renderAppIdentifierSelectors();
+    $("routeCheckCommitId").value = state.currentAppCommit;
+    state.routeCheckGeneration += 1;
     state.loadedApp = JSON.parse(JSON.stringify(app));
     state.environmentDirty = false;
     state.environmentBaseline = "";
@@ -517,7 +727,7 @@
       rows.appendChild(row);
     });
     $("workspaceEmpty").hidden = filtered.length > 0;
-    $("workspaceEmpty").textContent = !state.token ? "请先连接控制端。"
+    $("workspaceEmpty").textContent = !state.token ? "请先登录控制端。"
       : !state.appid ? "请选择已注册应用。"
         : !loaded ? (busy ? "正在处理文件，请稍候…" : "请刷新文件列表。")
           : files.length ? "没有匹配的文件。" : "Workspace 为空，请上传文件后再创建构建。";
@@ -543,7 +753,7 @@
 
   async function withWorkspaceOperation(label, action) {
     ensureAppIdle();
-    if (!state.token) throw new Error("请先连接控制端");
+    if (!state.token) throw new Error("请先登录控制端");
     if (!state.appid) throw new Error("请先选择已注册应用");
     if (state.workspaceOperation) throw new Error("文件操作进行中，请等待完成");
     const operation = { appid: state.appid, controller: new AbortController(), changed: false };
@@ -637,39 +847,142 @@
     });
   }
 
-  async function loadAppChoices() {
-    const selector = $("contextAppSelect");
-    if (!selector) return [];
-    const apps = await request("/api/v1/jenkins/app_list");
-    selector.replaceChildren();
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = apps.length ? "请选择应用" : "暂无已创建应用";
-    selector.appendChild(placeholder);
-    apps.forEach((app) => {
-      const option = document.createElement("option");
-      option.value = app.appid;
-      option.textContent = `${app.name} (${app.appid})`;
-      selector.appendChild(option);
+  function renderAppList() {
+    const list = $("appList");
+    list.replaceChildren();
+    $("appListEmpty").hidden = state.apps.length > 0 || !state.token;
+    state.apps.forEach((app) => {
+      const card = document.createElement("article");
+      card.className = "app-card";
+      const details = document.createElement("div");
+      details.className = "app-card-details";
+      const title = document.createElement("h3");
+      title.textContent = app.name || app.appid;
+      const identifier = document.createElement("p");
+      identifier.className = "muted small";
+      identifier.textContent = `App ID: ${app.appid}`;
+      const repository = document.createElement("p");
+      repository.className = "muted small app-card-repository";
+      repository.textContent = app.repository_url || "未配置仓库";
+      details.append(title, identifier, repository);
+      const open = document.createElement("button");
+      open.className = "button button-secondary";
+      open.type = "button";
+      open.textContent = "打开应用";
+      open.dataset.appid = app.appid;
+      open.addEventListener("click", () => withFeedback(() => openApplication(app.appid), "appOutput"));
+      card.append(details, open);
+      list.appendChild(card);
     });
-    selector.value = apps.some((app) => app.appid === state.appid) ? state.appid : "";
-    $("contextAppHint").textContent = apps.length
-      ? `已加载 ${apps.length} 个应用，选择后会同步资源查询上下文。`
-      : "暂无已创建应用，请先在应用页面创建。";
+  }
+
+  async function loadApps() {
+    if (!state.token) {
+      $("appListStatus").textContent = "请先登录，再加载应用列表。";
+      state.apps = [];
+      renderAppSelector();
+      renderAppList();
+      return [];
+    }
+    $("appListStatus").textContent = "正在加载应用列表…";
+    const apps = await request("/api/v1/jenkins/app_list");
+    state.apps = Array.isArray(apps) ? apps : [];
+    if (state.appid && !state.apps.some((app) => app.appid === state.appid)) {
+      resetAppView();
+      window.location.hash = "appListSection";
+    }
+    renderAppSelector();
+    renderAppList();
+    $("appListStatus").textContent = state.apps.length ? `已加载 ${state.apps.length} 个应用。` : "暂无已创建应用。";
     return apps;
   }
 
-  async function selectContextApp() {
+  async function openApplication(appid) {
     ensureAppIdle();
-    const appid = $("contextAppSelect").value.trim();
-    if (!appid) throw new Error("请先选择已有应用");
+    if (!state.token) throw new Error("请先登录控制端");
+    if (!appid) throw new Error("缺少 App ID");
+    if (state.appid !== appid) resetAppView();
+    state.appid = appid;
+    state.appName = state.apps.find((app) => app.appid === appid)?.name || "";
+    state.creatingApp = false;
+    updateHistoryPresentation();
+    $("appId").value = appid;
+    $("appId").readOnly = true;
+    setCurrentApp(state.appName);
     return withAppOperation("读取应用中…", appid, async (operation) => {
       const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
-      if (state.appContextVersion !== operation.version || $("contextAppSelect").value !== appid
-        || state.appid !== operation.activeAppid || $("appId").value.trim() !== operation.inputAppid) return null;
+      if (!sameAppContext(appid, operation.version)) return null;
       applyApp(value);
+      await loadAppIdentifiers(appid, value.compose_source_commit || "");
+      $("historyAppId").value = appid;
+      window.location.hash = "appSection";
+      await loadHistory({ resetPage: true, silent: true });
+      updateHistoryPolling();
       return value;
     });
+  }
+
+  function updateAgentRoleControls() {
+    const selectedRole = state.agentRoles.find((role) => role.role_key === state.selectedAgentRoleKey);
+    const enabled = Boolean(state.token && selectedRole);
+    ["agentRoleSelect", "agentRolePrompt", "agentRoleSchema", "agentRoleRuntime", "saveAgentRoleButton", "reloadAgentRolesButton"]
+      .forEach((id) => { $(id).disabled = !state.token || (id !== "reloadAgentRolesButton" && id !== "agentRoleSelect" && !selectedRole); });
+    if (!state.token) $("agentRoleSelect").disabled = true;
+    $("saveAgentRoleButton").disabled = !enabled;
+  }
+
+  function renderAgentRoleEditor() {
+    const selector = $("agentRoleSelect");
+    selector.replaceChildren();
+    state.agentRoles.forEach((role) => {
+      const option = document.createElement("option");
+      option.value = role.role_key;
+      option.textContent = role.role_key === "static_build_agent" ? "静态构建检查 Agent" : role.role_key === "dynamic_debug_agent" ? "动态调试 Agent" : role.role_key;
+      selector.appendChild(option);
+    });
+    if (!state.agentRoles.some((role) => role.role_key === state.selectedAgentRoleKey)) {
+      state.selectedAgentRoleKey = state.agentRoles[0]?.role_key || "";
+    }
+    selector.value = state.selectedAgentRoleKey;
+    const selected = state.agentRoles.find((role) => role.role_key === state.selectedAgentRoleKey);
+    $("agentRolePrompt").value = selected?.prompt || "";
+    $("agentRoleSchema").value = selected ? JSON.stringify(selected.output_schema, null, 2) : "";
+    $("agentRoleRuntime").value = selected ? JSON.stringify(selected.runtime_config || {}, null, 2) : "";
+    $("agentRoleVersion").textContent = selected ? `角色版本 v${selected.agent_role_version}` : "未加载";
+    if (!selected) $("agentRoleStatus").textContent = state.token ? "没有可用的 Agent 角色配置。" : "登录后加载 Agent 角色配置。";
+    updateAgentRoleControls();
+  }
+
+  async function loadAgentRoles() {
+    if (!state.token) {
+      state.agentRoles = [];
+      state.selectedAgentRoleKey = "";
+      renderAgentRoleEditor();
+      return [];
+    }
+    $("agentRoleStatus").textContent = "正在加载 Agent 角色配置…";
+    const roles = await request("/api/v1/agent-roles");
+    state.agentRoles = Array.isArray(roles) ? roles : [];
+    renderAgentRoleEditor();
+    $("agentRoleStatus").textContent = state.agentRoles.length
+      ? `已加载 ${state.agentRoles.length} 个角色。保存后会创建新版本，已提交任务不受影响。`
+      : "没有可用的 Agent 角色配置。";
+    return state.agentRoles;
+  }
+
+  async function saveAgentRole() {
+    const roleKey = state.selectedAgentRoleKey;
+    if (!roleKey) throw new Error("请先选择 Agent 角色");
+    const payload = {
+      prompt: $("agentRolePrompt").value,
+      output_schema: parsedJson($("agentRoleSchema").value, "输出 JSON Schema"),
+      runtime_config: parsedJson($("agentRoleRuntime").value, "运行参数"),
+    };
+    const updated = await request(`/api/v1/agent-roles/${encodeURIComponent(roleKey)}`, { method: "PUT", body: payload });
+    state.agentRoles = state.agentRoles.map((role) => role.role_key === roleKey ? updated : role);
+    renderAgentRoleEditor();
+    $("agentRoleStatus").textContent = `已保存 ${roleKey}，当前版本 v${updated.agent_role_version}。`;
+    return updated;
   }
 
   function applyBuild(build, appid = build.appid || state.buildAppid || state.appid) {
@@ -683,6 +996,16 @@
     $("jenkinsBuild").textContent = build.jenkins_build_number ?? "--";
     $("celeryTask").textContent = build.celery_task_id || "--";
     $("buildCommit").textContent = build.git_commit_sha || "--";
+    if (appid && appid === state.appid) {
+      addBuildChoice({ ...build, appid });
+      $("buildId").value = build.build_id || "";
+      $("buildResourcesId").value = build.build_id || "";
+      $("routeCheckAppId").value = appid;
+      $("routeCheckBuildId").value = build.build_id || "";
+      if (build.git_commit_sha && state.appIdentifiers.commitShas.includes(build.git_commit_sha)) {
+        $("routeCheckCommitId").value = build.git_commit_sha;
+      }
+    }
   }
 
   function resetBuildView({ keepInput = false } = {}) {
@@ -690,7 +1013,7 @@
     state.latestBuild = null;
     state.buildAppid = "";
     state.buildLastRefreshedAt = "";
-    state.buildId = keepInput ? $("buildId").value.trim() : "";
+    state.buildId = keepInput ? $("buildId").value : "";
     if (!keepInput) $("buildId").value = "";
     ["metricBuild", "buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => { $(id).textContent = "--"; });
     $("buildStatus").className = "status-pill neutral";
@@ -812,7 +1135,7 @@
     } catch (error) {
       if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion) return;
       if (!state.token || (error instanceof ApiError && [401, 403].includes(error.status))) {
-        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新登录。", "error");
         return;
       }
       state.buildPollFailures += 1;
@@ -913,11 +1236,22 @@
           stopHistoryPolling();
           stopBuildCreation();
           stopHistoryDetailLoading();
-          resetWorkspaceView("访问令牌已失效，请重新连接后刷新文件列表。");
           resetBuildResources();
           markBuildStale();
-          stopBuildPolling("访问令牌失效，自动查询已停止，请重新连接。", "error");
-          setSession(false, "访问令牌已失效，请重新连接。");
+          const expiredBuildPoll = Boolean(state.buildPollController);
+          state.appid = "";
+          state.creatingApp = false;
+          resetAppView();
+          resetWorkspaceView("访问令牌已失效，请重新登录后刷新文件列表。");
+          state.apps = [];
+          state.agentRoles = [];
+          state.selectedAgentRoleKey = "";
+          renderAppSelector();
+          renderAppList();
+          renderAgentRoleEditor();
+          window.location.hash = "appListSection";
+          setSession(false, "登录已失效，请重新登录。");
+          if (expiredBuildPoll) setBuildPollStatus("访问令牌失效，自动查询已停止，请重新登录。", "error");
         }
         throw new ApiError(response.status, payload);
       }
@@ -943,7 +1277,7 @@
     }
   }
 
-  async function connect() {
+  async function login() {
     const payload = await request("/oauth2/token", {
       method: "POST",
       body: { client_id: $("workerName").value.trim(), client_secret: $("workerSecret").value },
@@ -952,10 +1286,10 @@
     state.refreshToken = payload.refresh_token || "";
     localStorage.setItem(TOKEN_KEY, state.token);
     if (state.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
-    setSession(true, `访问令牌有效 ${payload.expires_in || "未知"} 秒`);
+    setSession(true, `登录成功，访问令牌有效 ${payload.expires_in || "未知"} 秒`);
     activateWorkspace();
-    closeModal("connectionModal");
-    await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ resetPage: true, silent: true })]);
+    closeModal("loginModal");
+    await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles()]);
     updateHistoryPolling();
     return payload;
   }
@@ -980,6 +1314,9 @@
       git_ref: $("gitRef").value.trim() || "main",
       components,
     };
+    const requireRoute = $("requireRoute").value.trim();
+    if (requireRoute) payload.require_route = requireRoute;
+    else if (patch && state.loadedApp?.appid === appid && state.loadedApp.require_route) payload.require_route = null;
     const environmentText = $("environment").value;
     if (!patch || (environmentText.trim() && (state.environmentDirty || environmentText !== state.environmentBaseline))) {
       const environment = parsedJson(environmentText.trim() ? environmentText : "{}", "环境变量", false);
@@ -991,7 +1328,7 @@
     const compose = composeJson();
     if (compose !== undefined) payload.compose = compose;
     if (patch && state.loadedApp?.appid === appid) {
-      ["name", "repository_url", "git_ref", "components", "compose"].forEach((key) => {
+      ["name", "repository_url", "git_ref", "components", "compose", "require_route"].forEach((key) => {
         if (Object.prototype.hasOwnProperty.call(payload, key) && sameJson(payload[key], state.loadedApp[key])) {
           delete payload[key];
         }
@@ -1007,6 +1344,7 @@
       const value = await request("/api/v1/jenkins/app_create", { method: "POST", body: payload });
       if (!sameAppContext(payload.appid, operation.version)) return null;
       applyApp(value);
+      loadApps().catch(() => {});
       pretty("appOutput", value);
       return value;
     });
@@ -1148,26 +1486,24 @@
   }
 
   async function getBuild() {
-    const buildId = $("buildId").value.trim() || state.buildId;
-    if (!buildId) throw new Error("请先填写 Build ID");
+    const buildId = $("buildId").value;
+    if (!state.appid) throw new Error("请先在顶部选择当前应用");
+    if (!state.appIdentifiers.builds.some((build) => build.build_id === buildId)) {
+      throw new Error("请从顶部当前应用的构建列表选择 Build ID");
+    }
     if (state.buildPollController && state.buildId === buildId) return null;
     state.buildId = buildId;
     const generation = stopBuildPolling("正在查询最新构建状态...");
     const appContext = state.appid;
     const appInput = $("appId").value.trim();
     const appContextVersion = state.appContextVersion;
-    const expectedAppid = historyDetailContextMatches(state.historyDetailOperation)
-      ? state.historyDetailOperation.appid
-      : state.latestBuild?.build_id === buildId ? state.buildAppid : undefined;
-    const fallbackAppid = appInput || appContext;
+    const expectedAppid = state.appid;
     const controller = new AbortController();
     state.buildPollController = controller;
     try {
       const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`, { signal: controller.signal }, true, true);
       if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion) return null;
-      // A new free-form ID can belong to another app. Bind its validated
-      // owner once; all later queries/polls must keep that identity.
-      const buildAppid = validateBuildResponse(value, buildId, expectedAppid) ?? fallbackAppid;
+      const buildAppid = validateBuildResponse(value, buildId, expectedAppid);
       applyBuild(value, buildAppid);
       pretty("buildOutput", value);
       startBuildPolling(value, { appid: buildAppid });
@@ -1176,16 +1512,224 @@
       if (!buildContextMatches(generation, buildId, appContext, appInput) || state.appContextVersion !== appContextVersion || error?.name === "AbortError") return null;
       markBuildStale();
       if (error instanceof ApiError && [401, 403].includes(error.status)) {
-        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新登录。", "error");
         return null;
       }
       state.buildPollFailures = 1;
       setBuildPollStatus(`状态未刷新（${errorMessage(error)}）；约 5 秒后重试，也可点击“再次查询”。下方不是当前实时状态。`, "error");
-      scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, expectedAppid ?? fallbackAppid);
+      scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, expectedAppid);
       return null;
     } finally {
       if (state.buildPollController === controller) state.buildPollController = null;
     }
+  }
+
+  function routeCheckContextMatches(appid, generation) {
+    return generation === state.routeCheckGeneration
+      && Boolean(state.token)
+      && $("routeCheckAppId").value.trim() === appid;
+  }
+
+  function routeCheckInputsMatch(appid, commitId, generation) {
+    return routeCheckContextMatches(appid, generation)
+      && $("routeCheckCommitId").value.trim() === commitId;
+  }
+
+  function setRouteCheckStatus(message, tone = "muted", targetId = "staticRouteCheckStatus") {
+    const target = $(targetId);
+    target.textContent = message;
+    target.className = `operation-status small ${tone === "success" ? "activity-success" : tone === "error" ? "activity-error" : "muted"}`;
+  }
+
+  async function runRouteCheckAction(action, statusId) {
+    try {
+      return await action();
+    } catch (error) {
+      setRouteCheckStatus(errorMessage(error), "error", statusId);
+      throw error;
+    }
+  }
+
+  function checkStatusLabel(status, passed) {
+    if (passed === true) return `${status || "succeeded"} · 通过`;
+    if (passed === false) return `${status || "failed"} · 未通过`;
+    return status || "未运行";
+  }
+
+  function appendRouteStatusBadge(status, passed) {
+    const badge = document.createElement("span");
+    badge.className = `status-pill ${statusClass(status)}`;
+    badge.textContent = checkStatusLabel(status, passed);
+    return badge;
+  }
+
+  function appendRouteEvidence(cell, label, value) {
+    if (value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0)) return;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const output = document.createElement("pre");
+    output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    details.append(summary, output);
+    cell.appendChild(details);
+  }
+
+  function renderRouteCheckResults(targetId, results, checkType) {
+    const target = $(targetId);
+    target.replaceChildren();
+    const items = Array.isArray(results) ? results : [];
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "route-check-empty muted";
+      empty.textContent = checkType === "static" ? "此 commit 暂无静态检查结果。" : "此构建暂无动态检查结果。";
+      target.appendChild(empty);
+      return;
+    }
+    items.forEach((result) => {
+      const item = document.createElement("article");
+      item.className = "route-check-result-item";
+      const heading = document.createElement("div");
+      heading.className = "route-check-result-heading";
+      const title = document.createElement("strong");
+      title.className = "route-check-result-title";
+      title.textContent = checkType === "static" ? (result.commit_id || "Commit 未知") : (result.build_id || "Build 未知");
+      heading.appendChild(title);
+      heading.appendChild(appendRouteStatusBadge(
+        checkType === "static" ? result.static_status : result.dynamic_status,
+        checkType === "static" ? result.static_check_passed : result.dynamic_check_passed,
+      ));
+      item.appendChild(heading);
+
+      const metadata = document.createElement("p");
+      metadata.className = "route-check-result-meta muted small";
+      metadata.textContent = checkType === "static"
+        ? `目标路由：${result.require_route || "未设置"} · 代次：${result.generation ?? "--"}`
+        : `Commit：${result.git_commit_sha || result.commit_id || "--"} · 构建状态：${result.status || "未知"}`;
+      item.appendChild(metadata);
+
+      const evidence = document.createElement("div");
+      evidence.className = "route-check-result-evidence";
+      if (checkType === "static") {
+        appendRouteEvidence(evidence, "静态报告", result.static_report_text);
+        appendRouteEvidence(evidence, "差异摘要", result.diff_list);
+      } else {
+        appendRouteEvidence(evidence, "动态报告", result.dynamic_report_text);
+        appendRouteEvidence(evidence, "探针结果", result.probe_result);
+      }
+      const versions = document.createElement("span");
+      if (checkType === "static") {
+        versions.className = "muted small route-check-version";
+        versions.textContent = `Agent 版本：静态 v${result.static_agent_role_version ?? "--"} / 动态 v${result.dynamic_agent_role_version ?? "--"}`;
+        evidence.appendChild(versions);
+      }
+      if (!evidence.childElementCount) {
+        const empty = document.createElement("span");
+        empty.className = "muted small";
+        empty.textContent = "暂无报告";
+        evidence.appendChild(empty);
+      }
+      item.appendChild(evidence);
+      target.appendChild(item);
+    });
+  }
+
+  function clearRouteCheckResults() {
+    renderRouteCheckResults("staticCheckResults", [], "static");
+    renderRouteCheckResults("dynamicCheckResults", [], "dynamic");
+  }
+
+  function routeCheckAppId() {
+    if (!state.appid || state.creatingApp) throw new Error("请先在顶部选择一个已注册应用");
+    if ($("routeCheckAppId").value !== state.appid) throw new Error("路由检查仅允许操作顶部当前选择的应用");
+    return state.appid;
+  }
+
+  async function submitStaticRouteCheck() {
+    const appid = routeCheckAppId();
+    const commitId = $("routeCheckCommitId").value.trim();
+    if (commitId && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitId)) {
+      throw new Error("Commit SHA 必须是完整的 40 或 64 位十六进制值");
+    }
+    const generation = ++state.routeCheckGeneration;
+    setRouteCheckStatus("正在提交静态检查…", "muted", "staticRouteCheckStatus");
+    const value = await request(`/api/v1/apps/${encodeURIComponent(appid)}/static-checks`, {
+      method: "POST",
+      body: commitId ? { commit_id: commitId } : {},
+    });
+    if (!routeCheckInputsMatch(appid, commitId, generation)) return null;
+    const result = value?.result;
+    if (!result || result.app_id !== appid) throw new Error("静态检查回执缺少匹配的检查结果");
+    if (result.commit_id) {
+      addCommitChoice(result.commit_id);
+      renderAppIdentifierSelectors();
+      $("routeCheckCommitId").value = state.appIdentifiers.commitShas.includes(result.commit_id) ? result.commit_id : "";
+    }
+    renderRouteCheckResults("staticCheckResults", [result], "static");
+    setRouteCheckStatus(`${value.message || "静态检查任务已受理"}；当前状态：${result.static_status || "queued"}。`, "success", "staticRouteCheckStatus");
+    return value;
+  }
+
+  async function refreshRouteCheckResults() {
+    const appid = routeCheckAppId();
+    const commitId = $("routeCheckCommitId").value.trim();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitId)) {
+      throw new Error("查询检查结果需要完整的 40 或 64 位 Git commit SHA");
+    }
+    const generation = ++state.routeCheckGeneration;
+    setRouteCheckStatus("正在查询静态检查结果…", "muted", "staticCheckResultStatus");
+    const value = await request(`/api/v1/apps/${encodeURIComponent(appid)}/commits/${encodeURIComponent(commitId)}/check-results`);
+    if (!routeCheckInputsMatch(appid, commitId, generation)) return null;
+    renderRouteCheckResults("staticCheckResults", value, "static");
+    setRouteCheckStatus(`已读取 ${Array.isArray(value) ? value.length : 0} 条静态检查记录。`, "success", "staticCheckResultStatus");
+    return value;
+  }
+
+  async function submitDynamicRouteCheck() {
+    const appid = routeCheckAppId();
+    const buildId = $("routeCheckBuildId").value;
+    if (!state.appIdentifiers.builds.some((build) => build.build_id === buildId)) {
+      throw new Error("请从当前应用的构建列表选择 Build ID");
+    }
+    const commitId = $("routeCheckCommitId").value.trim();
+    const generation = ++state.routeCheckGeneration;
+    setRouteCheckStatus("正在提交动态重验…", "muted", "dynamicRouteCheckStatus");
+    const value = await request(`/api/v1/apps/${encodeURIComponent(appid)}/dynamic-checks`, {
+      method: "POST",
+      body: { build_id: buildId },
+    });
+    if (!routeCheckInputsMatch(appid, commitId, generation) || $("routeCheckBuildId").value.trim() !== buildId) return null;
+    if (value?.appid !== appid || value?.build_id !== buildId) throw new Error("动态重验回执与提交的 App / Build 不匹配");
+    if (value.status && appid === state.appid) {
+      applyBuild(value, appid);
+      pretty("buildOutput", value);
+      startBuildPolling(value, { accepted: true, appid });
+    }
+    if (value.git_commit_sha) {
+      addCommitChoice(value.git_commit_sha);
+      renderAppIdentifierSelectors();
+      $("routeCheckCommitId").value = state.appIdentifiers.commitShas.includes(value.git_commit_sha) ? value.git_commit_sha : "";
+    }
+    renderRouteCheckResults("dynamicCheckResults", [value], "dynamic");
+    setRouteCheckStatus(`动态重验已受理；构建状态：${value.status || "未知"}，动态检查：${value.dynamic_status || "queued"}。`, "success", "dynamicRouteCheckStatus");
+    return value;
+  }
+
+  async function refreshDynamicCheckResult() {
+    const appid = routeCheckAppId();
+    const buildId = $("routeCheckBuildId").value.trim();
+    if (!state.appIdentifiers.builds.some((build) => build.build_id === buildId)) {
+      throw new Error("请从当前应用的构建列表选择 Build ID");
+    }
+    const generation = ++state.routeCheckGeneration;
+    setRouteCheckStatus("正在查询动态检查结果…", "muted", "dynamicCheckResultStatus");
+    const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`);
+    if (!routeCheckContextMatches(appid, generation) || $("routeCheckBuildId").value.trim() !== buildId) return null;
+    if (value?.appid !== appid || value?.build_id !== buildId) {
+      throw new Error("动态检查结果与当前应用或 Build ID 不匹配");
+    }
+    renderRouteCheckResults("dynamicCheckResults", [value], "dynamic");
+    setRouteCheckStatus(`已读取构建 ${buildId} 的动态检查结果：${checkStatusLabel(value.dynamic_status, value.dynamic_check_passed)}。`, "success", "dynamicCheckResultStatus");
+    return value;
   }
 
   function historyPageCount() {
@@ -1243,10 +1787,10 @@
 
   function historyFilterQuery() {
     const params = new URLSearchParams();
-    const appid = $("historyAppId").value.trim();
     const status = $("historyStatus").value;
     state.historyPageSize = Number($("historyPageSize").value) || 20;
-    if (appid) params.set("app_id", appid);
+    if (!state.appid) throw new Error("请先从应用列表打开应用");
+    params.set("app_id", state.appid);
     if (status) params.set("status", status);
     params.set("page", String(state.historyPage));
     params.set("page_size", String(state.historyPageSize));
@@ -1254,30 +1798,39 @@
   }
 
   async function loadHistory({ resetPage = false, silent = false } = {}) {
-    if (!state.token) throw new Error("请先连接控制端");
+    if (!state.token) throw new Error("请先登录控制端");
+    if (!state.appid) throw new Error("请先从应用列表打开应用");
+    const appid = state.appid;
+    const generation = state.historyGeneration;
     if (resetPage) state.historyPage = 1;
     state.historyLoading = true;
     $("historyLoading").textContent = "加载中...";
     try {
       const params = historyFilterQuery();
       const value = await request(`/api/v1/jenkins/build_list?${params.toString()}`);
+      if (generation !== state.historyGeneration || state.appid !== appid || !state.token) return null;
       const items = Array.isArray(value?.items) ? value.items : [];
+      if (items.some((build) => build.appid !== appid)) {
+        throw new Error("历史任务响应包含其他应用的数据，已拒绝显示");
+      }
+      items.forEach((build) => addBuildChoice(build));
       state.historyPage = Math.max(1, Number(value?.page) || state.historyPage);
       state.historyPageSize = Math.max(1, Number(value?.page_size) || state.historyPageSize);
       state.historyTotal = Math.max(0, Number(value?.total) || 0);
       renderHistoryRows(items);
       renderHistoryPagination();
-      const appid = $("historyAppId").value.trim();
       const status = $("historyStatus").value;
-      const filterText = [appid && `App ID ${appid}`, status && `状态 ${status}`].filter(Boolean).join("，");
+      const filterText = [state.appName || appid, status && `状态 ${status}`].filter(Boolean).join("，");
       $("historySummary").textContent = filterText
         ? `${filterText}，共 ${state.historyTotal} 个任务`
         : `共 ${state.historyTotal} 个任务`;
       if (!silent) setActivity(`已加载 ${items.length} 个历史任务`, "success");
       return value;
     } finally {
-      state.historyLoading = false;
-      $("historyLoading").textContent = "";
+      if (generation === state.historyGeneration) {
+        state.historyLoading = false;
+        $("historyLoading").textContent = "";
+      }
     }
   }
 
@@ -1447,6 +2000,7 @@
     if (!buildId) throw new Error("缺少 Build ID");
     const selectedAppid = appid || state.appid || $("historyAppId").value.trim();
     if (!selectedAppid) throw new Error("该任务没有可用的 App ID");
+    if (!state.appid || selectedAppid !== state.appid) throw new Error("只能查看已打开应用的历史任务；请返回应用列表切换应用");
     const generation = stopBuildPolling("正在加载任务详情...");
     resetBuildView();
     const appContext = state.appid;
@@ -1467,6 +2021,7 @@
     };
     state.historyDetailOperation = operation;
     state.buildId = buildId;
+    addBuildChoice({ build_id: buildId, appid: selectedAppid, status: "unknown" });
     $("buildId").value = buildId;
     resetBuildResources();
     $("buildResourcesId").value = buildId;
@@ -1501,7 +2056,7 @@
       markBuildStale();
       setBuildPollStatus(`状态未刷新（${errorMessage(error)}）；约 5 秒后重试。`, "error");
       if (error instanceof ApiError && [401, 403].includes(error.status)) {
-        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新连接。", "error");
+        stopBuildPolling("认证或权限验证失败，状态未刷新；自动查询已停止，请重新登录。", "error");
       } else {
         state.buildPollFailures = 1;
         scheduleBuildPoll(generation, buildId, appContext, appInput, BUILD_POLL_INTERVAL_MS, selectedAppid);
@@ -1534,8 +2089,11 @@
   }
 
   async function loadBuildResources(cleanup = false) {
-    const buildId = $("buildResourcesId").value.trim();
-    if (!/^[a-f0-9]{32}$/.test(buildId)) throw new Error("请输入有效的 32 位 Build ID");
+    const buildId = $("buildResourcesId").value;
+    if (!state.appid || !state.appIdentifiers.builds.some((build) => build.build_id === buildId)) {
+      throw new Error("请从顶部当前应用的构建列表选择 Build ID");
+    }
+    if (!/^[a-f0-9]{32}$/.test(buildId)) throw new Error("当前选择不是有效的 32 位 Build ID");
     if (state.resourceBuildBusy) return;
     if (cleanup) {
       const report = state.resourceBuildReport;
@@ -1580,7 +2138,7 @@
 
   function updateHistoryPolling() {
     stopHistoryPolling();
-    if (!state.token || !$("historyAutoRefresh").checked) return;
+    if (!state.token || !state.appid || !$("historyAutoRefresh").checked) return;
     state.historyTimer = setInterval(() => {
       if (state.historyLoading) return;
       loadHistory({ silent: true }).catch((error) => {
@@ -1943,24 +2501,68 @@
     });
     $("buildResourcesId").addEventListener("input", resetBuildResources);
     $("cleanupBuildResourcesButton").addEventListener("click", () => withFeedback(() => loadBuildResources(true), null));
-    $("connectForm").addEventListener("submit", (event) => {
+    $("loginForm").addEventListener("submit", (event) => {
       event.preventDefault();
-      withFeedback(connect, null);
+      withFeedback(login, null);
+    });
+    $("appSelector").addEventListener("change", () => {
+      const appid = $("appSelector").value;
+      if (!appid) {
+        if (state.appid || state.creatingApp) resetAppView();
+        window.location.hash = "appListSection";
+        syncNavigation();
+        return;
+      }
+      withFeedback(() => openApplication(appid), "appOutput");
+    });
+    $("sessionMenu").addEventListener("click", (event) => {
+      if (event.target.closest(".session-menu-item")) $("sessionMenu").open = false;
+    });
+    $("agentRoleSelect").addEventListener("change", () => {
+      state.selectedAgentRoleKey = $("agentRoleSelect").value;
+      renderAgentRoleEditor();
+      $("agentRoleStatus").textContent = "已切换角色；保存将创建新的角色版本。";
+    });
+    $("agentRoleForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      withFeedback(saveAgentRole, null);
+    });
+    $("reloadAgentRolesButton").addEventListener("click", () => withFeedback(loadAgentRoles, null));
+    $("refreshAppsButton").addEventListener("click", () => withFeedback(loadApps, null));
+    $("newAppButton").addEventListener("click", () => {
+      resetAppView();
+      state.appid = "";
+      state.creatingApp = true;
+      $("appId").value = "";
+      setCurrentApp("");
+      window.location.hash = "appSection";
     });
     $("disconnectButton").addEventListener("click", () => {
       if (state.appOperation) return;
       state.token = "";
       state.refreshToken = "";
+      state.routeCheckGeneration += 1;
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(REFRESH_TOKEN_KEY);
       stopHistoryPolling();
       stopBuildCreation();
       stopHistoryDetailLoading();
-      resetWorkspaceView("已退出登录，请重新连接后查看文件。");
+      resetWorkspaceView("已退出登录，请重新登录后查看文件。");
       resetBuildResources();
       markBuildStale();
       stopBuildPolling("已退出登录，自动查询已停止。", "muted");
       setSession(false, "已清除当前浏览器中的访问令牌。");
+      state.appid = "";
+      state.creatingApp = false;
+      state.apps = [];
+      state.agentRoles = [];
+      state.selectedAgentRoleKey = "";
+      resetAppView();
+      setCurrentApp("");
+      renderAppSelector();
+      renderAppList();
+      renderAgentRoleEditor();
+      window.location.hash = "appListSection";
       setActivity("已退出", "success");
     });
     $("healthButton").addEventListener("click", () => withFeedback(async () => {
@@ -1968,40 +2570,32 @@
       $("metricHealth").textContent = value.status || "ok";
       return value;
     }, null));
-    ["openAppContextModal", "openConnectionModal", "workspaceSelectAppButton"].forEach((id) => {
-      $(id).addEventListener("click", (event) => {
-        if (state.appOperation) event.preventDefault();
-      });
-    });
-    ["openAppContextModal", "workspaceSelectAppButton"].forEach((id) => {
-      $(id).addEventListener("click", () => {
-        if (state.appOperation) return;
-        if (state.token) withFeedback(() => loadAppChoices(), null);
-      });
-    });
-    $("refreshContextAppsButton").addEventListener("click", () => withFeedback(loadAppChoices, null));
-    $("loadContextButton").addEventListener("click", () => {
-      withFeedback(selectContextApp, "appOutput").then((value) => {
-        if (value) closeModal("appContextModal");
-      });
-    });
-    $("appId").addEventListener("input", (event) => {
-      const previous = state.appid;
-      const selector = $("contextAppSelect");
-      if (selector) selector.value = "";
-      state.appid = event.target.value.trim();
-      if (state.appid) localStorage.setItem(APP_KEY, state.appid);
-      else localStorage.removeItem(APP_KEY);
-      if (state.appid !== previous) {
-        setCurrentApp("");
-        resetAppView();
-      }
+    $("appId").addEventListener("input", () => {
+      if (state.appid) return;
+      state.creatingApp = true;
     });
     $("buildId").addEventListener("input", (event) => {
       if (event.target.value.trim() === state.buildId) return;
       stopBuildPolling("Build ID 已更改；查询旧构建已停止，请查询新 ID。", "muted");
       resetBuildView({ keepInput: true });
     });
+    ["routeCheckAppId", "routeCheckCommitId", "routeCheckBuildId"].forEach((id) => {
+      $(id).addEventListener("change", () => {
+        state.routeCheckGeneration += 1;
+        if (id === "routeCheckCommitId") {
+          renderRouteCheckResults("staticCheckResults", [], "static");
+          setRouteCheckStatus("Commit 已更改，请查询该版本的静态检查结果。", "muted", "staticCheckResultStatus");
+        }
+        if (id === "routeCheckBuildId") {
+          renderRouteCheckResults("dynamicCheckResults", [], "dynamic");
+          setRouteCheckStatus("构建已更改，请查询该构建的动态检查结果。", "muted", "dynamicCheckResultStatus");
+        }
+      });
+    });
+    $("staticRouteCheckButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(submitStaticRouteCheck, "staticRouteCheckStatus"), null));
+    $("refreshRouteChecksButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(refreshRouteCheckResults, "staticCheckResultStatus"), null));
+    $("dynamicRouteCheckButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(submitDynamicRouteCheck, "dynamicRouteCheckStatus"), null));
+    $("refreshDynamicCheckResultButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(refreshDynamicCheckResult, "dynamicCheckResultStatus"), null));
     $("environment").addEventListener("input", () => { state.environmentDirty = true; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
     $("workspaceUploadForm").addEventListener("submit", (event) => {
@@ -2010,6 +2604,14 @@
     });
     $("workspaceRefreshButton").addEventListener("click", () => withFeedback(loadWorkspace, null));
     $("workspaceBuildButton").addEventListener("click", () => { window.location.hash = "buildSection"; });
+    document.querySelectorAll("[data-operation-section]").forEach((control) => {
+      control.addEventListener("click", () => {
+        const section = control.dataset.operationSection;
+        state.activeSection = section;
+        window.location.hash = section;
+        syncNavigation();
+      });
+    });
     ["workspaceFiles", "workspaceDirectory"].forEach((id) => {
       $(id).addEventListener("change", () => {
         if ($(id).files.length) $(id === "workspaceFiles" ? "workspaceDirectory" : "workspaceFiles").value = "";
@@ -2105,14 +2707,10 @@
   }
 
   async function restoreSession() {
-    if (state.appid) {
-      $("appId").value = state.appid;
-    }
-    setCurrentApp(state.appid ? state.appName : "");
     if (!state.token) return;
     try {
-      setSession(true, "访问令牌已恢复");
-      await Promise.all([loadTemplates(), loadBaseImages(), loadHistory({ silent: true }), loadAppChoices()]);
+      setSession(true, "登录状态已恢复");
+      await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles()]);
       updateHistoryPolling();
     } catch {
       setSession(false);
