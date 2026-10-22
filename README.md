@@ -1,6 +1,11 @@
 # docker-jenkins-orchestrator
 The orchestrator of docker and jenkins jobs for apps build pipeline.
 
+Route quality gates are documented in [路由静态检查与动态自愈](docs/route-checks.md).
+New builds require an associated Git commit and `require_route` with a successful static check.
+After deployment, HTTP/gRPC checks must pass before delivery succeeds; failed checks trigger build-scoped teardown.
+The worker image includes Codex CLI; configure its authentication before enabling these checks.
+
 ## Local development
 
 ```bash
@@ -26,6 +31,8 @@ docker compose up --build
 
 The production topology runs FastAPI, a Celery worker, Celery beat, MongoDB, and Redis. Redis is only the Celery broker; MongoDB persists application state, build lifecycle records, events, images, deployment services, and alerts. The worker requires Docker Engine access only when it deploys Swarm services or synchronizes base images. In the external test environment, the same production settings are used with real MongoDB, Redis/Celery, Jenkins, Harbor, and Docker Swarm; the worker waits for running tasks and probes published TCP ports before reporting success. See [docs/test-environment.md](docs/test-environment.md) and [docs/live-delivery-audit.md](docs/live-delivery-audit.md).
 
+For the isolated deployment at `10.32.12.111:/opt/orchestrator`, see [部署与依赖记录](docs/remote-deployment.md) for service URLs, runtime versions, build mirror configuration, acceptance checks, and external credentials still required.
+
 Before requesting a build, conductor must store a Compose document with a `services` mapping. When GitLab is configured, app creation can discover a conventional Compose file from the saved Git ref if the request omits `compose`; `POST /api/v1/jenkins/app_sync/{app_id}` refreshes the saved branch's Compose and commit metadata. Review imported files for environment-specific paths, `env_file`, build contexts, and secrets before building; discovery does not rewrite project-specific deployment values.
 
 Compose discovery always performs a full Git clone before searching the local checkout, pinned to the resolved commit. It does not use shallow/partial clones or GitLab tree/file API fallbacks. The runtime image installs Git and CA certificates; both the API and workers receive GitLab configuration. Missing Git, incomplete clones, and clone timeouts fail explicitly without overwriting a saved Compose. `ORCHESTRATOR_GIT_CLONE_TIMEOUT_SECONDS` defaults to 600 seconds.
@@ -40,6 +47,7 @@ See [docs/architecture.md](docs/architecture.md) for the system boundaries, API 
 
 接口与调用顺序：
 
+- [路由检查、角色配置、一次自愈与失败清理](docs/route-checks.md)
 - [API Reference](docs/api-reference.md)
 - [Workspace 上传、构建与挂载](docs/workspace.md)
 - [应用访问入口 API](docs/app-access.md)

@@ -1,5 +1,10 @@
 name: orchestrator-test
 
+x-orchestrator-build: &orchestrator-build
+  context: .
+  args:
+    DEBIAN_MIRROR: "${ORCHESTRATOR_DEBIAN_MIRROR:-https://deb.debian.org}"
+
 x-orchestrator-runtime: &orchestrator-runtime
   ORCHESTRATOR_ENVIRONMENT: "production"
   ORCHESTRATOR_WORKER_NAME: "${ORCHESTRATOR_WORKER_NAME:?Run scripts/prepare_test_environment.py first}"
@@ -21,6 +26,10 @@ x-orchestrator-runtime: &orchestrator-runtime
   ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS: "${ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS:-120}"
   ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS: "${ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS:-60}"
   ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS: "${ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS:-24}"
+  ORCHESTRATOR_CODEX_EXECUTABLE: "${ORCHESTRATOR_CODEX_EXECUTABLE:-codex}"
+  ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS: "${ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS:-120}"
+  ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS: "${ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS:-15}"
+  ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES: "${ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES:-65536}"
   ORCHESTRATOR_GITLAB_URL: "${ORCHESTRATOR_GITLAB_URL:-}"
   ORCHESTRATOR_GITLAB_TOKEN: "${ORCHESTRATOR_GITLAB_TOKEN:-}"
   ORCHESTRATOR_JENKINS_URL: "${ORCHESTRATOR_JENKINS_URL:?Jenkins URL is required}"
@@ -55,7 +64,7 @@ x-orchestrator-runtime: &orchestrator-runtime
 
 services:
   api:
-    build: .
+    build: *orchestrator-build
     image: orchestrator-test:local
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     labels:
@@ -81,7 +90,7 @@ services:
       start_period: 15s
 
   worker:
-    build: .
+    build: *orchestrator-build
     image: orchestrator-test:local
     labels:
       io.docker-jenkins-orchestrator.workspace-manager: worker
@@ -96,8 +105,11 @@ services:
         "--hostname=orchestrator-test-worker@%h",
         "--queues=${ORCHESTRATOR_CELERY_BUILD_QUEUE:-orchestrator-test.builds},${ORCHESTRATOR_CELERY_IMAGES_QUEUE:-orchestrator-test.images}",
       ]
-    environment: *orchestrator-runtime
+    environment:
+      <<: *orchestrator-runtime
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     volumes:
+      - codex-data:/root/.codex
       - "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator-test/workspaces}:/var/lib/orchestrator/workspaces"
       - type: bind
         source: "${ORCHESTRATOR_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
@@ -115,7 +127,7 @@ services:
       start_period: 25s
 
   beat:
-    build: .
+    build: *orchestrator-build
     image: orchestrator-test:local
     command:
       [
@@ -156,3 +168,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+volumes:
+  codex-data:

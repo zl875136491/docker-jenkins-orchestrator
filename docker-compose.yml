@@ -1,3 +1,8 @@
+x-orchestrator-build: &orchestrator-build
+  context: .
+  args:
+    DEBIAN_MIRROR: "${ORCHESTRATOR_DEBIAN_MIRROR:-https://deb.debian.org}"
+
 x-orchestrator-runtime-environment: &orchestrator-runtime-environment
   ORCHESTRATOR_ENVIRONMENT: "${ORCHESTRATOR_ENVIRONMENT:-production}"
   ORCHESTRATOR_WORKER_NAME: "${ORCHESTRATOR_WORKER_NAME:-orchestrator-worker}"
@@ -19,6 +24,10 @@ x-orchestrator-runtime-environment: &orchestrator-runtime-environment
   ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS: "${ORCHESTRATOR_CELERY_MAX_POLL_ATTEMPTS:-240}"
   ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS: "${ORCHESTRATOR_CELERY_RECOVERY_INTERVAL_SECONDS:-300}"
   ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS: "${ORCHESTRATOR_BASE_IMAGE_SYNC_INTERVAL_HOURS:-24}"
+  ORCHESTRATOR_CODEX_EXECUTABLE: "${ORCHESTRATOR_CODEX_EXECUTABLE:-codex}"
+  ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS: "${ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS:-120}"
+  ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS: "${ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS:-15}"
+  ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES: "${ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES:-65536}"
   ORCHESTRATOR_GITLAB_URL: "${ORCHESTRATOR_GITLAB_URL:-}"
   ORCHESTRATOR_GITLAB_TOKEN: "${ORCHESTRATOR_GITLAB_TOKEN:-}"
   ORCHESTRATOR_JENKINS_URL: "${ORCHESTRATOR_JENKINS_URL:?Set ORCHESTRATOR_JENKINS_URL}"
@@ -48,6 +57,7 @@ x-orchestrator-runtime-environment: &orchestrator-runtime-environment
 
 x-orchestrator-worker-environment: &orchestrator-worker-environment
   <<: *orchestrator-runtime-environment
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   ORCHESTRATOR_JENKINS_USER: "${ORCHESTRATOR_JENKINS_USER:?Set ORCHESTRATOR_JENKINS_USER}"
   ORCHESTRATOR_JENKINS_PASSWORD: "${ORCHESTRATOR_JENKINS_PASSWORD:?Set ORCHESTRATOR_JENKINS_PASSWORD}"
   ORCHESTRATOR_JENKINS_JOB_NAME: "${ORCHESTRATOR_JENKINS_JOB_NAME:-apps-orchestrator}"
@@ -59,13 +69,14 @@ x-orchestrator-worker-environment: &orchestrator-worker-environment
 
 services:
   api:
-    build: .
+    build: *orchestrator-build
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     labels:
       io.docker-jenkins-orchestrator.workspace-manager: api
       io.docker-jenkins-orchestrator.worker-name: "${ORCHESTRATOR_WORKER_NAME:-orchestrator-worker}"
     environment: *orchestrator-runtime-environment
     volumes:
+      - ./webui:/app/webui:ro
       - "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator/workspaces}:/var/lib/orchestrator/workspaces"
     ports:
       - "${ORCHESTRATOR_API_BIND_ADDRESS:-127.0.0.1}:${ORCHESTRATOR_API_HOST_PORT:-8000}:8000"
@@ -84,7 +95,7 @@ services:
       start_period: 20s
 
   worker:
-    build: .
+    build: *orchestrator-build
     labels:
       io.docker-jenkins-orchestrator.workspace-manager: worker
       io.docker-jenkins-orchestrator.worker-name: "${ORCHESTRATOR_WORKER_NAME:-orchestrator-worker}"
@@ -102,6 +113,7 @@ services:
     # Local Docker Engine mode. For a remote Engine, set
     # ORCHESTRATOR_DOCKER_BASE_URL and remove this bind mount in a deployment override.
     volumes:
+      - codex-data:/root/.codex
       - "${ORCHESTRATOR_WORKSPACE_HOST_ROOT:-/srv/orchestrator/workspaces}:/var/lib/orchestrator/workspaces"
       - type: bind
         source: "${ORCHESTRATOR_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
@@ -121,7 +133,7 @@ services:
       start_period: 30s
 
   beat:
-    build: .
+    build: *orchestrator-build
     command:
       [
         "celery",
@@ -176,6 +188,7 @@ services:
       start_period: 10s
 
 volumes:
+  codex-data:
   mongo-data:
   redis-data:
   beat-data:

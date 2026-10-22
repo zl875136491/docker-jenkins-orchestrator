@@ -14,7 +14,8 @@ TEST_COMPOSE_PATH = Path("docker-compose.test.yml")
 def test_runtime_image_installs_and_configures_git_for_full_repository_clones() -> None:
     dockerfile = Path("Dockerfile").read_text().replace("\\\n", " ")
     install_command = next(
-        command for command in dockerfile.split("&&") if "apt-get install " in command
+        command for command in dockerfile.split("&&")
+        if "apt-get" in shlex.split(command) and "install" in shlex.split(command)
     )
 
     assert {"git", "ca-certificates"}.issubset(shlex.split(install_command))
