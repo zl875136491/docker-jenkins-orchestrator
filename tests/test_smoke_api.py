@@ -1,11 +1,12 @@
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import create_app
-from main import app
 from orchestrator.config import Settings
-from orchestrator.models import DeploymentService, PublishedPort
+from orchestrator.container import create_container
+from orchestrator.models import BuildJob, BuildStatus, DeploymentService, PublishedPort, RouteCheckResult
 from orchestrator.gitlab import (
     GitLabComposeDocument,
     GitLabComposeInvalidError,
@@ -14,13 +15,52 @@ from orchestrator.gitlab import (
 )
 
 
-client = TestClient(app)
+@pytest.fixture(autouse=True)
+def isolated_smoke_application(tmp_path, monkeypatch):
+    settings = Settings(environment="test", workspace_root=tmp_path / "workspaces")
+    container = create_container(settings)
+    isolated_app = create_app(settings=settings, container=container)
+    with TestClient(isolated_app) as isolated_client:
+        monkeypatch.setitem(globals(), "app", isolated_app)
+        monkeypatch.setitem(globals(), "client", isolated_client)
+        yield
 
 
 def test_healthz_smoke() -> None:
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_app_identifiers_are_authenticated_and_scoped_to_one_app() -> None:
+    headers = auth_headers()
+    appid = f"identifier-{uuid4().hex}"
+    created = client.post("/api/v1/jenkins/app_create", headers=headers, json={
+        "appid": appid,
+        "name": "Identifier options",
+        "compose": {"services": {"web": {"image": "example/web:1"}}},
+    })
+    assert created.status_code == 201
+
+    repository = app.state.container.repository
+    repository.update_app(appid, {"compose_source_commit": "c" * 40})
+    repository.create_build(BuildJob(
+        build_id="a" * 32, appid=appid, git_ref="main", git_commit_sha="b" * 40,
+        status=BuildStatus.SUCCEEDED,
+    ))
+    repository.save_route_check(RouteCheckResult(
+        check_id=f"check-{uuid4().hex}", app_id=appid, commit_id="d" * 40,
+        require_route="/health", static_agent_role_version=1, dynamic_agent_role_version=1,
+    ))
+
+    response = client.get(f"/api/v1/apps/{appid}/identifiers", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["app_id"] == appid
+    assert [build["build_id"] for build in payload["builds"]] == ["a" * 32]
+    assert set(payload["commit_shas"]) == {"b" * 40, "c" * 40, "d" * 40}
+    assert client.get(f"/api/v1/apps/{appid}/identifiers").status_code == 401
+    assert client.get(f"/api/v1/apps/{appid}-missing/identifiers", headers=headers).status_code == 404
 
 
 def test_cors_allows_any_origin() -> None:
@@ -88,6 +128,22 @@ class FakeGitLab:
         return GitLabComposeDocument("compose.yaml", self.compose, ref.commit_sha)
 
 
+def approve_static_check_for_smoke(appid: str) -> None:
+    """Arrange the real four-dimensional gate, without bypassing its service."""
+
+    container = app.state.container
+    if container.applications.gitlab is None:
+        container.applications.gitlab = FakeGitLab()
+    record = container.repository.update_app(appid, {"require_route": "/health"})
+    commit = container.route_checks.resolve_commit(record)
+    check = container.route_checks.create_or_reuse(record, commit).result
+    container.repository.update_route_check(check.check_id, {
+        "static_status": "succeeded", "static_check_passed": True,
+        "probe_payload": {"protocol": "http", "method": "GET", "path": "/health", "query_params": {},
+                          "body": None, "assertions": {"expected_status_list": [200]}},
+    })
+
+
 def test_app_build_lifecycle_smoke() -> None:
     headers = auth_headers()
     app_response = client.post(
@@ -104,6 +160,7 @@ def test_app_build_lifecycle_smoke() -> None:
     assert app_response.status_code == 201
     assert client.get("/api/v1/jenkins/app_info/demo-app", headers=headers).status_code == 200
 
+    approve_static_check_for_smoke("demo-app")
     build_response = client.post("/api/v1/jenkins/build_create/demo-app", headers=headers, json={"git_ref": "main"})
     assert build_response.status_code == 202
     build = build_response.json()
@@ -130,6 +187,7 @@ def test_appid_identity_remains_case_sensitive_in_app_and_build_apis() -> None:
         assert response.json()["appid"] == appid
         assert client.post("/api/v1/jenkins/app_create", headers=headers, json=payload).status_code == 409
 
+        approve_static_check_for_smoke(appid)
         build = client.post(f"/api/v1/jenkins/build_create/{appid}", headers=headers, json={})
         assert build.status_code == 202
         assert build.json()["appid"] == appid
@@ -390,6 +448,7 @@ def test_build_history_requires_authentication_and_supports_filters_pagination_a
         },
     )
     assert app_response.status_code == 201
+    approve_static_check_for_smoke(appid)
 
     builds = []
     for git_ref in ("first", "second", "third"):
@@ -457,8 +516,9 @@ def test_build_history_requires_authentication_and_supports_filters_pagination_a
         assert client.get("/api/v1/jenkins/build_list", headers=headers, params=invalid_params).status_code == 422
 
 
-def test_app_access_returns_published_ports_and_configured_urls() -> None:
-    settings = Settings(public_host="control.example.test", public_scheme="https", worker_region="beijing")
+def test_app_access_returns_published_ports_and_configured_urls(tmp_path) -> None:
+    settings = Settings(public_host="control.example.test", public_scheme="https", worker_region="beijing",
+                        workspace_root=tmp_path / "access-workspaces")
     access_app = create_app(settings=settings)
     access_client = TestClient(access_app)
     headers = {
@@ -518,8 +578,8 @@ def test_app_access_requires_authentication_and_reports_missing_app() -> None:
     assert client.get("/api/v1/jenkins/app_access/no-such-app", headers=headers).status_code == 404
 
 
-def test_app_access_supports_legacy_endpoint_and_reports_unavailable_access() -> None:
-    settings = Settings(public_host=None)
+def test_app_access_supports_legacy_endpoint_and_reports_unavailable_access(tmp_path) -> None:
+    settings = Settings(public_host=None, workspace_root=tmp_path / "legacy-workspaces")
     access_app = create_app(settings=settings)
     access_client = TestClient(access_app)
     headers = auth_headers_for(access_client)

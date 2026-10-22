@@ -67,7 +67,7 @@ class FakeJenkins:
                 images.append(image)
             payload = {**self._artifact._payload, "build_id": request.build_id, "images": images, "compose": self._artifact.compose,
                        "image_digests": {image: "sha256:" + "a" * 64 for image in images},
-                       "source": {"actual_commit": request.git_ref if len(request.git_ref) == 40 else "e" * 40}}
+                       "source": {"actual_commit": request.git_ref}}
             self._artifact = JenkinsResultArtifact(images=tuple(images), compose=self._artifact.compose, _payload=payload)
         return JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42)
 
@@ -138,12 +138,48 @@ class FakeRegistry:
         )
 
 
+class FakeDynamicChecks:
+    """Explicit runtime boundary stub; static gates still use real records."""
+
+    def __init__(self, container: ApplicationContainer) -> None:
+        self.container = container
+        self.resources = container.build_resources
+        self.calls: list[str] = []
+        self.teardowns: list[str] = []
+
+    def execute(self, build_id: str, *, guard):
+        guard()
+        self.calls.append(build_id)
+        build = self.container.repository.get_build(build_id)
+        assert build.status is BuildStatus.DEPLOYING
+        assert build.service_ids
+        return self.container.repository.update_build(build_id, {
+            "dynamic_status": "succeeded", "dynamic_check_passed": True,
+            "probe_result": {"final": {"passed": True, "status_code": 200}},
+        })
+
+    def teardown(self, build_id: str, *, cleanup=None):
+        manifest = self.container.repository.get_build_resources(build_id)
+        assert manifest.lease_owner is None
+        self.teardowns.append(build_id)
+        self.container.repository.update_build_resources(build_id, {"cleanup_status": CleanupStatus.SUCCEEDED})
+        self.container.repository.update_build(build_id, {"teardown_required": False, "teardown_status": "succeeded"})
+        return {"build_id": build_id, "teardown_status": "succeeded"}
+
+    def sync_teardown(self, build_id: str):
+        return {"build_id": build_id, "teardown_status": "not_required"}
+
+    def recover(self):
+        return {"dynamic_checks_scheduled": 0, "teardowns_recovered": 0}
+
+
 @dataclass
 class RuntimeHarness:
     container: ApplicationContainer
     runtime: WorkerRuntime
     scheduled_starts: list[str]
     scheduled_polls: list[tuple[str, int, int]]
+    dynamic_checks: FakeDynamicChecks
 
 
 def make_harness(
@@ -161,6 +197,8 @@ def make_harness(
         celery_poll_interval_seconds=7,
     )
     container = create_container(settings)
+    container.applications.gitlab = gitlab or FakeGitLab("e" * 40)
+    dynamic_checks = FakeDynamicChecks(container)
     scheduled_starts: list[str] = []
     scheduled_polls: list[tuple[str, int, int]] = []
     runtime = WorkerRuntime(
@@ -172,6 +210,8 @@ def make_harness(
         gitlab=gitlab,
         docker_services=docker_services,
         registry=registry,
+        route_checks=container.route_checks,
+        dynamic_checks=dynamic_checks,
         start_scheduler=scheduled_starts.append,
         poll_scheduler=lambda build_id, attempt, countdown: scheduled_polls.append((build_id, attempt, countdown)),
     )
@@ -180,7 +220,19 @@ def make_harness(
         runtime=runtime,
         scheduled_starts=scheduled_starts,
         scheduled_polls=scheduled_polls,
+        dynamic_checks=dynamic_checks,
     )
+
+
+def prepare_static_pass(harness: RuntimeHarness, appid: str):
+    app = harness.container.applications.get_record(appid)
+    commit = harness.container.applications.gitlab.commit_sha
+    submission = harness.container.route_checks.create_or_reuse(app, commit)
+    return harness.container.repository.update_route_check(submission.check_id, {
+        "static_status": "succeeded", "static_check_passed": True,
+        "probe_payload": {"protocol": "http", "path": app.require_route, "method": "GET",
+                          "query_params": {}, "body": None, "assertions": {"expected_status_list": [200]}},
+    })
 
 
 def queue_build(harness: RuntimeHarness, appid: str = "demo", *, compose: dict | None = None):
@@ -195,10 +247,15 @@ def queue_build(harness: RuntimeHarness, appid: str = "demo", *, compose: dict |
             repository_url=f"https://git.example/{appid}.git",
             git_ref="main",
             environment={"DEPLOY_TOKEN": "not-exposed"},
-                compose=compose,
+            require_route="/ready", compose=compose,
         )
     )
-    return harness.container.builds.queue_build(appid, BuildCreate())
+    prepare_static_pass(harness, appid)
+    build = harness.container.builds.queue_build(appid, BuildCreate())
+    # Queueing now resolves and freezes a checked commit. Tests below observe
+    # only worker-time calls and must not expect another branch resolution.
+    harness.container.applications.gitlab.calls.clear()
+    return build
 
 
 def successful_artifact() -> JenkinsResultArtifact:
@@ -258,7 +315,7 @@ def test_start_build_triggers_jenkins_and_schedules_the_first_poll() -> None:
     assert dict(request.environment) == {"DEPLOY_TOKEN": "not-exposed"}
     assert request.compose == APP_COMPOSE
     assert request.image_repository == "harbor.example/apps/demo"
-    assert gitlab.calls == [("https://git.example/demo.git", "main")]
+    assert gitlab.calls == []
 
 
 @pytest.mark.parametrize(
@@ -296,7 +353,7 @@ def test_source_relative_bind_fails_before_gitlab_or_jenkins_without_changing_sa
     assert stored is not None
     assert stored.status is BuildStatus.FAILED
     assert stored.error == "Compose relative bind volume paths are not supported for Swarm services" or "Workspace mount source is empty" in stored.error
-    assert stored.git_commit_sha is None
+    assert stored.git_commit_sha == "a" * 40
     assert stored.jenkins_queue_url is None
     assert stored.jenkins_build_number is None
     assert gitlab.calls == []
@@ -376,7 +433,7 @@ def test_source_build_preflight_preserves_jenkins_build_input_and_accepts_missin
 
     assert started == {"build_id": build.build_id, "status": "building"}
     assert completed == {"build_id": build.build_id, "status": "succeeded"}
-    assert gitlab.calls == [("https://git.example/demo.git", "main")]
+    assert gitlab.calls == []
     assert jenkins.requests[0].compose == original
     assert jenkins.requests[0].compose["services"]["api"]["build"] == build_config
     assert source == original
@@ -492,6 +549,10 @@ def test_pending_queue_then_success_persists_artifact_images_and_swarm_services(
     assert completed == {"build_id": build.build_id, "status": "succeeded"}
     assert stored is not None
     assert stored.status is BuildStatus.SUCCEEDED
+    assert stored.static_check_passed is True
+    assert stored.dynamic_status == "succeeded" and stored.dynamic_check_passed is True
+    assert harness.dynamic_checks.calls == [build.build_id]
+    assert jenkins._artifact["source"]["actual_commit"] == build.git_commit_sha
     assert stored.jenkins_build_number == 91
     assert stored.images == [f"harbor.example/apps/demo:{build.build_id}-api"]
     assert stored.service_ids == ["service-demo-api"]
@@ -949,7 +1010,9 @@ def test_cleanup_tombstone_prevents_delayed_deployment_tasks():
 
 def test_recovery_and_worker_wait_until_input_snapshot_is_ready(monkeypatch):
     harness = make_harness()
-    harness.container.applications.create_app(UserAppCreate(appid="demo", name="Demo", compose=APP_COMPOSE))
+    harness.container.applications.create_app(UserAppCreate(appid="demo", name="Demo", compose=APP_COMPOSE,
+        repository_url="https://git.example/demo.git", require_route="/ready"))
+    prepare_static_pass(harness, "demo")
     snapshot = harness.container.workspace.snapshot
 
     def snapshot_while_recovering(appid, build_id):

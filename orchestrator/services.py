@@ -68,6 +68,7 @@ class ApplicationService:
         self.secret_box = secret_box
         self.gitlab = gitlab
         self.workspace = workspace
+        self.route_checks: Any | None = None
 
     @staticmethod
     def _public(record: UserAppRecord) -> UserApp:
@@ -95,12 +96,21 @@ class ApplicationService:
             compose_source_file=compose_source_file,
             compose_source_commit=compose_source_commit,
             components=request.components,
+            require_route=request.require_route,
             created_at=now,
             updated_at=now,
         )
         if self.workspace is not None:
             self.workspace.ensure_app(request.appid)
-        return self._public(self.repository.create_app(record))
+        commit = None
+        if record.require_route:
+            if self.route_checks is None:
+                raise BuildInputError("Route check service is not configured")
+            commit = resolved.commit_sha if compose_source_commit else self.route_checks.resolve_commit(record)
+        saved = self.repository.create_app(record)
+        if record.require_route:
+            self.route_checks.schedule_for_app(saved, commit_id=commit)
+        return self._public(saved)
 
     def get_record(self, appid: str) -> UserAppRecord:
         app = self.repository.get_app(appid)
@@ -118,7 +128,7 @@ class ApplicationService:
         return self.secret_box.decrypt_environment(self.get_record(appid).environment_ciphertext)
 
     def update_app(self, appid: str, request: UserAppUpdate) -> UserApp:
-        self.get_record(appid)
+        current = self.get_record(appid)
         fields = request.model_dump(exclude_unset=True)
         if "environment" in fields:
             environment = fields.pop("environment")
@@ -133,9 +143,17 @@ class ApplicationService:
             fields["compose_source_file"] = None
             fields["compose_source_commit"] = None
         fields["updated_at"] = utc_now()
+        commit = None
+        candidate = UserAppRecord.model_validate({**current.model_dump(), **fields})
+        if candidate.require_route:
+            if self.route_checks is None:
+                raise BuildInputError("Route check service is not configured")
+            commit = self.route_checks.resolve_commit(candidate)
         updated = self.repository.update_app(appid, fields)
         if updated is None:
             raise NotFoundError("App not found")
+        if updated.require_route:
+            self.route_checks.schedule_for_app(updated, commit_id=commit)
         return self._public(updated)
 
     def sync_app(self, appid: str) -> tuple[UserAppRecord, GitLabRepositoryRef, GitLabComposeDocument, bool, str | None]:
@@ -160,6 +178,10 @@ class ApplicationService:
         )
         if updated is None:
             raise NotFoundError("App not found")
+        if updated.require_route:
+            if self.route_checks is None:
+                raise BuildInputError("Route check service is not configured")
+            self.route_checks.schedule_for_app(updated, commit_id=resolved.commit_sha)
         return updated, resolved, discovered, changed, previous_commit_id
 
 
@@ -416,10 +438,12 @@ class TechStackService:
 
 
 class BuildService:
-    def __init__(self, repository: Repository, application_service: ApplicationService, dispatcher: TaskDispatcher) -> None:
+    def __init__(self, repository: Repository, application_service: ApplicationService, dispatcher: TaskDispatcher,
+                 route_checks: Any | None = None) -> None:
         self.repository = repository
         self.application_service = application_service
         self.dispatcher = dispatcher
+        self.route_checks = route_checks
 
     def _event(
         self, appid: str, build_id: str | None, kind: str, message: str, level: EventLevel = EventLevel.INFO, **details: Any
@@ -460,7 +484,23 @@ class BuildService:
             isinstance(name, str) and isinstance(service, Mapping) for name, service in services.items()
         ):
             raise BuildInputError("A user-provided Docker Compose document with services is required before creating a build")
-        build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref, compose_snapshot=deepcopy(app.compose), inputs_ready=False)
+        from orchestrator.route_checks import BUILD_GATE_ERROR, DYNAMIC_ROLE, RouteCheckInputError
+
+        if not app.require_route or self.route_checks is None:
+            raise BuildInputError(BUILD_GATE_ERROR)
+        try:
+            commit = self.route_checks.resolve_commit(app, request.git_ref)
+            checked = self.route_checks.require_static_pass(app, commit)
+        except RouteCheckInputError as exc:
+            raise BuildInputError(str(exc)) from exc
+        dynamic_role = self.route_checks.roles.get(DYNAMIC_ROLE)
+        build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref,
+            git_commit_sha=commit, compose_snapshot=deepcopy(app.compose), inputs_ready=False,
+            route_check_id=checked.check_id, route_check_generation=checked.generation,
+            require_route_snapshot=checked.require_route, static_agent_role_version=checked.static_agent_role_version,
+            dynamic_agent_role_version=dynamic_role.agent_role_version,
+            route_probe_payload=deepcopy(checked.probe_payload), route_dynamic_role_snapshot=dynamic_role.model_dump(mode="json"),
+            static_check_passed=True)
         self.repository.create_build(build)
         self.repository.ensure_build_resources(BuildResources(
             build_id=build.build_id,

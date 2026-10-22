@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import re
 from threading import RLock
@@ -11,11 +13,14 @@ from orchestrator.models import (
     AppEvent,
     BaseImage,
     BuildJob,
+    BuildIdentifier,
     BuildResource,
     BuildResources,
     BuildStatus,
     CleanupStatus,
     DeploymentService,
+    AgentRole,
+    RouteCheckResult,
     TechStack,
     UserAppRecord,
     UserImage,
@@ -58,6 +63,47 @@ def _validate_resource_key(key: str) -> None:
         raise ValueError("Invalid resource key")
 
 
+_ROUTE_CHECK_KEY_FIELDS = ("app_id", "commit_id", "require_route", "static_agent_role_version")
+_ROUTE_CHECK_IDENTITY_FIELDS = frozenset(("check_id", "id", *_ROUTE_CHECK_KEY_FIELDS))
+
+
+def _route_check_key(result: RouteCheckResult) -> dict[str, Any]:
+    return {field: getattr(result, field) for field in _ROUTE_CHECK_KEY_FIELDS}
+
+
+def _route_check_identity(result: RouteCheckResult) -> dict[str, Any]:
+    identity = {"check_id": result.check_id, **_route_check_key(result)}
+    if getattr(result, "id", None) is not None:
+        identity["id"] = result.id
+    return identity
+
+
+def _route_check_updates(fields: dict[str, Any], expected: dict[str, Any] | None) -> dict[str, Any]:
+    """Only ordinary model fields may participate in updates or CAS filters."""
+
+    for field in fields:
+        if field in _ROUTE_CHECK_IDENTITY_FIELDS:
+            raise ValueError(f"{field} is immutable")
+        if field not in RouteCheckResult.model_fields:
+            raise ValueError(f"Unknown route check field: {field}")
+    for field in expected or {}:
+        if field not in RouteCheckResult.model_fields:
+            raise ValueError(f"Unknown route check expectation: {field}")
+    if any(isinstance(value, (Mapping, list, tuple)) for value in (expected or {}).values()):
+        # Mongo interprets mappings in query values as operators while the
+        # in-memory adapter compares them literally. Route-check CAS callers
+        # use scalar version/status/owner tokens, so reject compound values
+        # instead of allowing backend-dependent compare-and-swap semantics.
+        raise ValueError("Route check expectations must be scalar values")
+    updates = deepcopy(fields)
+    updates.setdefault("updated_at", utc_now())
+    return updates
+
+
+def _sortable_datetime(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 class Repository(Protocol):
     def ensure_indexes(self) -> None: ...
     def close(self) -> None: ...
@@ -65,6 +111,17 @@ class Repository(Protocol):
     def get_app(self, appid: str) -> UserAppRecord | None: ...
     def list_apps(self) -> list[UserAppRecord]: ...
     def update_app(self, appid: str, fields: dict[str, Any]) -> UserAppRecord | None: ...
+    def list_agent_roles(self) -> list[AgentRole]: ...
+    def get_agent_role(self, role_key: str) -> AgentRole | None: ...
+    def save_agent_role(self, role: AgentRole, expected_version: int | None = None) -> AgentRole | None: ...
+    def get_route_check(self, check_id: str) -> RouteCheckResult | None: ...
+    def find_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> RouteCheckResult | None: ...
+    def ensure_route_check(self, result: RouteCheckResult) -> tuple[RouteCheckResult, bool]: ...
+    def save_route_check(self, result: RouteCheckResult) -> RouteCheckResult: ...
+    def update_route_check(self, check_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> RouteCheckResult | None: ...
+    def delete_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> bool: ...
+    def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]: ...
+    def list_pending_route_checks(self) -> list[RouteCheckResult]: ...
     def create_build(self, build: BuildJob) -> BuildJob: ...
     def get_build(self, build_id: str) -> BuildJob | None: ...
     def list_builds(
@@ -74,7 +131,10 @@ class Repository(Protocol):
         skip: int = 0,
         limit: int = 20,
     ) -> tuple[list[BuildJob], int]: ...
+    def list_build_identifiers(self, appid: str) -> list[BuildIdentifier]: ...
+    def list_route_check_commits(self, app_id: str) -> list[str]: ...
     def list_active_builds(self) -> list[BuildJob]: ...
+    def list_pending_dynamic_builds(self) -> list[BuildJob]: ...
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None: ...
     def transition_build(
         self, build_id: str, expected_statuses: Sequence[BuildStatus], status: BuildStatus, fields: dict[str, Any]
@@ -122,6 +182,8 @@ class InMemoryRepository:
         self.alerts: dict[str, Alert] = {}
         self.build_resources: dict[str, BuildResources] = {}
         self.port_allocations: dict[tuple[str, str, int], dict[str, str]] = {}
+        self.agent_roles: dict[str, AgentRole] = {}
+        self.route_checks: dict[str, RouteCheckResult] = {}
 
     @staticmethod
     def _copy(model):
@@ -160,6 +222,113 @@ class InMemoryRepository:
             self.apps[appid] = updated
             return self._copy(updated)
 
+    def list_agent_roles(self) -> list[AgentRole]:
+        with self._lock:
+            return [self._copy(role) for role in sorted(self.agent_roles.values(), key=lambda role: role.role_key)]
+
+    def get_agent_role(self, role_key: str) -> AgentRole | None:
+        with self._lock:
+            role = self.agent_roles.get(role_key)
+            return self._copy(role) if role else None
+
+    def save_agent_role(self, role: AgentRole, expected_version: int | None = None) -> AgentRole | None:
+        with self._lock:
+            current = self.agent_roles.get(role.role_key)
+            if expected_version is None and current is not None:
+                return self._copy(current)
+            if expected_version is not None and (current is None or current.agent_role_version != expected_version):
+                return None
+            self.agent_roles[role.role_key] = self._copy(role)
+            return self._copy(role)
+
+    def get_route_check(self, check_id: str) -> RouteCheckResult | None:
+        with self._lock:
+            result = self.route_checks.get(check_id)
+            return self._copy(result) if result else None
+
+    def find_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> RouteCheckResult | None:
+        with self._lock:
+            for item in self.route_checks.values():
+                if (item.app_id, item.commit_id, item.require_route, item.static_agent_role_version) == (
+                    app_id, commit_id, require_route, static_role_version
+                ):
+                    return self._copy(item)
+            return None
+
+    def ensure_route_check(self, result: RouteCheckResult) -> tuple[RouteCheckResult, bool]:
+        with self._lock:
+            existing = self.find_route_check(
+                result.app_id, result.commit_id, result.require_route, result.static_agent_role_version
+            )
+            if existing is not None:
+                return existing, False
+            self._validate_route_check_identity(result)
+            self.route_checks[result.check_id] = self._copy(result)
+            return self._copy(result), True
+
+    def _validate_route_check_identity(self, result: RouteCheckResult) -> None:
+        current = self.route_checks.get(result.check_id)
+        if current is not None and _route_check_identity(current) != _route_check_identity(result):
+            raise ValueError("Route check identity is immutable")
+        result_id = getattr(result, "id", None)
+        if result_id is not None and any(
+            getattr(item, "id", None) == result_id and item.check_id != result.check_id
+            for item in self.route_checks.values()
+        ):
+            raise RepositoryError("Duplicate route check id")
+
+    def save_route_check(self, result: RouteCheckResult) -> RouteCheckResult:
+        with self._lock:
+            current = self.route_checks.get(result.check_id)
+            if current is not None and _route_check_identity(current) != _route_check_identity(result):
+                raise ValueError("Route check identity is immutable")
+            existing = self.find_route_check(
+                result.app_id, result.commit_id, result.require_route, result.static_agent_role_version
+            )
+            if existing is not None and existing.check_id != result.check_id:
+                return existing
+            self._validate_route_check_identity(result)
+            self.route_checks[result.check_id] = self._copy(result)
+            return self._copy(result)
+
+    def update_route_check(self, check_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> RouteCheckResult | None:
+        updates = _route_check_updates(fields, expected)
+        with self._lock:
+            current = self.route_checks.get(check_id)
+            if current is None or any(getattr(current, key, None) != value for key, value in (expected or {}).items()):
+                return None
+            updated = current.model_copy(update=updates, deep=True)
+            self.route_checks[check_id] = updated
+            return self._copy(updated)
+
+    def delete_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> bool:
+        with self._lock:
+            matches = [key for key, item in self.route_checks.items() if
+                       (item.app_id, item.commit_id, item.require_route, item.static_agent_role_version) ==
+                       (app_id, commit_id, require_route, static_role_version)]
+            if not matches:
+                return False
+            for key in matches:
+                del self.route_checks[key]
+            return True
+
+    def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]:
+        with self._lock:
+            values = [item for item in self.route_checks.values() if item.app_id == app_id and item.commit_id == commit_id]
+            values.sort(key=lambda item: (_sortable_datetime(item.created_at), item.check_id), reverse=True)
+            return [self._copy(item) for item in values]
+
+    def list_route_check_commits(self, app_id: str) -> list[str]:
+        with self._lock:
+            values = {item.commit_id for item in self.route_checks.values() if item.app_id == app_id}
+            return sorted(values, reverse=True)
+
+    def list_pending_route_checks(self) -> list[RouteCheckResult]:
+        with self._lock:
+            values = [item for item in self.route_checks.values() if item.static_status in {"queued", "running"}]
+            values.sort(key=lambda item: (_sortable_datetime(item.updated_at), item.check_id))
+            return [self._copy(item) for item in values]
+
     def create_build(self, build: BuildJob) -> BuildJob:
         with self._lock:
             self.builds[build.build_id] = self._copy(build)
@@ -190,6 +359,23 @@ class InMemoryRepository:
             total = len(values)
             page = values[skip : skip + limit]
             return [self._copy(build) for build in page], total
+
+    def list_build_identifiers(self, appid: str) -> list[BuildIdentifier]:
+        with self._lock:
+            values = [build for build in self.builds.values() if build.appid == appid]
+            values.sort(key=lambda build: (build.created_at, build.build_id), reverse=True)
+            return [BuildIdentifier(
+                build_id=build.build_id,
+                status=build.status,
+                git_commit_sha=build.git_commit_sha,
+            ) for build in values]
+
+    def list_pending_dynamic_builds(self) -> list[BuildJob]:
+        with self._lock:
+            values = [build for build in self.builds.values()
+                      if build.dynamic_status in {"queued", "running"} or build.teardown_required]
+            values.sort(key=lambda build: (_sortable_datetime(build.updated_at), build.build_id))
+            return [self._copy(build) for build in values]
 
     def list_active_builds(self) -> list[BuildJob]:
         with self._lock:
@@ -394,6 +580,8 @@ class MongoRepository:
         self.alerts = database["alerts"]
         self.build_resources = database["build_resources"]
         self.port_allocations = database["port_allocations"]
+        self.agent_roles = database["agent_roles"]
+        self.route_checks = database["route_check_list"]
 
     @classmethod
     def connect(cls, url: str, database_name: str, timeout_ms: int = 5000) -> "MongoRepository":
@@ -421,6 +609,8 @@ class MongoRepository:
         self.builds.create_index("build_id", unique=True, name="unique_build_id")
         self.builds.create_index([("appid", 1), ("status", 1), ("created_at", -1)], name="builds_by_app_status")
         self.builds.create_index([("status", 1), ("updated_at", 1)], name="active_builds_by_status")
+        self.builds.create_index([("dynamic_status", 1), ("updated_at", 1)], name="dynamic_build_recovery")
+        self.builds.create_index([("teardown_required", 1), ("updated_at", 1)], name="dynamic_teardown_recovery")
         self.events.create_index([("appid", 1), ("created_at", -1)], name="events_by_app")
         self.events.create_index([("build_id", 1), ("created_at", -1)], name="events_by_build")
         self.user_images.create_index([("appid", 1), ("build_id", 1), ("reference", 1)], unique=True, name="unique_user_image")
@@ -432,6 +622,119 @@ class MongoRepository:
         self.build_resources.create_index([("cleanup_status", 1), ("lease_expires_at", 1)], name="cleanup_recovery")
         self.port_allocations.create_index([("target", 1), ("protocol", 1), ("port", 1)], unique=True, name="unique_published_port")
         self.port_allocations.create_index("build_id", name="ports_by_build")
+        self.agent_roles.create_index("role_key", unique=True, name="unique_agent_role")
+        self.route_checks.create_index("check_id", unique=True, name="unique_route_check_id")
+        self.route_checks.create_index("id", unique=True, name="unique_route_check_numeric_id")
+        self.route_checks.create_index(
+            [("app_id", 1), ("commit_id", 1), ("require_route", 1), ("static_agent_role_version", 1)],
+            unique=True, name="uniq_app_commit_route_version",
+        )
+        self.route_checks.create_index([("app_id", 1), ("commit_id", 1), ("created_at", -1)], name="checks_by_app_commit")
+        self.route_checks.create_index([("static_status", 1), ("updated_at", 1)], name="pending_static_checks")
+
+    def list_agent_roles(self) -> list[AgentRole]:
+        return [self._model(AgentRole, doc) for doc in self.agent_roles.find({}).sort("role_key", 1)]
+
+    def get_agent_role(self, role_key: str) -> AgentRole | None:
+        return self._model(AgentRole, self.agent_roles.find_one({"role_key": role_key}))
+
+    def save_agent_role(self, role: AgentRole, expected_version: int | None = None) -> AgentRole | None:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        query: dict[str, Any] = {"role_key": role.role_key}
+        if expected_version is not None:
+            query["agent_role_version"] = expected_version
+            document = self.agent_roles.find_one_and_replace(
+                query, self._document(role), return_document=ReturnDocument.AFTER,
+            )
+            return self._model(AgentRole, document)
+        try:
+            document = self.agent_roles.find_one_and_update(
+                query, {"$setOnInsert": self._document(role)}, upsert=True, return_document=ReturnDocument.AFTER,
+            )
+            return self._model(AgentRole, document)
+        except DuplicateKeyError:
+            # A competing worker may have initialized the role after our upsert
+            # found no match. Never replace that worker's role configuration.
+            existing = self.get_agent_role(role.role_key)
+            if existing is None:
+                raise RepositoryError("Agent role initialization raced with deletion")
+            return existing
+
+    def get_route_check(self, check_id: str) -> RouteCheckResult | None:
+        return self._model(RouteCheckResult, self.route_checks.find_one({"check_id": check_id}))
+
+    def find_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> RouteCheckResult | None:
+        document = self.route_checks.find_one({"app_id": app_id, "commit_id": commit_id,
+            "require_route": require_route, "static_agent_role_version": static_role_version})
+        return self._model(RouteCheckResult, document)
+
+    def ensure_route_check(self, result: RouteCheckResult) -> tuple[RouteCheckResult, bool]:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        key = _route_check_key(result)
+        try:
+            previous = self.route_checks.find_one_and_update(
+                key, {"$setOnInsert": self._document(result)}, upsert=True, return_document=ReturnDocument.BEFORE,
+            )
+        except DuplicateKeyError as exc:
+            existing = self._model(RouteCheckResult, self.route_checks.find_one(key))
+            if existing is not None:
+                return existing, False
+            current = self.get_route_check(result.check_id)
+            if current is not None:
+                raise ValueError("Route check identity is immutable") from exc
+            raise RepositoryError("Duplicate route check id") from exc
+        if previous is not None:
+            return self._model(RouteCheckResult, previous), False
+        return self._model(RouteCheckResult, self._document(result)), True
+
+    def save_route_check(self, result: RouteCheckResult) -> RouteCheckResult:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        try:
+            document = self.route_checks.find_one_and_replace(
+                _route_check_identity(result), self._document(result), upsert=True, return_document=ReturnDocument.AFTER,
+            )
+            return self._model(RouteCheckResult, document)
+        except DuplicateKeyError as exc:
+            current = self.get_route_check(result.check_id)
+            if current is not None and _route_check_identity(current) != _route_check_identity(result):
+                raise ValueError("Route check identity is immutable") from exc
+            existing = self._model(RouteCheckResult, self.route_checks.find_one(_route_check_key(result)))
+            if existing is not None:
+                return existing
+            raise RepositoryError("Duplicate route check id") from exc
+
+    def update_route_check(self, check_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> RouteCheckResult | None:
+        from pymongo import ReturnDocument
+
+        updates = _route_check_updates(fields, expected)
+        query: dict[str, Any] = {"check_id": check_id}
+        if expected:
+            query = {"$and": [query, deepcopy(expected)]}
+        document = self.route_checks.find_one_and_update(
+            query, {"$set": updates}, return_document=ReturnDocument.AFTER,
+        )
+        return self._model(RouteCheckResult, document)
+
+    def delete_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> bool:
+        return self.route_checks.delete_one({"app_id": app_id, "commit_id": commit_id,
+            "require_route": require_route, "static_agent_role_version": static_role_version}).deleted_count == 1
+
+    def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]:
+        return [self._model(RouteCheckResult, doc) for doc in self.route_checks.find(
+            {"app_id": app_id, "commit_id": commit_id}).sort([("created_at", -1), ("check_id", -1)])]
+
+    def list_route_check_commits(self, app_id: str) -> list[str]:
+        return sorted(self.route_checks.distinct("commit_id", {"app_id": app_id}), reverse=True)
+
+    def list_pending_route_checks(self) -> list[RouteCheckResult]:
+        return [self._model(RouteCheckResult, doc) for doc in self.route_checks.find(
+            {"static_status": {"$in": ["queued", "running"]}}).sort([("updated_at", 1), ("check_id", 1)])]
 
     def close(self) -> None:
         if self._client is not None:
@@ -491,12 +794,23 @@ class MongoRepository:
         documents = cursor.skip(skip).limit(limit)
         return [self._model(BuildJob, document) for document in documents], total
 
+    def list_build_identifiers(self, appid: str) -> list[BuildIdentifier]:
+        documents = self.builds.find(
+            {"appid": appid}, {"_id": 0, "build_id": 1, "status": 1, "git_commit_sha": 1}
+        ).sort([("created_at", -1), ("build_id", -1)])
+        return [BuildIdentifier.model_validate(document) for document in documents]
+
     def list_active_builds(self) -> list[BuildJob]:
         statuses = [status.value for status in ACTIVE_BUILD_STATUSES]
         return [
             self._model(BuildJob, document)
             for document in self.builds.find({"status": {"$in": statuses}}).sort("updated_at", 1)
         ]
+
+    def list_pending_dynamic_builds(self) -> list[BuildJob]:
+        return [self._model(BuildJob, document) for document in self.builds.find({
+            "$or": [{"dynamic_status": {"$in": ["queued", "running"]}}, {"teardown_required": True}],
+        }).sort([("updated_at", 1), ("build_id", 1)])]
 
     def update_build(self, build_id: str, fields: dict[str, Any]) -> BuildJob | None:
         from pymongo import ReturnDocument

@@ -52,6 +52,8 @@ class WorkerRuntime:
         jenkins: Any | None = None,
         registry: Any | None = None,
         docker_services: Any | None = None,
+        route_checks: Any | None = None,
+        dynamic_checks: Any | None = None,
         start_scheduler: Callable[[str], Any] | None = None,
         poll_scheduler: Callable[[str, int, int], Any] | None = None,
     ) -> None:
@@ -63,6 +65,8 @@ class WorkerRuntime:
         self._jenkins = jenkins
         self._registry = registry
         self._docker_services = docker_services
+        self._route_checks = route_checks
+        self._dynamic_checks = dynamic_checks
         self._start_scheduler = start_scheduler
         self._poll_scheduler = poll_scheduler
         self.workspace = WorkspaceStore.from_settings(settings)
@@ -77,6 +81,10 @@ class WorkerRuntime:
         self._repository = container.repository
         self._build_service = container.builds
         self._catalog = container.catalog
+        if self._route_checks is None:
+            self._route_checks = container.route_checks
+        if self._dynamic_checks is None:
+            self._dynamic_checks = container.dynamic_checks
 
     @property
     def repository(self):
@@ -92,6 +100,35 @@ class WorkerRuntime:
     def catalog(self) -> TemplateCatalog:
         self._ensure_dependencies()
         return self._catalog
+
+    @property
+    def route_checks(self):
+        self._ensure_dependencies()
+        if self._route_checks is None:
+            self._route_checks = self._build_service.route_checks
+        if self._route_checks is None:
+            from orchestrator.route_checks import BUILD_GATE_ERROR
+
+            raise BuildInputError(BUILD_GATE_ERROR)
+        return self._route_checks
+
+    @property
+    def dynamic_checks(self):
+        self._ensure_dependencies()
+        if self._dynamic_checks is None:
+            from orchestrator.container import create_container
+
+            container = create_container(
+                self.settings, repository=self.repository,
+                dispatcher=self.builds.dispatcher, catalog=self.catalog,
+            )
+            self._dynamic_checks = container.dynamic_checks
+        resources = getattr(self._dynamic_checks, "resources", None)
+        if resources is not None:
+            # Cleanup must verify the same Jenkins execution used to build.
+            # This also keeps injected clients consistent in integration tests.
+            resources.jenkins_factory = self._jenkins_adapter
+        return self._dynamic_checks
 
     def _gitlab_adapter(self):
         if self._gitlab is None and self.settings.gitlab_url:
@@ -119,26 +156,68 @@ class WorkerRuntime:
     def poll_build(self, build_id: str, attempt: int, task_id: str | None) -> dict[str, str]:
         return self._run_build_operation(build_id, lambda: self._poll_build(build_id, attempt, task_id))
 
-    def _run_build_operation(self, build_id: str, operation: Callable) -> dict[str, str]:
-        build = self.builds.get_build(build_id)
-        if build.status in _TERMINAL_STATUSES or not build.inputs_ready:
-            return _result(build)
-        self.repository.ensure_build_resources(BuildResources(build_id=build_id, appid=build.appid, ownership_version=0))
-        with build_lease(self.repository, build_id, [CleanupStatus.NOT_STARTED]) as tracker:
-            if tracker is None:
-                return _result(self.builds.get_build(build_id))
-            token = self._operation_tracker.set(tracker)
+    def static_route_check(self, check_id: str, generation: int | None = None) -> dict[str, Any]:
+        return self.route_checks.execute_static(check_id, generation)
+
+    def dynamic_route_check(self, build_id: str, run_id: str | None = None) -> dict[str, str]:
+        def execute() -> dict[str, str]:
+            current = self.builds.get_build(build_id)
+            if run_id is not None and current.dynamic_run_id != run_id:
+                return _result(current)
+            if current.status is not BuildStatus.DEPLOYING:
+                return _result(current)
             try:
-                tracker.guard()
-                return operation()
-            except ResourceConflict:
+                return self._complete_dynamic_deployment(current)
+            except Exception as exc:
+                return _result(self._fail(current, exc, "Dynamic route check failed"))
+
+        return self._run_build_operation(build_id, execute)
+
+    def recover_route_checks(self) -> dict[str, int]:
+        return {**self.route_checks.recover(), **self.dynamic_checks.recover()}
+
+    def _run_build_operation(self, build_id: str, operation: Callable) -> dict[str, str]:
+        try:
+            build = self.builds.get_build(build_id)
+            if build.status in _TERMINAL_STATUSES or not build.inputs_ready:
+                return _result(build)
+            self.repository.ensure_build_resources(BuildResources(build_id=build_id, appid=build.appid, ownership_version=0))
+            with build_lease(self.repository, build_id, [CleanupStatus.NOT_STARTED]) as tracker:
+                if tracker is None:
+                    return _result(self.builds.get_build(build_id))
+                token = self._operation_tracker.set(tracker)
                 try:
                     tracker.guard()
+                    return operation()
                 except ResourceConflict:
-                    return _result(self.builds.get_build(build_id))
-                raise
-            finally:
-                self._operation_tracker.reset(token)
+                    try:
+                        tracker.guard()
+                    except ResourceConflict:
+                        return _result(self.builds.get_build(build_id))
+                    raise
+                finally:
+                    self._operation_tracker.reset(token)
+        finally:
+            # Both request_cleanup and the cleanup runner need their own
+            # lease. Never run teardown inside the deployment lease, even on
+            # an exception or a delayed task for an already failed build.
+            self._teardown_if_required(build_id)
+
+    def _teardown_if_required(self, build_id: str) -> None:
+        build = self.repository.get_build(build_id)
+        if build is None or not build.teardown_required:
+            return
+        manifest = self.repository.get_build_resources(build_id)
+        if (manifest is not None and manifest.lease_owner and manifest.lease_expires_at
+                and self._utc_aware_datetime(manifest.lease_expires_at) > utc_now()):
+            return
+        try:
+            self.dynamic_checks.teardown(build_id, cleanup=self.cleanup_build)
+        except Exception:
+            # The failure remains durable and recoverable, without replacing
+            # the actual route diagnosis or leaking an adapter exception.
+            self.repository.update_build(build_id, {"teardown_required": True,
+                "teardown_status": "partial_failed", "updated_at": utc_now()})
 
     def _guard_operation(self) -> None:
         tracker = self._operation_tracker.get()
@@ -223,6 +302,15 @@ class WorkerRuntime:
                 request.as_parameters()
                 jenkins = self._jenkins_adapter()
                 tracker.guard()
+                # Queue-time validation is insufficient: configuration, role
+                # version, cache deletion, or a forced generation can change
+                # before a worker consumes this message.
+                current = self.builds.get_build(build_id)
+                current_app = self.repository.get_app(current.appid)
+                if current_app is None:
+                    raise NotFoundError("Application for build was not found")
+                self.route_checks.verify_build_gate(current, current_app)
+                tracker.guard()
                 self.repository.update_build_resources(build_id, {"jenkins_trigger_pending": True}, {"lease_owner": tracker.owner})
                 try:
                     queued = jenkins.trigger_build(request)
@@ -261,7 +349,7 @@ class WorkerRuntime:
         if build.status in _TERMINAL_STATUSES:
             return _result(build)
         self._guard_operation()
-        if attempt >= self.settings.celery_max_poll_attempts:
+        if build.status is not BuildStatus.DEPLOYING and attempt >= self.settings.celery_max_poll_attempts:
             return _result(self.builds.fail(build_id, "Jenkins build polling exceeded the configured limit"))
         if build.status in {BuildStatus.QUEUED, BuildStatus.VALIDATING, BuildStatus.TRIGGERING}:
             return self._start_build(build_id, task_id)
@@ -384,7 +472,10 @@ class WorkerRuntime:
         from orchestrator.build_resources import BuildCleanupRunner, BuildResourceService
 
         service = BuildResourceService(self.repository, self.builds.dispatcher, self.workspace, jenkins_factory=self._jenkins_adapter)
-        return BuildCleanupRunner(self.settings, service).run(build_id)
+        try:
+            return BuildCleanupRunner(self.settings, service).run(build_id)
+        finally:
+            self.dynamic_checks.sync_teardown(build_id)
 
     def recover_cleanups(self) -> dict[str, int]:
         from orchestrator.build_resources import BuildResourceService
@@ -478,24 +569,35 @@ class WorkerRuntime:
             deployment = adapter.deploy_build(build.appid, build.build_id, deployment_compose, tracker)
         else:
             deployment = adapter.deploy(build.appid, deployment_compose)
-        self._probe_public_ports(deployment)
         tracker.guard()
         records = deployment.to_models(build.build_id)
         for record in records:
             tracker.guard()
             self.repository.save_service(record)
         tracker.guard()
-        succeeded = self.builds.transition(
-            build.build_id,
-            BuildStatus.SUCCEEDED,
-            service_ids=[record.service_id for record in records],
-        )
+        build = self.repository.update_build(build.build_id, {
+            "service_ids": [record.service_id for record in records], "updated_at": utc_now(),
+        }) or build
+        self._probe_public_ports(deployment)
+        return self._complete_dynamic_deployment(build)
+
+    def _complete_dynamic_deployment(self, build: BuildJob) -> dict[str, str]:
+        self._guard_operation()
+        checked = self.dynamic_checks.execute(build.build_id, guard=self._guard_operation)
+        self._guard_operation()
+        current = self.builds.get_build(build.build_id)
+        if current.status in _TERMINAL_STATUSES or checked.status in _TERMINAL_STATUSES:
+            return _result(current)
+        if (current.dynamic_check_passed is not True or current.dynamic_status != "succeeded"
+                or current.teardown_required):
+            return _result(current)
+        succeeded = self.builds.transition(build.build_id, BuildStatus.SUCCEEDED)
         self.builds.record_event(
             succeeded.appid,
             succeeded.build_id,
             "build.deployed",
             "Docker Services deployment completed",
-            service_count=len(records),
+            service_count=len(succeeded.service_ids),
         )
         return _result(succeeded)
 
@@ -544,6 +646,15 @@ class WorkerRuntime:
                     time.sleep(min(interval, max(0.01, deadline - time.monotonic())))
 
     def _resume_deployment(self, build: BuildJob) -> dict[str, str]:
+        records = [record for record in self.repository.list_services(build.appid)
+                   if record.build_id == build.build_id]
+        if build.service_ids or records or build.dynamic_status in {"queued", "running", "succeeded", "failed"}:
+            if not build.service_ids and records:
+                self._guard_operation()
+                build = self.repository.update_build(build.build_id, {
+                    "service_ids": [record.service_id for record in records], "updated_at": utc_now(),
+                }) or build
+            return self._complete_dynamic_deployment(build)
         if build.jenkins_build_number is None:
             raise JenkinsError("Jenkins build number is missing for deployment recovery")
         return self._complete_deployment(build, build.jenkins_build_number)
@@ -766,6 +877,31 @@ class WorkerRuntime:
 
     def _fail(self, build: BuildJob, exc: Exception, fallback: str) -> BuildJob:
         self._guard_operation()
+        current = self.builds.get_build(build.build_id)
+        if current.status is BuildStatus.DEPLOYING:
+            # Deployment adapters may already have created tracked resources
+            # before readiness or route probing raises. Those failures must
+            # follow the same immediate, build-owned teardown path.
+            report = _safe_error(exc, fallback)
+            self.repository.update_build(build.build_id, {"dynamic_check_passed": False,
+                "dynamic_status": "failed", "dynamic_report_text": report,
+                "teardown_required": True, "teardown_status": "pending", "updated_at": utc_now()})
+            failed = self.builds.fail(build.build_id, report)
+            check = self.repository.get_route_check(current.route_check_id) if current.route_check_id else None
+            if check is not None and check.generation == current.route_check_generation:
+                self._guard_operation()
+                # Readiness or transport failures can occur before the
+                # dynamic service claims its aggregate row. Expose those
+                # failures there too without changing a forced generation.
+                self.repository.update_route_check(check.check_id, {
+                    "dynamic_build_id": current.build_id, "dynamic_run_id": current.dynamic_run_id,
+                    "dynamic_agent_role_version": current.dynamic_agent_role_version,
+                    "dynamic_role_snapshot": current.route_dynamic_role_snapshot or {},
+                    "dynamic_status": "failed", "dynamic_check_passed": False,
+                    "dynamic_report_text": report, "probe_result": current.probe_result, "updated_at": utc_now(),
+                }, {"generation": check.generation, "dynamic_build_id": check.dynamic_build_id,
+                    "dynamic_run_id": check.dynamic_run_id})
+            return failed
         return self.builds.fail(build.build_id, _safe_error(exc, fallback))
 
 

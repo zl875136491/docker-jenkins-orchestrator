@@ -17,6 +17,7 @@ from orchestrator.models import BuildCreate, BuildStatus, UserAppCreate, UserApp
 from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
 from orchestrator.config import Settings
+from tests.route_check_fixtures import PassingDynamicChecks, prepare_static_pass
 from tests.test_build_resources import FakeDocker as IsolatedFakeDocker
 
 
@@ -105,6 +106,7 @@ class FakeJenkins:
             self.artifact = JenkinsResultArtifact(images=tuple(images), compose=compose, _payload={
                 "build_id": request.build_id, "images": images, "compose": compose,
                 "image_digests": {image: "sha256:" + "a" * 64 for image in images},
+                "source": {"actual_commit": request.git_ref},
             })
         return JenkinsQueueItem("https://jenkins.example/queue/item/1/", 1)
 
@@ -202,6 +204,8 @@ def test_build_private_compose_delivers_each_project_through_the_generic_pipelin
         jenkins=jenkins,
         docker_services=DockerSwarmAdapter(docker_client=docker),
         poll_scheduler=lambda *_: None,
+        route_checks=container.route_checks,
+        dynamic_checks=PassingDynamicChecks(container),
     )
     try:
         app = container.applications.create_app(
@@ -214,6 +218,7 @@ def test_build_private_compose_delivers_each_project_through_the_generic_pipelin
         )
         with pytest.raises(BuildInputError, match="Compose document"):
             container.builds.queue_build(app.appid, BuildCreate())
+        prepare_static_pass(container, app.appid)
         container.applications.update_app(app.appid, UserAppUpdate(compose=compose))
         build = container.builds.queue_build(app.appid, BuildCreate())
 
@@ -225,6 +230,9 @@ def test_build_private_compose_delivers_each_project_through_the_generic_pipelin
         stored = container.repository.get_build(build.build_id)
         assert stored is not None
         assert stored.status is BuildStatus.SUCCEEDED
+        assert stored.static_check_passed is True and stored.dynamic_check_passed is True
+        assert runtime.dynamic_checks.calls == [build.build_id]
+        assert jenkins.artifact["source"]["actual_commit"] == build.git_commit_sha
         assert len(container.repository.list_services(project)) == manifest["service_count"]
         assert len(docker.services.create_calls) == manifest["service_count"]
         assert jenkins.requests[0].compose == compose
@@ -274,13 +282,14 @@ def test_build_private_compose_delivers_each_project_through_the_generic_pipelin
     ],
 )
 def test_unportable_project_shape_requires_user_role_adjustment(
-    project: str, compose: dict[str, Any] | None, failure_stage: str
+    project: str, compose: dict[str, Any] | None, failure_stage: str, tmp_path: Path
 ) -> None:
     settings = Settings(
         environment="test",
         storage_backend="memory",
         task_dispatcher="memory",
         harbor_url="https://harbor.example",
+        workspace_root=tmp_path / "workspace",
     )
     container = create_container(settings)
     try:
@@ -304,6 +313,7 @@ def test_unportable_project_shape_requires_user_role_adjustment(
         # already be resolved into environment. Unsupported runtime fields
         # fail source preflight before Jenkins; an unconsumed build field is
         # still rejected at the final artifact boundary.
+        prepare_static_pass(container, f"{project}-raw")
         build = container.builds.queue_build(f"{project}-raw", BuildCreate())
         artifact = JenkinsResultArtifact(
             images=("example/raw:failed",),
@@ -320,6 +330,8 @@ def test_unportable_project_shape_requires_user_role_adjustment(
             jenkins=jenkins,
             docker_services=DockerSwarmAdapter(docker_client=docker),
             poll_scheduler=lambda *_: None,
+            route_checks=container.route_checks,
+            dynamic_checks=PassingDynamicChecks(container),
         )
         started = runtime.start_build(build.build_id, task_id=f"start-{project}")
         if failure_stage == "artifact":

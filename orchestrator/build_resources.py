@@ -163,7 +163,7 @@ class BuildResourceService:
                 elif not queued.cancelled:
                     raise ResourceConflict("Jenkins queue item has not finished")
 
-    def request_cleanup(self, build_id: str) -> tuple[BuildResources, int]:
+    def request_cleanup(self, build_id: str, *, dispatch: bool = True) -> tuple[BuildResources, int]:
         manifest = self.manifest(build_id)
         if manifest.cleanup_status == CleanupStatus.SUCCEEDED:
             return manifest, 200
@@ -183,6 +183,11 @@ class BuildResourceService:
             }, {"lease_owner": tracker.owner, "cleanup_status": current.cleanup_status})
             if queued is None:
                 raise ResourceConflict("Concurrent cleanup state change")
+        if not dispatch:
+            # Quality-gate teardown runs immediately in the current worker,
+            # after releasing its deployment lease. It must not depend on a
+            # healthy broker to reclaim resources from a failed delivery.
+            return self.manifest(build_id), 202
         try:
             self.dispatcher.dispatch_build_cleanup(build_id)
         except Exception as exc:

@@ -30,14 +30,21 @@ from orchestrator.gitlab import (
 )
 from orchestrator.models import (
     AppAccess,
+    AppIdentifiers,
     AppSyncResult,
+    AgentRole,
+    AgentRoleUpdate,
     BuildCreate,
     BuildHistoryPage,
     BuildJob,
     BuildResourceReport,
     BuildStatus,
+    DynamicCheckRequest,
     PublishedPort,
     ServiceAccess,
+    RouteCheckResult,
+    StaticCheckRequest,
+    StaticCheckSubmission,
     TechStack,
     TechStackCreate,
     TechStackUpdate,
@@ -51,8 +58,17 @@ from orchestrator.build_resources import ResourceConflict
 from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFoundError
 from orchestrator.templates import TemplateError
 from orchestrator.workspaces import WorkspaceError, WorkspaceLimitError
+from orchestrator.route_checks import RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError
 
 bearer = HTTPBearer(auto_error=False)
+_CHECK_PRIVATE_FIELDS = {"repository_url", "static_role_snapshot", "dynamic_role_snapshot", "static_run_token"}
+_BUILD_PRIVATE_FIELDS = {
+    "compose_snapshot",
+    "workspace_snapshot",
+    "route_probe_payload",
+    "route_dynamic_role_snapshot",
+    "dynamic_retry_payload",
+}
 
 
 class TokenRequest(BaseModel):
@@ -190,6 +206,25 @@ def create_app(
     @api.exception_handler(WorkspaceError)
     async def workspace_error(_: Request, exc: WorkspaceError) -> JSONResponse:
         return JSONResponse(status_code=413 if isinstance(exc, WorkspaceLimitError) else 422, content={"detail": str(exc)})
+
+    @api.exception_handler(RouteCheckInputError)
+    async def route_check_input_error(_: Request, exc: RouteCheckInputError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @api.exception_handler(RouteCheckConflict)
+    @api.exception_handler(ResourceConflict)
+    async def route_check_conflict(_: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @api.exception_handler(RouteCheckUnavailableError)
+    async def route_check_unavailable(_: Request, exc: RouteCheckUnavailableError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @api.exception_handler(GitLabError)
+    async def gitlab_error(_: Request, exc: GitLabError) -> JSONResponse:
+        invalid = isinstance(exc, (GitLabNotFoundError, GitLabComposeNotFoundError,
+                                   GitLabComposeAmbiguousError, GitLabComposeInvalidError))
+        return JSONResponse(status_code=422 if invalid else 502, content={"detail": str(exc)})
 
     @api.post("/workspace/{appid}", status_code=status.HTTP_201_CREATED, include_in_schema=False)
     @api.post("/api/v1/workspace/{appid}", status_code=status.HTTP_201_CREATED, openapi_extra={
@@ -336,6 +371,10 @@ def create_app(
                 "POST /api/v1/jenkins/app_sync/{app_id}",
                 "POST /api/v1/workspace/{appid} (multipart files, after app registration)",
                 "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
+                "GET /api/v1/agent-roles", "GET/PUT /api/v1/agent-roles/{role_key}",
+                "POST /api/v1/apps/{app_id}/static-checks (forced rerun)",
+                "GET/DELETE /api/v1/apps/{app_id}/commits/{commit_id}/check-results",
+                "POST /api/v1/apps/{app_id}/dynamic-checks",
                 "GET /api/v1/jenkins/build_resources/{build_id}",
                 "DELETE /api/v1/jenkins/build_resources/{build_id} (optional destructive cleanup after build completion)",
                 "GET /api/v1/jenkins/app_events/{app_id}", "GET /api/v1/jenkins/app_images/{app_id}",
@@ -343,6 +382,14 @@ def create_app(
                 "GET/POST/PATCH/DELETE /api/v1/docker/tech_stack_*", "GET /api/v1/docker/compose_prompt",
             ],
             "build_statuses": [status.value for status in BuildStatus],
+            "route_checks": {
+                "require_route": "single absolute HTTP path or /package.Service/Method for gRPC",
+                "static_cache_key": ["app_id", "commit_id", "require_route", "static_agent_role_version"],
+                "static_required_before_build": True,
+                "dynamic_required_before_success": True,
+                "max_debug_probe_retries": 1,
+                "failed_dynamic_check_teardown": "immediate and build-scoped; partial cleanup remains recoverable",
+            },
             "resource_cleanup": {
                 "scope": "build_id", "query": "GET /api/v1/jenkins/build_resources/{build_id}",
                 "delete": "DELETE /api/v1/jenkins/build_resources/{build_id}", "body_required": False,
@@ -393,7 +440,8 @@ def create_app(
         guide_path = Path(__file__).parent / "docs" / "api-reference.md"
         flow_path = Path(__file__).parent / "docs" / "api-call-flow.md"
         workspace_path = Path(__file__).parent / "docs" / "workspace.md"
-        return "\n\n---\n\n".join(path.read_text(encoding="utf-8").rstrip() for path in (guide_path, flow_path, workspace_path)) + "\n"
+        checks_path = Path(__file__).parent / "docs" / "route-checks.md"
+        return "\n\n---\n\n".join(path.read_text(encoding="utf-8").rstrip() for path in (guide_path, flow_path, workspace_path, checks_path)) + "\n"
 
     @api.get("/api/v1/docker/compose_prompt", response_class=PlainTextResponse)
     def compose_prompt(_: dict = Depends(require_token)) -> PlainTextResponse:
@@ -444,12 +492,34 @@ def create_app(
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
 
+    @api.get("/api/v1/apps/{app_id}/identifiers", response_model=AppIdentifiers)
+    def get_app_identifiers(app_id: str, _: dict = Depends(require_token)) -> AppIdentifiers:
+        """List app-scoped IDs so the UI can select known records instead of retyping them."""
+        try:
+            app = container.applications.get_app(app_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
+        builds = container.repository.list_build_identifiers(app_id)
+        commits = {
+            *container.repository.list_route_check_commits(app_id),
+            *(build.git_commit_sha for build in builds if build.git_commit_sha),
+        }
+        if app.compose_source_commit:
+            commits.add(app.compose_source_commit)
+        commit_shas = sorted(
+            (commit for commit in commits if re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", commit)),
+            reverse=True,
+        )
+        return AppIdentifiers(app_id=app_id, builds=builds, commit_shas=commit_shas)
+
     @api.patch("/api/v1/jenkins/app_info/{app_id}", response_model=UserApp)
     def update_user_app(app_id: str, request: UserAppUpdate, _: dict = Depends(require_token)) -> UserApp:
         try:
             return container.applications.update_app(app_id, request)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
+        except BuildInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @api.post("/api/v1/jenkins/app_sync/{app_id}", response_model=AppSyncResult)
     def sync_user_app(app_id: str, _: dict = Depends(require_token)) -> AppSyncResult:
@@ -480,7 +550,65 @@ def create_app(
             updated_at=updated.updated_at,
         )
 
-    @api.post("/api/v1/jenkins/build_create/{app_id}", response_model=BuildJob, status_code=status.HTTP_202_ACCEPTED)
+    @api.get("/api/v1/agent-roles", response_model=list[AgentRole])
+    def list_agent_roles(_: dict = Depends(require_token)) -> list[AgentRole]:
+        return container.route_checks.roles.list()
+
+    @api.get("/api/v1/agent-roles/{role_key}", response_model=AgentRole)
+    def get_agent_role(role_key: str, _: dict = Depends(require_token)) -> AgentRole:
+        try:
+            return container.route_checks.roles.get(role_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Agent role not found") from exc
+
+    @api.put("/api/v1/agent-roles/{role_key}", response_model=AgentRole)
+    def update_agent_role(role_key: str, request: AgentRoleUpdate, _: dict = Depends(require_token)) -> AgentRole:
+        try:
+            return container.route_checks.roles.update(role_key, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Agent role not found") from exc
+
+    @api.post("/api/v1/apps/{app_id}/static-checks", response_model=StaticCheckSubmission,
+              response_model_exclude={"result": _CHECK_PRIVATE_FIELDS}, status_code=status.HTTP_202_ACCEPTED)
+    def submit_static_check(app_id: str, request: StaticCheckRequest | None = None,
+                            _: dict = Depends(require_token)) -> StaticCheckSubmission:
+        try:
+            app = container.applications.get_record(app_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
+        return container.route_checks.submit(app, commit_id=request.commit_id if request else None, force=True)
+
+    def check_commit_id(commit_id: str) -> str:
+        if re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", commit_id) is None:
+            raise HTTPException(status_code=422, detail="commit_id must be a full immutable Git commit SHA")
+        return commit_id.lower()
+
+    @api.get("/api/v1/apps/{app_id}/commits/{commit_id}/check-results", response_model=list[RouteCheckResult],
+             response_model_exclude={"__all__": _CHECK_PRIVATE_FIELDS})
+    def get_check_results(app_id: str, commit_id: str, _: dict = Depends(require_token)) -> list[RouteCheckResult]:
+        try:
+            return container.route_checks.results(app_id, check_commit_id(commit_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
+
+    @api.delete("/api/v1/apps/{app_id}/commits/{commit_id}/check-results", response_model=bool)
+    def delete_check_results(app_id: str, commit_id: str, _: dict = Depends(require_token)) -> bool:
+        try:
+            return container.route_checks.delete_latest(app_id, check_commit_id(commit_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
+
+    @api.post("/api/v1/apps/{app_id}/dynamic-checks", response_model=BuildJob,
+              response_model_exclude=_BUILD_PRIVATE_FIELDS,
+              status_code=status.HTTP_202_ACCEPTED)
+    def submit_dynamic_check(app_id: str, request: DynamicCheckRequest, _: dict = Depends(require_token)) -> BuildJob:
+        try:
+            return container.dynamic_checks.submit(app_id, request.build_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Build not found for this application") from exc
+
+    @api.post("/api/v1/jenkins/build_create/{app_id}", response_model=BuildJob,
+              response_model_exclude=_BUILD_PRIVATE_FIELDS, status_code=status.HTTP_202_ACCEPTED)
     def create_build(app_id: str, request: BuildCreate, _: dict = Depends(require_token)) -> BuildJob:
         try:
             return container.builds.queue_build(app_id, request)
@@ -491,14 +619,16 @@ def create_app(
         except OSError as exc:
             raise HTTPException(status_code=503, detail="Unable to snapshot workspace storage") from exc
 
-    @api.get("/api/v1/jenkins/build_info/{build_id}", response_model=BuildJob)
+    @api.get("/api/v1/jenkins/build_info/{build_id}", response_model=BuildJob,
+             response_model_exclude=_BUILD_PRIVATE_FIELDS)
     def get_build(build_id: str, _: dict = Depends(require_token)) -> BuildJob:
         try:
             return container.builds.get_build(build_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found") from exc
 
-    @api.get("/api/v1/jenkins/build_list", response_model=BuildHistoryPage)
+    @api.get("/api/v1/jenkins/build_list", response_model=BuildHistoryPage,
+             response_model_exclude={"items": {"__all__": _BUILD_PRIVATE_FIELDS}})
     def list_builds(
         app_id: str | None = Query(default=None, min_length=1, max_length=64),
         build_status: BuildStatus | None = Query(default=None, alias="status"),

@@ -14,6 +14,7 @@ from orchestrator.worker_runtime import WorkerRuntime
 from orchestrator.workspaces import WorkspaceError, WorkspaceLimitError, WorkspaceStore
 from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab, successful_deployment
 from orchestrator.jenkins import JenkinsBuild, JenkinsQueueItem, JenkinsResultArtifact
+from tests.route_check_fixtures import TEST_COMMIT_SHA, PassingDynamicChecks, prepare_static_pass
 
 
 @pytest.fixture
@@ -164,6 +165,7 @@ def test_build_snapshot_freezes_uploads_and_compose_and_download_is_build_scoped
     register(client)
     assert client.post("/workspace/APP-One", files={"files": ("main.py", b"version1")}).status_code == 201
     container = client.app.state.container
+    prepare_static_pass(container, "APP-One")
     build = container.builds.queue_build("APP-One", BuildCreate())
     runtime = WorkerRuntime(container.settings)
     url = runtime._workspace_archive_url(build, build.compose_snapshot)
@@ -192,6 +194,7 @@ def test_workspace_resolves_files_long_mounts_and_rejects_missing_traversal_and_
     register(client)
     client.post("/workspace/APP-One", files={"files": ("config/app.json", b"{}")})
     container = client.app.state.container
+    prepare_static_pass(container, "APP-One")
     build = container.builds.queue_build("APP-One", BuildCreate())
     source = {"services": {"web": {"image": "nginx", "volumes": [
         {"type": "bind", "source": "./config/app.json", "target": "/app.json", "read_only": True}, "data:/data"]}}}
@@ -206,14 +209,16 @@ def test_workspace_resolves_files_long_mounts_and_rejects_missing_traversal_and_
             container.workspace.resolve_compose("APP-One", build.build_id, source)
 
 
-def test_uploaded_workspace_reaches_jenkins_and_swarm_without_repository(client):
+def test_uploaded_workspace_reaches_jenkins_and_swarm_without_git_checkout(client):
     source = {"x-orchestrator-build-source": "workspace", "services": {"web": {
         "build": ".", "working_dir": "/workspace", "command": ["python", "main.py"], "volumes": [".:/workspace:ro"],
     }}}
     register(client, "demo", source)
     assert client.post("/workspace/demo", files=[("files", ("main.py", b"print('hi')")), ("files", ("Dockerfile", b"FROM python:3.12"))]).status_code == 201
     container = client.app.state.container
+    prepare_static_pass(container, "demo")
     build = container.builds.queue_build("demo", BuildCreate())
+    assert build.git_commit_sha == TEST_COMMIT_SHA
     artifact_compose = deepcopy(source)
     artifact_compose["services"]["web"].pop("build")
     artifact_compose["services"]["web"]["image"] = "harbor.example/apps/demo:42"
@@ -225,12 +230,18 @@ def test_uploaded_workspace_reaches_jenkins_and_swarm_without_repository(client)
     container.settings.harbor_url = "https://harbor.example"
     runtime = WorkerRuntime(container.settings, repository=container.repository, build_service=container.builds,
                             catalog=container.catalog, jenkins=jenkins, gitlab=gitlab, docker_services=docker,
-                            poll_scheduler=lambda *args: None)
+                            poll_scheduler=lambda *args: None, route_checks=container.route_checks,
+                            dynamic_checks=PassingDynamicChecks(container))
     assert runtime.start_build(build.build_id, "task")["status"] == "building"
     assert not gitlab.calls
+    assert jenkins.requests[0].git_ref == TEST_COMMIT_SHA
+    assert jenkins.requests[0].repository_url == "https://git.example/demo.git"
     assert jenkins.requests[0].compose == source
     assert client.get(jenkins.requests[0].workspace_archive_url, headers={"Authorization": f"Bearer {jenkins.requests[0].workspace_archive_token}"}).status_code == 200
     assert runtime.poll_build(build.build_id, 0, "poll")["status"] == "succeeded"
+    assert not gitlab.calls
+    assert runtime.dynamic_checks.calls == [build.build_id]
+    assert container.builds.get_build(build.build_id).dynamic_check_passed is True
     assert docker.calls[0][1]["services"]["web"]["volumes"][0].endswith(f"/snapshots/{build.build_id}/files:/workspace:ro")
 
 
@@ -254,6 +265,7 @@ def test_chunked_upload_is_limited_before_full_multipart_is_spooled(client):
 def test_workspace_download_rejects_expired_token(client):
     register(client)
     container = client.app.state.container
+    prepare_static_pass(container, "APP-One")
     build = container.builds.queue_build("APP-One", BuildCreate())
     token = jwt.encode({"scope": "workspace-download", "appid": "APP-One", "build_id": build.build_id, "exp": 1}, container.settings.jwt_secret)
     response = client.get(f"/api/v1/workspace/APP-One/builds/{build.build_id}/archive", headers={"Authorization": f"Bearer {token}"})

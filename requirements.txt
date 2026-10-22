@@ -11,3 +11,7 @@ pymongo>=4.8,<5
 celery[redis]>=5.4,<6
 redis>=5,<8
 docker>=7.1,<8
+jsonschema>=4.23,<5
+grpcio>=1.68,<2
+grpcio-reflection>=1.68,<2
+protobuf>=5.28,<8

@@ -4,6 +4,14 @@
 
 workspace 的上传、返回格式、Compose 约定及存储配置见 [Workspace](workspace.md)。先注册 APP，再用 multipart `files` 上传；创建构建冻结文件。`.:/workspace` 对应本次构建的上传根目录，不是 Git checkout。
 
+## 路由检查与交付门禁
+
+创建应用时配置 `require_route`（例如 `/health`）及关联 Git 仓库。App 创建、更新和仓库
+同步会触发静态检查；只有最新 commit、当前路由、最新静态角色版本完全匹配且通过检查，
+才能创建构建。容器启动后的 HTTP/gRPC 动态检查失败会生成诊断并清理当前构建资源。
+角色查询/更新、手动强制静态检查、检查结果查询/精确删除、手动动态重验及 payload 示例，
+见 [路由检查完整 API 与部署说明](route-checks.md)。这些端点均要求 Bearer Token。
+
 ## 时间输出
 
 所有平台业务时间字段（如 `created_at`、`updated_at`、`started_at`、`finished_at`、`last_polled_at`、`synced_at`、`resolved_at`）统一返回带东八区偏移量 `+08:00` 的 ISO 8601 字符串。例如，原 UTC 时间 `2026-10-14T01:55:20.795000` 返回为 `2026-10-14T09:55:20.795000+08:00`；未发生的时间继续返回 `null`。

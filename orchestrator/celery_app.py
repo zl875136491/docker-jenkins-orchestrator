@@ -43,6 +43,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "schedule": timedelta(seconds=settings.celery_recovery_interval_seconds),
                 "options": {"queue": settings.celery_build_queue},
             },
+            "recover-route-checks": {
+                "task": "orchestrator.pipeline.recover_route_checks",
+                "schedule": timedelta(seconds=settings.celery_recovery_interval_seconds),
+                "options": {"queue": settings.celery_build_queue},
+            },
         },
     )
     return app

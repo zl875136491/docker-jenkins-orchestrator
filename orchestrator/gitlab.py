@@ -188,6 +188,8 @@ class GitLabAdapter(Protocol):
 
     def discover_compose(self, ref: GitLabRepositoryRef) -> GitLabComposeDocument: ...
 
+    def checkout_commit(self, ref: GitLabRepositoryRef, destination: str | Path) -> Path: ...
+
 
 class GitLabHttpAdapter:
     """Validate repositories and refs through GitLab's v4 project API."""
@@ -278,6 +280,13 @@ class GitLabHttpAdapter:
         if not isinstance(services, Mapping) or not services:
             raise GitLabComposeInvalidError("Docker Compose document must contain a non-empty services object")
         return GitLabComposeDocument(path=compose_path, compose=document, commit_sha=ref.commit_sha)
+
+    def checkout_commit(self, ref: GitLabRepositoryRef, destination: str | Path) -> Path:
+        """Materialize a full repository checkout pinned to an already resolved SHA."""
+        path = Path(destination).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._clone_repository(ref, path)
+        return path
 
     def _clone_repository(self, ref: GitLabRepositoryRef, destination: Path) -> None:
         environment = os.environ.copy()

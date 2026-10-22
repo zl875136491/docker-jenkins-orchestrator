@@ -47,3 +47,24 @@ def sync_base_images(self) -> dict[str, int]:
     from orchestrator.worker_runtime import get_worker_runtime
 
     return get_worker_runtime().sync_base_images(task_id=self.request.id)
+
+
+@celery_app.task(name="orchestrator.pipeline.static_route_check", bind=True)
+def static_route_check(self, check_id: str, generation: int | None = None) -> dict[str, str]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().static_route_check(check_id, generation)
+
+
+@celery_app.task(name="orchestrator.pipeline.dynamic_route_check", bind=True)
+def dynamic_route_check(self, build_id: str, run_id: str | None = None) -> dict[str, str]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().dynamic_route_check(build_id, run_id)
+
+
+@celery_app.task(name="orchestrator.pipeline.recover_route_checks")
+def recover_route_checks() -> dict[str, int]:
+    from orchestrator.worker_runtime import get_worker_runtime
+
+    return get_worker_runtime().recover_route_checks()

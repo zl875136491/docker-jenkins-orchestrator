@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal
+from uuid import uuid4
+import re
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
@@ -129,6 +131,16 @@ class UserAppCreate(DomainModel):
     environment: dict[str, str] = Field(default_factory=dict)
     compose: dict[str, Any] | None = None
     components: list[str] = Field(default_factory=list)
+    require_route: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("require_route")
+    @classmethod
+    def route_is_a_single_path(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or value.startswith("//") or
+                                  any(char in value for char in "?#\\") or
+                                  any(ord(char) <= 32 or ord(char) == 127 for char in value)):
+            raise ValueError("require_route must be a single absolute route path without query or fragment")
+        return value
 
     @field_validator("appid")
     @classmethod
@@ -166,6 +178,12 @@ class UserAppUpdate(DomainModel):
     environment: dict[str, str] | None = None
     compose: dict[str, Any] | None = None
     components: list[str] | None = None
+    require_route: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("require_route")
+    @classmethod
+    def updated_route_is_valid(cls, value: str | None) -> str | None:
+        return UserAppCreate.route_is_a_single_path(value)
 
     @field_validator("repository_url")
     @classmethod
@@ -193,6 +211,7 @@ class UserAppRecord(DomainModel):
     compose_source_file: str | None = None
     compose_source_commit: str | None = None
     components: list[str] = Field(default_factory=list)
+    require_route: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -207,6 +226,7 @@ class UserApp(DomainModel):
     compose_source_file: str | None = None
     compose_source_commit: str | None = None
     components: list[str] = Field(default_factory=list)
+    require_route: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -249,6 +269,26 @@ class BuildJob(DomainModel):
     jenkins_build_number: int | None = None
     images: list[str] = Field(default_factory=list)
     service_ids: list[str] = Field(default_factory=list)
+    route_check_id: str | None = None
+    route_check_generation: int | None = None
+    require_route_snapshot: str | None = None
+    static_agent_role_version: int | None = None
+    dynamic_agent_role_version: int | None = None
+    route_probe_payload: dict[str, Any] | None = Field(default=None, repr=False)
+    route_dynamic_role_snapshot: dict[str, Any] | None = Field(default=None, repr=False)
+    static_check_passed: bool | None = None
+    dynamic_check_passed: bool | None = None
+    dynamic_status: Literal["pending", "queued", "running", "succeeded", "failed"] = "pending"
+    dynamic_run_id: str | None = None
+    dynamic_initial_started: bool = False
+    dynamic_debug_started: bool = False
+    dynamic_retry_started: bool = False
+    dynamic_retry_payload: dict[str, Any] | None = Field(default=None, repr=False)
+    dynamic_dispatch_error: str | None = None
+    teardown_required: bool = False
+    teardown_status: Literal["pending", "running", "succeeded", "partial_failed"] | None = None
+    dynamic_report_text: str | None = None
+    probe_result: dict[str, Any] | None = None
     error: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -264,6 +304,22 @@ class BuildHistoryPage(DomainModel):
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
+
+
+class BuildIdentifier(DomainModel):
+    """Small app-scoped build record used by UI selectors."""
+
+    build_id: str
+    status: BuildStatus
+    git_commit_sha: str | None = None
+
+
+class AppIdentifiers(DomainModel):
+    """Known immutable IDs for an application's UI selection controls."""
+
+    app_id: str
+    builds: list[BuildIdentifier] = Field(default_factory=list)
+    commit_shas: list[str] = Field(default_factory=list)
 
 
 class AppEvent(DomainModel):
@@ -354,6 +410,102 @@ class TechStack(DomainModel):
     line_comments: dict[str, str] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentRuntimeConfig(DomainModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    authorization_mode: Literal["never", "on-request", "untrusted"] = "never"
+    sandbox_mode: Literal["danger-full-access", "workspace-write", "read-only"] = "danger-full-access"
+    skip_git_repo_check: bool = True
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    timeout_seconds: int = Field(default=900, gt=0, le=7200)
+
+
+class AgentRole(DomainModel):
+    role_key: Literal["static_build_agent", "dynamic_debug_agent"]
+    prompt: str = Field(min_length=1, max_length=100000)
+    output_schema: dict[str, Any]
+    runtime_config: AgentRuntimeConfig = Field(default_factory=AgentRuntimeConfig)
+    agent_role_version: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentRoleUpdate(DomainModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    prompt: str | None = Field(default=None, min_length=1, max_length=100000)
+    output_schema: dict[str, Any] | None = None
+    runtime_config: AgentRuntimeConfig | None = None
+
+    @model_validator(mode="after")
+    def require_update_field(self) -> "AgentRoleUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one agent role field must be provided")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("Agent role configuration fields cannot be null")
+        return self
+
+
+class RouteCheckResult(DomainModel):
+    # MongoDB persists this BigInt-like primary key as a signed BSON int64.
+    # Keep the model boundary aligned with the storage type so invalid IDs
+    # fail before a write rather than surfacing as a BSON encoding error.
+    id: int = Field(default_factory=lambda: uuid4().int & ((1 << 63) - 1), ge=0, le=(1 << 63) - 1)
+    check_id: str
+    app_id: str
+    commit_id: str
+    require_route: str
+    static_agent_role_version: int = Field(ge=1)
+    dynamic_agent_role_version: int = Field(ge=1)
+    generation: int = Field(default=1, ge=1)
+    repository_url: str = Field(default="", repr=False)
+    git_ref: str = "main"
+    static_role_snapshot: dict[str, Any] = Field(default_factory=dict, repr=False)
+    dynamic_role_snapshot: dict[str, Any] = Field(default_factory=dict, repr=False)
+    static_task_id: str | None = None
+    static_run_token: str | None = Field(default=None, repr=False)
+    static_lease_expires_at: datetime | None = None
+    dispatch_error: str | None = None
+    dynamic_build_id: str | None = None
+    dynamic_run_id: str | None = None
+    static_status: Literal["queued", "running", "succeeded", "failed"] = "queued"
+    dynamic_status: Literal["pending", "queued", "running", "succeeded", "failed", "skipped"] = "pending"
+    diff_list: list[str] = Field(default_factory=list)
+    probe_payload: dict[str, Any] | None = None
+    static_report_text: str | None = None
+    static_check_passed: bool | None = None
+    probe_result: dict[str, Any] | None = None
+    dynamic_report_text: str | None = None
+    dynamic_check_passed: bool | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class StaticCheckSubmission(DomainModel):
+    check_id: str
+    task_id: str | None = None
+    queued: bool
+    cache_hit: bool = False
+    message: str
+    result: RouteCheckResult
+
+
+class StaticCheckRequest(DomainModel):
+    model_config = ConfigDict(extra="forbid")
+    commit_id: str | None = Field(default=None, min_length=7, max_length=64)
+
+    @field_validator("commit_id")
+    @classmethod
+    def commit_is_full_sha(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", value) is None:
+            raise ValueError("commit_id must be a full immutable Git commit SHA")
+        return value.lower() if value else None
+
+
+class DynamicCheckRequest(DomainModel):
+    model_config = ConfigDict(extra="forbid")
+    build_id: str = Field(min_length=1, max_length=64)
 
 
 class PublishedPort(DomainModel):

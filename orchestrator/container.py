@@ -12,6 +12,8 @@ from orchestrator.tasks import InMemoryTaskDispatcher, TaskDispatcher
 from orchestrator.templates import TemplateCatalog
 from orchestrator.workspaces import WorkspaceStore
 from orchestrator.build_resources import BuildResourceService
+from orchestrator.route_checks import RouteCheckService
+from orchestrator.dynamic_checks import DynamicCheckService
 
 
 @dataclass
@@ -26,6 +28,8 @@ class ApplicationContainer:
     tech_stacks: TechStackService
     workspace: WorkspaceStore
     build_resources: BuildResourceService
+    route_checks: RouteCheckService
+    dynamic_checks: DynamicCheckService
 
     def close(self) -> None:
         self.repository.close()
@@ -57,18 +61,25 @@ def create_container(
     applications = ApplicationService(repository, secret_box, workspace=workspace)
     if settings.gitlab_url and settings.gitlab_token:
         applications.gitlab = GitLabHttpAdapter.from_settings(settings)
+    route_checks = RouteCheckService(repository, dispatcher, settings, gitlab_factory=lambda: applications.gitlab)
+    applications.route_checks = route_checks
     tech_stacks = TechStackService(repository, catalog)
+    builds = BuildService(repository, applications, dispatcher, route_checks=route_checks)
+    resources = BuildResourceService(repository, dispatcher, workspace, jenkins_factory=lambda: _jenkins(settings))
+    dynamic_checks = DynamicCheckService(repository, dispatcher, settings, route_checks, builds, resources)
     return ApplicationContainer(
         settings=settings,
         repository=repository,
         secret_box=secret_box,
         applications=applications,
-        builds=BuildService(repository, applications, dispatcher),
+        builds=builds,
         dispatcher=dispatcher,
         catalog=catalog,
         tech_stacks=tech_stacks,
         workspace=workspace,
-        build_resources=BuildResourceService(repository, dispatcher, workspace, jenkins_factory=lambda: _jenkins(settings)),
+        build_resources=resources,
+        route_checks=route_checks,
+        dynamic_checks=dynamic_checks,
     )
 
 

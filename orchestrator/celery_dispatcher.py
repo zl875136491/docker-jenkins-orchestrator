@@ -21,7 +21,7 @@ class CeleryTaskDispatcher:
             self._celery_app = create_celery_app(self.settings)
         return self._celery_app
 
-    def _dispatch(self, task_name: str, queue: str, args: list[str] | None = None) -> TaskSubmission:
+    def _dispatch(self, task_name: str, queue: str, args: list[Any] | None = None) -> TaskSubmission:
         result = self.celery_app.send_task(task_name, args=args or [], queue=queue)
         return TaskSubmission(task_id=result.id, task_name=task_name)
 
@@ -33,3 +33,9 @@ class CeleryTaskDispatcher:
 
     def dispatch_build_cleanup(self, build_id: str) -> TaskSubmission:
         return self._dispatch("orchestrator.pipeline.cleanup_build", self.settings.celery_build_queue, [build_id])
+
+    def dispatch_static_check(self, check_id: str, generation: int = 1) -> TaskSubmission:
+        return self._dispatch("orchestrator.pipeline.static_route_check", self.settings.celery_build_queue, [check_id, generation])
+
+    def dispatch_dynamic_check(self, build_id: str, run_id: str | None = None) -> TaskSubmission:
+        return self._dispatch("orchestrator.pipeline.dynamic_route_check", self.settings.celery_build_queue, [build_id, run_id])

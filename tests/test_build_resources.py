@@ -16,10 +16,12 @@ from orchestrator.config import Settings
 from orchestrator.container import create_container
 from orchestrator.docker_cleanup import DockerBuildCleaner
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
+from orchestrator.dynamic_checks import DynamicCheckService
 from orchestrator.models import BuildCreate, BuildJob, BuildStatus, CleanupStatus, DeploymentService, ResourceState, UserAppCreate, UserAppUpdate, utc_now
 from orchestrator.naming import build_namespace
 from orchestrator.jenkins import JenkinsBuild
 from orchestrator.repository import RepositoryError
+from tests.route_check_fixtures import prepare_static_pass
 
 
 class NotFound(Exception):
@@ -167,6 +169,7 @@ def harness(tmp_path):
     container = create_container(settings)
     compose = {"services": {"web": {"image": "base:test", "ports": ["18080:8080"], "volumes": ["data:/data"]}}, "volumes": {"data": {}}}
     container.applications.create_app(UserAppCreate(appid="demo", name="Demo", repository_url="https://git.example/demo.git", compose=compose, environment={"VALUE": "original"}))
+    prepare_static_pass(container, "demo")
     docker = FakeDocker()
     harbor = FakeHarbor()
     adapter = DockerSwarmAdapter.from_settings(settings, docker_client=docker)
@@ -224,6 +227,115 @@ def test_cleanup_second_build_preserves_first_and_shared_image_layers(harness):
     assert harness.container.applications.get_app("demo")
     assert harness.container.repository.get_build(second.build_id).status == BuildStatus.SUCCEEDED
     assert harness.container.build_resources.request_cleanup(second.build_id)[1] == 200
+
+
+def test_dynamic_failure_teardown_is_build_scoped_and_queryable(harness, monkeypatch):
+    first, first_deployment = deploy(harness)
+    second, second_deployment = deploy(harness)
+    container = harness.container
+    repository = container.repository
+    repository.update_build(first.build_id, {
+        "service_ids": [service.service_id for service in first_deployment.services],
+        "dynamic_status": "succeeded", "dynamic_check_passed": True,
+    })
+    repository.update_build(second.build_id, {
+        "status": BuildStatus.DEPLOYING,
+        "service_ids": [service.service_id for service in second_deployment.services],
+    })
+    first_build = repository.get_build(first.build_id)
+    first_manifest = repository.get_build_resources(first.build_id)
+    probe_calls, debug_calls, log_calls, cleanup_calls = [], [], [], []
+
+    def failed_probe(payload, *, require_route, endpoints):
+        probe_calls.append((deepcopy(payload), require_route, list(endpoints)))
+        assert require_route == "/health"
+        assert [(endpoint.host, endpoint.port) for endpoint in endpoints] == [
+            ("127.0.0.1", second_deployment.services[0].ports[0].published_port),
+        ]
+        assert endpoints[0].port != first_deployment.services[0].ports[0].published_port
+        return {"passed": False, "response": {"status_code": 503, "body": "not ready"},
+                "error_type": "assertion_failed"}
+
+    def collect_logs(build_id):
+        log_calls.append(build_id)
+        assert build_id == second.build_id
+        return {"web": "failed build-owned container: dependency unavailable"}
+
+    def debug_agent(role, context, *, cwd):
+        debug_calls.append(deepcopy(context))
+        assert Path(cwd).is_dir()
+        assert context["build_id"] == second.build_id
+        assert context["commit_id"] == second.git_commit_sha
+        assert role.agent_role_version == second.dynamic_agent_role_version
+        return {"retry_payload": None, "report_text": "Dependency unavailable; no safe probe retry"}
+
+    def cleanup_failed_build(build_id):
+        cleanup_calls.append(build_id)
+        assert build_id == second.build_id
+        # This runner uses only the harness's FakeDocker and FakeHarbor.
+        return harness.runner.run(build_id)
+
+    def reject_default_cleanup(*args, **kwargs):
+        pytest.fail("The integration test must not construct a real Docker cleanup runner")
+
+    monkeypatch.setattr("orchestrator.dynamic_checks.BuildCleanupRunner", reject_default_cleanup)
+    checks = DynamicCheckService(
+        repository, container.dispatcher, harness.settings, container.route_checks,
+        container.builds, container.build_resources,
+        executor=SimpleNamespace(run_json=debug_agent),
+        probe_client=SimpleNamespace(run=failed_probe),
+        log_collector=SimpleNamespace(collect=collect_logs),
+    )
+    with build_lease(repository, second.build_id, [CleanupStatus.NOT_STARTED]) as tracker:
+        assert tracker is not None
+        failed = checks.execute(second.build_id, guard=tracker.guard)
+    assert failed.status is BuildStatus.FAILED
+    assert failed.dynamic_status == "failed" and failed.dynamic_check_passed is False
+    assert failed.teardown_required is True and failed.teardown_status == "pending"
+    assert failed.probe_result["final"]["response"]["status_code"] == 503
+    assert failed.dynamic_report_text == "Dependency unavailable; no safe probe retry"
+    assert len(probe_calls) == len(debug_calls) == 1
+    assert log_calls == [second.build_id]
+    assert cleanup_calls == []
+
+    with TestClient(create_app(harness.settings, container)) as client:
+        token = client.post("/oauth2/token", json={
+            "client_id": harness.settings.worker_name, "client_secret": harness.settings.worker_secret,
+        }).json()["access_token"]
+        headers = {"Authorization": "Bearer " + token}
+        build_path = f"/api/v1/jenkins/build_info/{second.build_id}"
+        pending = client.get(build_path, headers=headers)
+        assert pending.status_code == 200
+        assert pending.json()["teardown_status"] == "pending"
+        assert pending.json()["teardown_required"] is True
+
+        assert checks.teardown(second.build_id, cleanup=cleanup_failed_build) == {
+            "build_id": second.build_id, "teardown_status": "succeeded",
+        }
+        completed = client.get(build_path, headers=headers)
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "failed"
+        assert completed.json()["dynamic_check_passed"] is False
+        assert completed.json()["teardown_status"] == "succeeded"
+        assert completed.json()["teardown_required"] is False
+        resources = client.get(f"/api/v1/jenkins/build_resources/{second.build_id}", headers=headers)
+        assert resources.status_code == 200
+        assert resources.json()["cleanup_status"] == "succeeded"
+
+    assert cleanup_calls == [second.build_id]
+    assert checks.sync_teardown(second.build_id)["teardown_status"] == "succeeded"
+    assert repository.get_build(first.build_id) == first_build
+    assert repository.get_build_resources(first.build_id) == first_manifest
+    assert harness.docker.services.get(first_deployment.services[0].service_id)
+    with pytest.raises(NotFound):
+        harness.docker.services.get(second_deployment.services[0].service_id)
+    assert len(harness.docker.volumes.items) == len(harness.docker.networks.items) == len(harness.docker.containers.items) == 1
+    image = next(iter(harness.docker.images.items.values()))
+    assert image.tags == [first_deployment.services[0].image]
+    assert harness.harbor.removed == [second_deployment.services[0].image]
+    assert container.workspace.snapshot_path("demo", first.build_id).exists()
+    assert not container.workspace.snapshot_path("demo", second.build_id).exists()
+    assert container.applications.get_app("demo")
 
 
 def test_partial_failure_retries_only_remaining_resources(harness):

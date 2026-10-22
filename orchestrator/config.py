@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     celery_max_poll_attempts: int = 240
     celery_recovery_interval_seconds: int = 300
     base_image_sync_interval_hours: int = 24
+    codex_executable: str = Field(default="codex", min_length=1)
+    route_check_lease_seconds: int = Field(default=120, ge=10)
+    route_probe_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    route_probe_max_response_bytes: int = Field(default=65536, ge=1024, le=1048576)
 
     gitlab_url: str | None = None
     gitlab_token: str | None = None
