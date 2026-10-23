@@ -3,10 +3,14 @@
 
   const TOKEN_KEY = "orchestrator.control.token";
   const REFRESH_TOKEN_KEY = "orchestrator.control.refresh-token";
-  // Older releases persisted an implicit app context. Drop it during upgrade;
-  // application selection now happens explicitly in the topbar selector.
-  localStorage.removeItem("orchestrator.control.appid");
-  localStorage.removeItem("orchestrator.control.appname");
+  const UI_STATE_KEY = "orchestrator.control.ui-state";
+  let persistedUiState = {};
+  try {
+    const value = JSON.parse(localStorage.getItem(UI_STATE_KEY) || "{}");
+    if (value && typeof value === "object" && !Array.isArray(value)) persistedUiState = value;
+  } catch {
+    localStorage.removeItem(UI_STATE_KEY);
+  }
   const DISPLAY_TIME_ZONE = "Asia/Shanghai";
   const TOAST_TIMEOUT_MS = 5000;
   const BUILD_POLL_INTERVAL_MS = 5000;
@@ -15,14 +19,15 @@
   const state = {
     token: localStorage.getItem(TOKEN_KEY) || "",
     refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY) || "",
-    appid: "",
-    appName: "",
+    appid: String(persistedUiState.appid || ""),
+    appName: String(persistedUiState.appName || ""),
     apps: [],
     appIdentifiers: { appId: "", builds: [], commitShas: [] },
     agentRoles: [],
     selectedAgentRoleKey: "",
+    codexConfig: null,
     creatingApp: false,
-    activeSection: "appListSection",
+    activeSection: persistedUiState.activeSection || "appListSection",
     buildId: "",
     buildAppid: "",
     latestBuild: null,
@@ -60,10 +65,33 @@
     resourceBuildGeneration: 0,
     resourceBuildBusy: false,
     routeCheckGeneration: 0,
+    routeCheckTasks: { static: [], dynamic: [] },
+    routeCheckTasksGeneration: { static: 0, dynamic: 0 },
+    activatedSection: "",
+    activatedAppid: "",
+    resourceGenerations: {},
     currentAppCommit: "",
   };
 
   const $ = (id) => document.getElementById(id);
+
+  function persistUiState() {
+    const value = {
+      appid: state.creatingApp ? "" : state.appid || "",
+      appName: state.creatingApp ? "" : state.appName || "",
+      activeSection: state.activeSection || "appListSection",
+    };
+    try {
+      localStorage.setItem(UI_STATE_KEY, JSON.stringify(value));
+    } catch {
+      // A restricted/private browsing context may deny localStorage writes.
+    }
+  }
+
+  function clearPersistedUiApp() {
+    persistedUiState = { activeSection: state.activeSection || "appListSection" };
+    persistUiState();
+  }
 
   class ApiError extends Error {
     constructor(status, payload) {
@@ -153,7 +181,17 @@
     $("appSelector").disabled = !online;
     $("refreshAppsButton").disabled = !online;
     $("newAppButton").disabled = !online;
+    updateAppActionControls();
+    if (!online) {
+      state.codexConfig = null;
+      ["codexProviderName", "codexProviderId", "codexProviderEndpoint", "codexApiKey", "codexDefaultModel"]
+        .forEach((id) => { if ($(id)) $(id).value = ""; });
+      if ($("codexApiKeyStatus")) $("codexApiKeyStatus").textContent = "尚未读取";
+      if ($("codexConfigSource")) $("codexConfigSource").textContent = "未加载";
+      if ($("codexConfigStatus")) $("codexConfigStatus").textContent = "登录后加载 Codex 配置。";
+    }
     updateAgentRoleControls();
+    updateCodexConfigControls();
     renderWorkspace();
   }
 
@@ -164,11 +202,32 @@
     $("operationAppName").textContent = title || "未选择";
     $("appSelector").value = selected ? state.appid : "";
     $("appId").readOnly = selected;
+    updateAppFormMode();
+    updateAppActionControls();
     renderAppIdentifierSelectors();
     updateHistoryPresentation();
     $("navigationHint").textContent = selected
       ? `当前应用：${title}`
       : "从顶部选择应用，或切换到全局设置。";
+    persistUiState();
+  }
+
+  function updateAppFormMode() {
+    const createMode = Boolean(state.creatingApp);
+    const actions = $("appFormActions");
+    if (actions) actions.hidden = !createMode;
+    const submit = $("createAppButton");
+    if (submit) submit.disabled = !state.token || !createMode || Boolean(state.appOperation);
+    const form = $("appForm");
+    if (form) form.dataset.mode = createMode ? "create" : "edit";
+  }
+
+  function updateAppActionControls() {
+    const canEdit = Boolean(state.token && state.appid && !state.creatingApp && !state.appOperation);
+    ["patchAppButton", "syncAppButton"].forEach((id) => {
+      const control = $(id);
+      if (control) control.disabled = !canEdit;
+    });
   }
 
   function renderAppIdentifierSelectors() {
@@ -189,13 +248,12 @@
     commitSelector.disabled = !appValue;
 
     const previousBuilds = {
-      build: $("buildId").value,
       route: $("routeCheckBuildId").value,
       resources: $("buildResourcesId").value,
     };
-    const buildSelectors = [$("buildId"), $("routeCheckBuildId"), $("buildResourcesId")];
+    const buildSelectors = [$("routeCheckBuildId"), $("buildResourcesId")];
     buildSelectors.forEach((selector, index) => {
-      const selected = previousBuilds[["build", "route", "resources"][index]];
+      const selected = previousBuilds[["route", "resources"][index]];
       selector.replaceChildren(new Option(appValue ? "选择此应用的构建" : "请先选择应用", ""));
       state.appIdentifiers.builds.forEach((build) => {
         const suffix = [build.status, build.git_commit_sha?.slice(0, 8)].filter(Boolean).join(" · ");
@@ -270,9 +328,9 @@
   function updateHistoryPresentation() {
     const selected = Boolean(state.appid && !state.creatingApp);
     const title = selected ? (state.appName ? `${state.appName} (${state.appid})` : state.appid) : "";
-    $("historyTitle").textContent = "历史任务";
-    $("historyScopeNote").textContent = "仅显示当前打开应用的已持久化构建";
-    $("historyAppId").value = selected ? title : "";
+    if ($("historyTitle")) $("historyTitle").textContent = "历史任务";
+    if ($("historyScopeNote")) $("historyScopeNote").textContent = "仅显示当前打开应用的已持久化构建";
+    if ($("historyAppId")) $("historyAppId").value = selected ? title : "";
   }
 
   function clearHistoryView(message = "打开应用后加载该应用的历史任务") {
@@ -280,13 +338,31 @@
     state.historyLoading = false;
     state.historyPage = 1;
     state.historyTotal = 0;
-    $("historyStatus").value = "";
-    $("historyTableBody").replaceChildren();
-    $("historyTable").hidden = true;
-    $("historyEmpty").hidden = false;
-    $("historySummary").textContent = message;
-    $("historyLoading").textContent = "";
-    renderHistoryPagination();
+    if ($("historyStatus")) $("historyStatus").value = "";
+    const body = $("buildTaskRows") || $("historyTableBody");
+    const table = $("buildTaskTable") || $("historyTable");
+    const empty = $("buildTaskEmpty") || $("historyEmpty");
+    body?.replaceChildren();
+    if (table) table.hidden = true;
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = message;
+    }
+    if ($("historySummary")) $("historySummary").textContent = message;
+    if ($("historyLoading")) $("historyLoading").textContent = "";
+    if ($("historyPageInfo")) renderHistoryPagination();
+    state.routeCheckTasks = { static: [], dynamic: [] };
+    state.routeCheckTasksGeneration.static += 1;
+    state.routeCheckTasksGeneration.dynamic += 1;
+    ["staticCheckTaskRows", "dynamicCheckTaskRows"].forEach((id) => {
+      const body = $(id);
+      if (!body) return;
+      body.replaceChildren();
+      const table = body.closest("table");
+      const empty = document.querySelector(`[data-empty-for="${id}"]`);
+      if (table) table.hidden = true;
+      if (empty) empty.hidden = false;
+    });
   }
 
   function sectionFromHash() {
@@ -296,17 +372,45 @@
 
   function rememberSection() {
     const section = sectionFromHash();
-    if (section) state.activeSection = section;
+    if (section && !$(section)?.closest(".modal-shell")) {
+      state.activeSection = section;
+      persistUiState();
+    }
   }
 
   function closeModal(modalId) {
     const modal = $(modalId);
     if (!modal) return;
+    if (modalId === "newAppModal" && state.appOperation) return;
     if (window.location.hash === `#${modalId}`) {
       const restoreSection = state.activeSection || "appListSection";
       window.location.hash = restoreSection;
     }
     modal.removeAttribute("data-open");
+    modal.classList.remove("is-open");
+    if (modalId !== "loginModal") modal.hidden = true;
+    if (modalId === "newAppModal") {
+      $("appFormHost").appendChild($("appForm"));
+      const form = $("appForm");
+      if (form && form.dataset.mode === "create") {
+        form.reset();
+        $("gitRef").value = "main";
+        $("environment").value = "{}";
+        $("compose").value = "";
+        state.creatingApp = false;
+        setCurrentApp("");
+      }
+    }
+  }
+
+  function openModal(modalId) {
+    const modal = $(modalId);
+    if (!modal) return;
+    rememberSection();
+    modal.hidden = false;
+    modal.setAttribute("data-open", "true");
+    modal.classList.add("is-open");
+    modal.querySelector("input:not([type=hidden]), select, button")?.focus();
   }
 
   function bindModals() {
@@ -324,7 +428,11 @@
     });
     window.addEventListener("hashchange", () => {
       const modal = document.querySelector(".modal-shell:target");
-      if (modal) modal.setAttribute("data-open", "true");
+      if (modal) {
+        modal.hidden = false;
+        modal.setAttribute("data-open", "true");
+        modal.classList.add("is-open");
+      }
       rememberSection();
     });
     document.addEventListener("keydown", (event) => {
@@ -340,16 +448,21 @@
       resetAppView();
     }
     const appSections = new Set([
-      "appSection", "buildSection", "routeChecksSection", "operationSection", "workspaceSection", "historySection",
+      "appSection", "buildSection", "staticChecksSection", "dynamicChecksSection", "operationSection", "workspaceSection",
       "buildResourcesSection", "resourcesSection",
     ]);
-    const globalSections = new Set(["templatesSection", "baseImagesSection", "agentSettingsSection"]);
+    const globalSections = new Set(["templatesSection", "baseImagesSection", "codexSettingsSection", "agentSettingsSection"]);
     if (appSections.has(section) && !state.appid && !(section === "appSection" && state.creatingApp)) {
       section = "appListSection";
       window.location.hash = section;
     }
-    if (!section) section = state.activeSection || "appListSection";
+    if (!section) {
+      section = $(state.activeSection)?.classList.contains("workspace-section")
+        ? state.activeSection
+        : "appListSection";
+    }
     if (section) state.activeSection = section;
+    persistUiState();
     document.querySelectorAll(".workspace-section").forEach((item) => {
       const active = item.id === section;
       item.classList.toggle("active", active);
@@ -369,6 +482,7 @@
     $("applicationTab").setAttribute("aria-selected", String(!globalActive));
     $("globalNavigation").hidden = !globalActive;
     $("applicationNavigation").hidden = globalActive;
+    updateHistoryPolling();
     activateWorkspace();
   }
 
@@ -387,7 +501,7 @@
       syncNavigation();
     });
     $("globalTab").addEventListener("click", () => {
-      if (!["templatesSection", "baseImagesSection", "agentSettingsSection"].includes(state.activeSection)) {
+      if (!["templatesSection", "baseImagesSection", "codexSettingsSection", "agentSettingsSection"].includes(state.activeSection)) {
         window.location.hash = "templatesSection";
       }
       syncNavigation();
@@ -402,6 +516,10 @@
 
   function prettyNode(target, value) {
     target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function taskDrawerElement() {
+    return $("taskDetailDrawer") || $("historyDetailPanel");
   }
 
   function statusClass(status) {
@@ -446,6 +564,8 @@
   }
 
   function resetAppView() {
+    state.activatedSection = "";
+    state.activatedAppid = "";
     stopHistoryPolling();
     stopHistoryDetailLoading();
     clearHistoryView();
@@ -478,7 +598,7 @@
     state.currentAppCommit = "";
     state.routeCheckGeneration += 1;
     $("environment").placeholder = "{}";
-    $("environmentHelp").textContent = "创建时使用此 JSON；读取应用只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。";
+    $("environmentHelp").textContent = "创建时使用此 JSON；载入应用时只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。";
     $("composeSourceStatus").textContent = "尚未读取当前应用，来源未确认。编辑器中的内容可能是未保存草稿。";
     ["composeSourceFile", "composeSourceCommit", "composeSourceRef"].forEach((id) => { $(id).textContent = "--"; });
     $("composeSourcePanel").removeAttribute("data-appid");
@@ -488,20 +608,30 @@
     $("serviceAccessTable").hidden = true;
     $("serviceAccessEmpty").hidden = false;
     $("serviceAccessEmpty").textContent = "请先登录并从应用列表打开应用，再查询访问入口。";
-    $("resourceTitle").textContent = "请选择资源";
-    $("resourceTimestamp").textContent = "";
-    pretty("resourceOutput", "需要先登录并从应用列表打开应用");
+    resetResourceView();
     $("metricServices").textContent = "--";
     clearRouteCheckResults();
     setRouteCheckStatus("选择应用后可提交静态检查。", "muted", "staticRouteCheckStatus");
-    setRouteCheckStatus("尚未查询静态检查结果。", "muted", "staticCheckResultStatus");
     setRouteCheckStatus("选择应用和构建后可提交动态重验。", "muted", "dynamicRouteCheckStatus");
-    setRouteCheckStatus("尚未查询动态检查结果。", "muted", "dynamicCheckResultStatus");
     $("syncResultPanel").hidden = true;
     $("historyAppId").value = "";
     setCurrentApp("");
+    clearPersistedUiApp();
     pretty("appSyncOutput", "等待同步操作");
     setSyncStatus("同步使用已保存的仓库和 Git 引用，覆盖已保存的 Compose；不会自动构建。");
+  }
+
+  function resetResourceView() {
+    ["events", "images", "services", "access", "alerts"].forEach((resource) => {
+      state.resourceGenerations[resource] = (state.resourceGenerations[resource] || 0) + 1;
+      const output = $(`resource-${resource}-output`);
+      const status = $(`resource-${resource}-status`);
+      if (output) {
+        output.hidden = false;
+        output.textContent = "需要先登录并从顶部选择应用";
+      }
+      if (status) status.textContent = "尚未刷新";
+    });
   }
 
   function renderComposeSource(app) {
@@ -545,7 +675,13 @@
       operation.controls.push([control, control.disabled]);
       control.disabled = true;
     });
-    ["disconnectButton", "syncAppButton"].forEach((id) => {
+    if (!$(("newAppModal"))?.hidden) {
+      $("newAppModal").querySelectorAll(".modal-close, .modal-backdrop").forEach((control) => {
+        operation.controls.push([control, control.disabled]);
+        control.disabled = true;
+      });
+    }
+    ["disconnectButton", "patchAppButton", "syncAppButton"].forEach((id) => {
       const control = $(id);
       if (control && !operation.controls.some(([existing]) => existing === control)) {
         operation.controls.push([control, control.disabled]);
@@ -580,8 +716,10 @@
     renderAppSelector();
     $("appForm").removeAttribute("aria-busy");
     $("composeSourcePanel").removeAttribute("aria-busy");
-    $("syncAppButton").textContent = "同步仓库 Compose";
+    $("syncAppButton").textContent = "同步仓库";
     state.appOperation = null;
+    updateAppFormMode();
+    updateAppActionControls();
     updateBuildSubmitState();
     renderWorkspace();
     activateWorkspace();
@@ -801,9 +939,23 @@
   }
 
   function activateWorkspace() {
-    if (state.activeSection !== "workspaceSection" || !state.token || !state.appid || state.appOperation || state.workspaceOperation) return;
-    if (state.workspaceLoaded && state.workspaceAppid === state.appid) return;
-    withFeedback(loadWorkspace, null);
+    const section = state.activeSection;
+    if (!state.token || !state.appid || state.appOperation) return;
+    if (state.activatedSection === section && state.activatedAppid === state.appid) return;
+    state.activatedSection = section;
+    state.activatedAppid = state.appid;
+    if (section === "workspaceSection") {
+      if (state.workspaceOperation || (state.workspaceLoaded && state.workspaceAppid === state.appid)) return;
+      withFeedback(loadWorkspace, null);
+    } else if (section === "buildSection") {
+      withFeedback(() => loadHistory({ resetPage: true, silent: true }), null);
+    } else if (section === "staticChecksSection") {
+      withFeedback(() => loadRouteCheckTasks("static"), null);
+    } else if (section === "dynamicChecksSection") {
+      withFeedback(() => loadRouteCheckTasks("dynamic"), null);
+    } else if (section === "resourcesSection") {
+      Promise.allSettled(["events", "images", "services", "access", "alerts"].map((resource) => loadResource(resource)));
+    }
   }
 
   async function uploadWorkspace() {
@@ -918,6 +1070,7 @@
       window.location.hash = "appSection";
       await loadHistory({ resetPage: true, silent: true });
       updateHistoryPolling();
+      persistUiState();
       return value;
     });
   }
@@ -970,6 +1123,75 @@
     return state.agentRoles;
   }
 
+  function updateCodexConfigControls() {
+    const enabled = Boolean(state.token);
+    ["codexProviderName", "codexProviderId", "codexProviderEndpoint", "codexApiKey", "codexDefaultModel",
+      "codexDefaultEffort", "codexWireApi", "codexRequiresOpenAIAuth", "saveCodexConfigButton", "reloadCodexConfigButton"]
+      .forEach((id) => { $(id).disabled = !enabled; });
+  }
+
+  function renderCodexConfig() {
+    const config = state.codexConfig;
+    if (config) {
+      $("codexProviderName").value = config.provider_name || "";
+      $("codexProviderId").value = config.provider_id || "";
+      $("codexProviderEndpoint").value = config.provider_endpoint || "";
+      $("codexDefaultModel").value = config.default_model || "";
+      $("codexDefaultEffort").value = config.default_effort || "medium";
+      $("codexWireApi").value = config.wire_api || "responses";
+      $("codexRequiresOpenAIAuth").checked = Boolean(config.requires_openai_auth);
+      $("codexApiKey").value = "";
+      $("codexApiKeyStatus").textContent = config.api_key_configured ? "已配置（密钥不回显）" : "尚未配置";
+      $("codexConfigSource").textContent = config.source === "database" ? "来源：数据库" : "来源：环境变量";
+      $("codexConfigStatus").textContent = "配置已加载；API Key 留空时保持原值。";
+    } else {
+      $("codexConfigSource").textContent = "未加载";
+      $("codexApiKeyStatus").textContent = "尚未读取";
+      if (!state.token) $("codexConfigStatus").textContent = "登录后加载 Codex 配置。";
+    }
+    updateCodexConfigControls();
+  }
+
+  async function loadCodexConfig() {
+    if (!state.token) {
+      state.codexConfig = null;
+      renderCodexConfig();
+      return null;
+    }
+    $("codexConfigStatus").textContent = "正在加载 Codex 配置…";
+    try {
+      state.codexConfig = await request("/api/v1/system/codex-config");
+      renderCodexConfig();
+      return state.codexConfig;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 503) {
+        state.codexConfig = null;
+        $("codexConfigSource").textContent = "配置不可用";
+        $("codexConfigStatus").textContent = error.message;
+        updateCodexConfigControls();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async function saveCodexConfig() {
+    const payload = {
+      provider_name: $("codexProviderName").value.trim(),
+      provider_id: $("codexProviderId").value.trim(),
+      provider_endpoint: $("codexProviderEndpoint").value.trim(),
+      api_key: $("codexApiKey").value,
+      default_model: $("codexDefaultModel").value.trim(),
+      default_effort: $("codexDefaultEffort").value,
+      wire_api: $("codexWireApi").value,
+      requires_openai_auth: $("codexRequiresOpenAIAuth").checked,
+    };
+    state.codexConfig = await request("/api/v1/system/codex-config", { method: "PUT", body: payload });
+    renderCodexConfig();
+    $("codexConfigStatus").textContent = "已保存到数据库；Worker 后续调用将使用新配置。";
+    return state.codexConfig;
+  }
+
   async function saveAgentRole() {
     const roleKey = state.selectedAgentRoleKey;
     if (!roleKey) throw new Error("请先选择 Agent 角色");
@@ -991,11 +1213,14 @@
     state.latestBuild = build;
     $("buildId").value = state.buildId;
     $("metricBuild").textContent = build.status || "--";
-    $("buildStatus").textContent = build.status || "--";
-    $("buildStatus").className = `status-pill ${statusClass(build.status)}`;
-    $("jenkinsBuild").textContent = build.jenkins_build_number ?? "--";
-    $("celeryTask").textContent = build.celery_task_id || "--";
-    $("buildCommit").textContent = build.git_commit_sha || "--";
+    if ($("buildStatus")) {
+      $("buildStatus").textContent = build.status || "--";
+      $("buildStatus").className = `status-pill ${statusClass(build.status)}`;
+    }
+    if ($("jenkinsBuild")) $("jenkinsBuild").textContent = build.jenkins_build_number ?? "--";
+    if ($("celeryTask")) $("celeryTask").textContent = build.celery_task_id || "--";
+    if ($("buildCommit")) $("buildCommit").textContent = build.git_commit_sha || "--";
+    if ($("buildOutput")) pretty("buildOutput", build);
     if (appid && appid === state.appid) {
       addBuildChoice({ ...build, appid });
       $("buildId").value = build.build_id || "";
@@ -1013,11 +1238,18 @@
     state.latestBuild = null;
     state.buildAppid = "";
     state.buildLastRefreshedAt = "";
-    state.buildId = keepInput ? $("buildId").value : "";
-    if (!keepInput) $("buildId").value = "";
-    ["metricBuild", "buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => { $(id).textContent = "--"; });
-    $("buildStatus").className = "status-pill neutral";
-    $("historyDetailPanel").hidden = true;
+    state.buildId = keepInput ? $("buildId")?.value || "" : "";
+    if (!keepInput && $("buildId")) $("buildId").value = "";
+    ["metricBuild", "buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => {
+      if ($(id)) $(id).textContent = "--";
+    });
+    if ($("buildStatus")) $("buildStatus").className = "status-pill neutral";
+    if ($("buildPollStatus")) setBuildPollStatus("尚无构建状态查询。");
+    const drawer = taskDrawerElement();
+    if (drawer) {
+      drawer.hidden = true;
+      drawer.classList.remove("is-open");
+    }
     pretty("buildOutput", "尚未查询当前构建。");
   }
 
@@ -1025,7 +1257,7 @@
     if (!state.latestBuild) return;
     const status = state.latestBuild.status || "未知";
     $("metricBuild").textContent = `${status}（${label}）`;
-    $("buildStatus").textContent = `${status}（${label}）`;
+    if ($("buildStatus")) $("buildStatus").textContent = `${status}（${label}）`;
   }
 
   function isTerminalBuild(build) {
@@ -1118,7 +1350,7 @@
       pretty("buildOutput", value);
       const refreshedAt = formatTime();
       state.buildLastRefreshedAt = refreshedAt;
-      if (!$("historyDetailPanel").hidden && $("historyDetailTitle").textContent === `任务详情：${buildId}`) {
+      if (taskDrawerElement() && !taskDrawerElement().hidden && $("historyDetailTitle").textContent === `任务详情：${buildId}`) {
         pretty("historyDetailBuild", value);
         if (historyDetailContextMatches(state.historyDetailOperation)) {
           state.historyDetailOperation.buildPending = false;
@@ -1289,7 +1521,7 @@
     setSession(true, `登录成功，访问令牌有效 ${payload.expires_in || "未知"} 秒`);
     activateWorkspace();
     closeModal("loginModal");
-    await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles()]);
+    await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles(), loadCodexConfig()]);
     updateHistoryPolling();
     return payload;
   }
@@ -1340,7 +1572,7 @@
   async function createApp() {
     ensureAppIdle();
     const payload = appPayload();
-    return withAppOperation("创建应用中…", payload.appid, async (operation) => {
+    const value = await withAppOperation("创建应用中…", payload.appid, async (operation) => {
       const value = await request("/api/v1/jenkins/app_create", { method: "POST", body: payload });
       if (!sameAppContext(payload.appid, operation.version)) return null;
       applyApp(value);
@@ -1348,18 +1580,12 @@
       pretty("appOutput", value);
       return value;
     });
-  }
-
-  async function getApp() {
-    ensureAppIdle();
-    const appid = appidFromInput();
-    return withAppOperation("读取应用中…", appid, async (operation) => {
-      const value = await request(`/api/v1/jenkins/app_info/${encodeURIComponent(appid)}`);
-      if (!sameAppContext(appid, operation.version)) return null;
-      applyApp(value);
-      pretty("appOutput", value);
-      return value;
-    });
+    if (value) {
+      closeModal("newAppModal");
+      window.location.hash = "appSection";
+      syncNavigation();
+    }
+    return value;
   }
 
   async function patchApp() {
@@ -1415,7 +1641,7 @@
         if (sameAppContext(appid, operation.version)) {
           $("syncResultPanel").hidden = false;
           pretty("appSyncOutput", { error: errorMessage(error), ...(error instanceof ApiError ? { status: error.status, response: error.payload } : {}) });
-          setSyncStatus(`同步请求失败：${errorMessage(error)}。未替换编辑器和当前来源显示；若网络中断，服务端可能已完成操作，可先点击“读取应用”确认。`, "error");
+          setSyncStatus(`同步请求失败：${errorMessage(error)}。未替换编辑器和当前来源显示；若网络中断，服务端可能已完成操作，可刷新当前页面重新读取应用配置后确认。`, "error");
           setActivity(`应用同步失败：${errorMessage(error)}`, "error");
         }
         return null;
@@ -1432,8 +1658,8 @@
         pretty("appOutput", app);
       } catch (error) {
         if (sameAppContext(appid, operation.version)) {
-          setSyncStatus(`仓库同步成功，但应用刷新失败（读取应用失败）：${errorMessage(error)}。编辑器和来源仍是同步前的显示；下方保留完整同步响应，请点击“读取应用”重试刷新，无需再次同步。未触发构建。`, "error");
-          setActivity("仓库同步成功，但应用刷新失败；请重试读取应用", "error");
+          setSyncStatus(`仓库同步成功，但应用刷新失败：${errorMessage(error)}。编辑器和来源仍是同步前的显示；下方保留完整同步响应。请刷新当前页面重新读取应用配置后再继续，无需再次同步。未触发构建。`, "error");
+          setActivity("仓库同步成功，但应用刷新失败；请刷新页面重新加载应用配置", "error");
         }
         return result;
       }
@@ -1451,7 +1677,7 @@
     ensureAppIdle();
     const appid = appidFromInput();
     if (state.syncRefreshPendingAppid === appid) {
-      throw new Error("仓库同步已成功，但应用配置尚未重新读取。请先点击“读取应用”成功刷新配置和来源，再提交构建。");
+      throw new Error("仓库同步已成功，但应用配置尚未重新读取。请先刷新当前页面，确认配置和来源已更新后再提交构建。");
     }
     const gitRef = $("buildGitRef").value.trim();
     const body = gitRef ? { git_ref: gitRef } : {};
@@ -1472,6 +1698,7 @@
       pretty("buildOutput", value);
       startBuildPolling(value, { accepted: true, appid });
       loadHistory({ resetPage: true, silent: true }).catch(() => {});
+      closeCreateModal("buildModal");
       return value;
     } catch (error) {
       if (state.buildCreateOperation !== operation || generation !== state.buildPollGeneration || state.appContextVersion !== appContextVersion || error?.name === "AbortError") return null;
@@ -1537,6 +1764,7 @@
 
   function setRouteCheckStatus(message, tone = "muted", targetId = "staticRouteCheckStatus") {
     const target = $(targetId);
+    if (!target) return;
     target.textContent = message;
     target.className = `operation-status small ${tone === "success" ? "activity-success" : tone === "error" ? "activity-error" : "muted"}`;
   }
@@ -1576,6 +1804,7 @@
 
   function renderRouteCheckResults(targetId, results, checkType) {
     const target = $(targetId);
+    if (!target) return;
     target.replaceChildren();
     const items = Array.isArray(results) ? results : [];
     if (!items.length) {
@@ -1633,6 +1862,141 @@
     });
   }
 
+  function checkTaskStatus(task, checkType) {
+    return checkType === "static" ? task.static_status : task.dynamic_status;
+  }
+
+  function checkTaskIdentifier(task, checkType) {
+    return checkType === "static" ? task.commit_id : (task.dynamic_build_id || task.build_id || "");
+  }
+
+  function openCheckTaskDetail(task, checkType) {
+    stopHistoryDetailLoading();
+    stopBuildPolling("已切换到检查任务详情。", "muted");
+    const drawer = $("taskDetailDrawer") || $("historyDetailPanel");
+    if (!drawer) return;
+    drawer.hidden = false;
+    drawer.classList.add("is-open");
+    const identifier = checkTaskIdentifier(task, checkType);
+    const title = `${checkType === "static" ? "静态检查" : "动态检查"}详情：${identifier || task.check_id}`;
+    const meta = `App ID：${task.app_id || state.appid} · Commit：${task.commit_id || "--"} · Check ID：${task.check_id || "--"}`;
+    const status = `状态：${checkTaskStatus(task, checkType) || "未知"} · 最近更新：${formatDate(task.updated_at || task.created_at)}`;
+    if ($("taskDetailTitle")) $("taskDetailTitle").textContent = title;
+    if ($("taskDetailMeta")) $("taskDetailMeta").textContent = meta;
+    if ($("taskDetailStatus")) $("taskDetailStatus").textContent = status;
+    if ($("historyDetailTitle")) $("historyDetailTitle").textContent = title;
+    if ($("historyDetailMeta")) $("historyDetailMeta").textContent = meta;
+    if ($("historyDetailStatus")) $("historyDetailStatus").textContent = status;
+    if ($("taskDetailOutput")) pretty("taskDetailOutput", task);
+    if ($("taskDetailOutput")) $("taskDetailOutput").hidden = false;
+    if ($("buildTaskStatusDetails")) $("buildTaskStatusDetails").hidden = true;
+    if ($("historyDetailBuild")) pretty("historyDetailBuild", task);
+    if ($("taskDetailOutput")) $("taskDetailOutput").hidden = false;
+    if ($("buildTaskLegacyDetails")) $("buildTaskLegacyDetails").hidden = true;
+    ["historyDetailEvents", "historyDetailImages", "historyDetailServices", "historyDetailAlerts"].forEach((id) => {
+      if ($(id)) $(id).textContent = "检查任务没有关联的运行资源。";
+    });
+  }
+
+  function makeCheckTaskRow(task, checkType) {
+    const row = document.createElement("tr");
+    row.className = "task-list-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.dataset.taskType = checkType;
+    row.dataset.taskId = task.check_id || checkTaskIdentifier(task, checkType);
+    const identifier = checkTaskIdentifier(task, checkType);
+    textCell(row, task.check_id || identifier);
+    textCell(row, task.app_id || state.appid);
+    textCell(row, checkType === "static" ? (task.commit_id || "--") : (identifier || "--"));
+    const statusCell = document.createElement("td");
+    statusCell.appendChild(appendRouteStatusBadge(checkTaskStatus(task, checkType), checkType === "static" ? task.static_check_passed : task.dynamic_check_passed));
+    row.appendChild(statusCell);
+    textCell(row, formatDate(task.updated_at || task.created_at));
+    const open = () => openCheckTaskDetail(task, checkType);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      open();
+    });
+    return row;
+  }
+
+  function renderCheckTaskList(checkType, tasks) {
+    const rowsId = checkType === "static" ? "staticCheckTaskRows" : "dynamicCheckTaskRows";
+    const statusId = checkType === "static" ? "staticRouteCheckStatus" : "dynamicRouteCheckStatus";
+    const body = $(rowsId);
+    if (!body) return;
+    body.replaceChildren();
+    tasks.forEach((task) => body.appendChild(makeCheckTaskRow(task, checkType)));
+    if ($(statusId)) {
+      $(statusId).textContent = tasks.length
+        ? `当前应用共 ${tasks.length} 条${checkType === "static" ? "静态检查" : "动态检查"}任务。`
+        : `当前应用暂无${checkType === "static" ? "静态检查" : "动态检查"}任务。`;
+    }
+    const empty = document.querySelector(`[data-empty-for="${rowsId}"]`);
+    if (empty) empty.hidden = tasks.length !== 0;
+    const table = body.closest("table");
+    if (table) table.hidden = tasks.length === 0;
+  }
+
+  async function loadRouteCheckTasks(checkType) {
+    if (!state.token) throw new Error("请先登录控制端");
+    if (!state.appid || state.creatingApp) throw new Error("请先从顶部选择已注册应用");
+    const appid = state.appid;
+    const appVersion = state.appContextVersion;
+    const generation = ++state.routeCheckTasksGeneration[checkType];
+    if (checkType === "dynamic") {
+      const builds = await loadAllAppBuilds(appid, appVersion);
+      if (generation !== state.routeCheckTasksGeneration[checkType]
+        || appid !== state.appid || appVersion !== state.appContextVersion || !state.token) return null;
+      const tasks = builds.filter((build) => Boolean(build.dynamic_run_id));
+      state.routeCheckTasks[checkType] = tasks;
+      renderCheckTaskList(checkType, tasks);
+      return tasks;
+    }
+    const commits = [...new Set(state.appIdentifiers.commitShas)];
+    if (!commits.length) {
+      state.routeCheckTasks[checkType] = [];
+      renderCheckTaskList(checkType, []);
+      return [];
+    }
+    const responses = await Promise.all(commits.map((commitId) => request(
+      `/api/v1/apps/${encodeURIComponent(appid)}/commits/${encodeURIComponent(commitId)}/check-results`,
+    )));
+    if (generation !== state.routeCheckTasksGeneration[checkType]
+      || appid !== state.appid || appVersion !== state.appContextVersion || !state.token) return null;
+    const all = responses.flatMap((items) => Array.isArray(items) ? items : []);
+    const tasks = all.filter((task) => task.app_id === appid && (checkType === "static"
+      ? Boolean(task.static_status) && task.static_status !== "skipped"
+      : Boolean(task.dynamic_build_id)));
+    tasks.sort((left, right) => String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || "")));
+    state.routeCheckTasks[checkType] = tasks;
+    renderCheckTaskList(checkType, tasks);
+    return tasks;
+  }
+
+  async function loadAllAppBuilds(appid, appVersion) {
+    const pageSize = 100;
+    const first = await request(`/api/v1/jenkins/build_list?${new URLSearchParams({ app_id: appid, page: "1", page_size: String(pageSize) })}`);
+    const builds = Array.isArray(first?.items) ? first.items : [];
+    const totalPages = Math.ceil((Number(first?.total) || builds.length) / pageSize);
+    if (totalPages > 1) {
+      const pages = await Promise.all(Array.from({ length: totalPages - 1 }, (_, index) => request(
+        `/api/v1/jenkins/build_list?${new URLSearchParams({ app_id: appid, page: String(index + 2), page_size: String(pageSize) })}`,
+      )));
+      pages.forEach((page) => builds.push(...(Array.isArray(page?.items) ? page.items : [])));
+    }
+    if (appid !== state.appid || appVersion !== state.appContextVersion) return [];
+    if (builds.some((build) => build.appid !== appid)) throw new Error("构建历史响应包含其他应用的数据，已拒绝显示");
+    return builds;
+  }
+
+  function refreshRouteCheckTaskList(checkType) {
+    return loadRouteCheckTasks(checkType);
+  }
+
   function clearRouteCheckResults() {
     renderRouteCheckResults("staticCheckResults", [], "static");
     renderRouteCheckResults("dynamicCheckResults", [], "dynamic");
@@ -1665,7 +2029,9 @@
       $("routeCheckCommitId").value = state.appIdentifiers.commitShas.includes(result.commit_id) ? result.commit_id : "";
     }
     renderRouteCheckResults("staticCheckResults", [result], "static");
+    await loadRouteCheckTasks("static");
     setRouteCheckStatus(`${value.message || "静态检查任务已受理"}；当前状态：${result.static_status || "queued"}。`, "success", "staticRouteCheckStatus");
+    closeCreateModal("staticCheckModal");
     return value;
   }
 
@@ -1676,11 +2042,10 @@
       throw new Error("查询检查结果需要完整的 40 或 64 位 Git commit SHA");
     }
     const generation = ++state.routeCheckGeneration;
-    setRouteCheckStatus("正在查询静态检查结果…", "muted", "staticCheckResultStatus");
-    const value = await request(`/api/v1/apps/${encodeURIComponent(appid)}/commits/${encodeURIComponent(commitId)}/check-results`);
+    setRouteCheckStatus("正在刷新静态检查任务…", "muted", "staticCheckResultStatus");
+    const value = await loadRouteCheckTasks("static");
     if (!routeCheckInputsMatch(appid, commitId, generation)) return null;
-    renderRouteCheckResults("staticCheckResults", value, "static");
-    setRouteCheckStatus(`已读取 ${Array.isArray(value) ? value.length : 0} 条静态检查记录。`, "success", "staticCheckResultStatus");
+    setRouteCheckStatus(`已读取 ${Array.isArray(value) ? value.length : 0} 条静态检查任务。`, "success", "staticCheckResultStatus");
     return value;
   }
 
@@ -1710,7 +2075,9 @@
       $("routeCheckCommitId").value = state.appIdentifiers.commitShas.includes(value.git_commit_sha) ? value.git_commit_sha : "";
     }
     renderRouteCheckResults("dynamicCheckResults", [value], "dynamic");
+    await loadRouteCheckTasks("dynamic");
     setRouteCheckStatus(`动态重验已受理；构建状态：${value.status || "未知"}，动态检查：${value.dynamic_status || "queued"}。`, "success", "dynamicRouteCheckStatus");
+    closeCreateModal("dynamicCheckModal");
     return value;
   }
 
@@ -1721,15 +2088,17 @@
       throw new Error("请从当前应用的构建列表选择 Build ID");
     }
     const generation = ++state.routeCheckGeneration;
-    setRouteCheckStatus("正在查询动态检查结果…", "muted", "dynamicCheckResultStatus");
-    const value = await request(`/api/v1/jenkins/build_info/${encodeURIComponent(buildId)}`);
+    setRouteCheckStatus("正在刷新动态检查任务…", "muted", "dynamicCheckResultStatus");
+    const value = await loadRouteCheckTasks("dynamic");
     if (!routeCheckContextMatches(appid, generation) || $("routeCheckBuildId").value.trim() !== buildId) return null;
-    if (value?.appid !== appid || value?.build_id !== buildId) {
-      throw new Error("动态检查结果与当前应用或 Build ID 不匹配");
-    }
-    renderRouteCheckResults("dynamicCheckResults", [value], "dynamic");
-    setRouteCheckStatus(`已读取构建 ${buildId} 的动态检查结果：${checkStatusLabel(value.dynamic_status, value.dynamic_check_passed)}。`, "success", "dynamicCheckResultStatus");
+    const task = (value || []).find((item) => item.dynamic_build_id === buildId);
+    if (!task) throw new Error("所选 Build ID 尚无动态检查记录");
+    setRouteCheckStatus(`已读取构建 ${buildId} 的动态检查任务：${checkStatusLabel(task.dynamic_status, task.dynamic_check_passed)}。`, "success", "dynamicCheckResultStatus");
     return value;
+  }
+
+  function closeCreateModal(modalId) {
+    closeModal(modalId);
   }
 
   function historyPageCount() {
@@ -1738,9 +2107,9 @@
 
   function renderHistoryPagination() {
     const pageCount = historyPageCount();
-    $("historyPageInfo").textContent = `第 ${state.historyPage} / ${pageCount} 页`;
-    $("historyPreviousButton").disabled = state.historyPage <= 1;
-    $("historyNextButton").disabled = state.historyPage >= pageCount;
+    if ($("historyPageInfo")) $("historyPageInfo").textContent = `第 ${state.historyPage} / ${pageCount} 页`;
+    if ($("historyPreviousButton")) $("historyPreviousButton").disabled = state.historyPage <= 1;
+    if ($("historyNextButton")) $("historyNextButton").disabled = state.historyPage >= pageCount;
   }
 
   function textCell(row, value, className = "") {
@@ -1752,13 +2121,20 @@
   }
 
   function renderHistoryRows(items) {
-    const body = $("historyTableBody");
+    const body = $("buildTaskRows") || $("historyTableBody");
     body.replaceChildren();
-    $("historyTable").hidden = items.length === 0;
-    $("historyEmpty").hidden = items.length !== 0;
+    const table = $("buildTaskTable") || $("historyTable");
+    const empty = $("buildTaskEmpty") || $("historyEmpty");
+    if (table) table.hidden = items.length === 0;
+    if (empty) empty.hidden = items.length !== 0;
 
     items.forEach((build) => {
       const row = document.createElement("tr");
+      row.className = "task-list-row";
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.dataset.taskType = "build";
+      row.dataset.taskId = build.build_id;
       textCell(row, build.build_id);
       textCell(row, build.appid);
       const statusCell = document.createElement("td");
@@ -1770,17 +2146,13 @@
       textCell(row, build.git_ref);
       textCell(row, build.jenkins_build_number ?? "--");
       textCell(row, formatDate(build.created_at));
-
-      const actions = document.createElement("td");
-      const detailButton = document.createElement("button");
-      detailButton.type = "button";
-      detailButton.className = "button button-quiet history-detail-button";
-      detailButton.textContent = "查看详情";
-      detailButton.addEventListener("click", () => {
-        withFeedback(() => inspectBuild(build.build_id, build.appid), null);
+      const open = () => withFeedback(() => inspectBuild(build.build_id, build.appid), null);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        open();
       });
-      actions.appendChild(detailButton);
-      row.appendChild(actions);
       body.appendChild(row);
     });
   }
@@ -1954,7 +2326,7 @@
       && state.appContextVersion === operation.appContextVersion
       && $("appId").value.trim() === operation.appInput
       && $("buildId").value.trim() === operation.buildId
-      && !$("historyDetailPanel").hidden
+      && taskDrawerElement() && !taskDrawerElement().hidden
       && $("historyDetailTitle").textContent === `任务详情：${operation.buildId}`;
   }
 
@@ -1971,6 +2343,7 @@
         ? `关联资源已加载，${operation.resourceFailures} 个接口返回失败`
         : "关联资源已加载";
     $("historyDetailStatus").textContent = `${buildStatus}；${resourcesStatus}。`;
+    if ($("taskDetailStatus")) $("taskDetailStatus").textContent = `${buildStatus}；${resourcesStatus}。`;
   }
 
   async function loadHistoryDetailResources(operation) {
@@ -2025,10 +2398,21 @@
     $("buildId").value = buildId;
     resetBuildResources();
     $("buildResourcesId").value = buildId;
-    $("historyDetailPanel").hidden = false;
+    const drawer = taskDrawerElement();
+    if (drawer) {
+      drawer.hidden = false;
+      drawer.classList.add("is-open");
+    }
+    if ($("taskDetailTitle")) $("taskDetailTitle").textContent = `构建任务详情：${buildId}`;
+    if ($("taskDetailMeta")) $("taskDetailMeta").textContent = `App ID：${selectedAppid}`;
+    if ($("taskDetailOutput")) $("taskDetailOutput").hidden = true;
+    if ($("buildTaskStatusDetails")) $("buildTaskStatusDetails").hidden = false;
+    if ($("taskDetailOutput")) pretty("taskDetailOutput", { status: "loading", build_id: buildId });
+    if ($("buildTaskLegacyDetails")) $("buildTaskLegacyDetails").hidden = false;
     $("historyDetailTitle").textContent = `任务详情：${buildId}`;
     $("historyDetailMeta").textContent = `App ID：${selectedAppid}`;
     $("historyDetailStatus").textContent = "正在并行加载任务及关联资源...";
+    if ($("taskDetailStatus")) $("taskDetailStatus").textContent = "正在并行加载构建任务及关联资源...";
     ["historyDetailBuild", "historyDetailEvents", "historyDetailImages", "historyDetailServices", "historyDetailAlerts"].forEach((id) => {
       $(id).textContent = "加载中...";
     });
@@ -2138,7 +2522,7 @@
 
   function updateHistoryPolling() {
     stopHistoryPolling();
-    if (!state.token || !state.appid || !$("historyAutoRefresh").checked) return;
+    if (!state.token || !state.appid || state.activeSection !== "buildSection" || !$("historyAutoRefresh")?.checked) return;
     state.historyTimer = setInterval(() => {
       if (state.historyLoading) return;
       loadHistory({ silent: true }).catch((error) => {
@@ -2158,14 +2542,36 @@
       access: "app_access",
       alerts: "app_alerts",
     }[resource];
-    const value = await request(`/api/v1/jenkins/${resourcePath}/${encodeURIComponent(appid)}`);
-    if (!sameAppContext(appid, version)) return null;
-    $("resourceTitle").textContent = labels[resource] || resource;
-    $("resourceTimestamp").textContent = formatTime();
-    pretty("resourceOutput", value);
-    if (resource === "services" && Array.isArray(value)) $("metricServices").textContent = String(value.length);
-    if (resource === "access") renderServiceAccess(value);
-    return value;
+    const outputId = `resource-${resource}-output`;
+    const status = $(`resource-${resource}-status`);
+    const refresh = $(`resource-${resource}-refresh`);
+    const generation = (state.resourceGenerations[resource] || 0) + 1;
+    state.resourceGenerations[resource] = generation;
+    if (status) status.textContent = `正在刷新${labels[resource]}…`;
+    if (refresh) refresh.disabled = true;
+    try {
+      const value = await request(`/api/v1/jenkins/${resourcePath}/${encodeURIComponent(appid)}`);
+      if (!sameAppContext(appid, version) || state.resourceGenerations[resource] !== generation) return null;
+      const output = $(outputId);
+      if (output) prettyNode(output, value);
+      if (status) status.textContent = `最近刷新：${formatTime()}`;
+      if (resource === "services" && Array.isArray(value)) $("metricServices").textContent = String(value.length);
+      if (resource === "access") {
+        renderServiceAccess(value);
+        if (output) output.hidden = true;
+      }
+      return value;
+    } catch (error) {
+      const output = $(outputId);
+      if (output && state.resourceGenerations[resource] === generation) {
+        output.hidden = false;
+        output.textContent = `刷新失败：${errorMessage(error)}`;
+      }
+      if (status && state.resourceGenerations[resource] === generation) status.textContent = `刷新失败：${errorMessage(error)}`;
+      throw error;
+    } finally {
+      if (refresh && state.resourceGenerations[resource] === generation) refresh.disabled = false;
+    }
   }
 
   function templateElement(...ids) {
@@ -2513,7 +2919,15 @@
         syncNavigation();
         return;
       }
-      withFeedback(() => openApplication(appid), "appOutput");
+      $("appSelector").disabled = true;
+      withFeedback(async () => {
+        try {
+          return await openApplication(appid);
+        } finally {
+          $("appSelector").value = state.appid;
+          $("appSelector").disabled = !state.token;
+        }
+      }, "appOutput");
     });
     $("sessionMenu").addEventListener("click", (event) => {
       if (event.target.closest(".session-menu-item")) $("sessionMenu").open = false;
@@ -2528,14 +2942,24 @@
       withFeedback(saveAgentRole, null);
     });
     $("reloadAgentRolesButton").addEventListener("click", () => withFeedback(loadAgentRoles, null));
+    $("codexConfigForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      withFeedback(saveCodexConfig, null);
+    });
+    $("reloadCodexConfigButton").addEventListener("click", () => withFeedback(loadCodexConfig, null));
     $("refreshAppsButton").addEventListener("click", () => withFeedback(loadApps, null));
     $("newAppButton").addEventListener("click", () => {
       resetAppView();
       state.appid = "";
       state.creatingApp = true;
+      $("appForm").reset();
+      $("gitRef").value = "main";
+      $("environment").value = "{}";
+      $("compose").value = "";
+      $("newAppFormHost").appendChild($("appForm"));
       $("appId").value = "";
       setCurrentApp("");
-      window.location.hash = "appSection";
+      openModal("newAppModal");
     });
     $("disconnectButton").addEventListener("click", () => {
       if (state.appOperation) return;
@@ -2558,6 +2982,7 @@
       state.agentRoles = [];
       state.selectedAgentRoleKey = "";
       resetAppView();
+      clearPersistedUiApp();
       setCurrentApp("");
       renderAppSelector();
       renderAppList();
@@ -2574,28 +2999,17 @@
       if (state.appid) return;
       state.creatingApp = true;
     });
-    $("buildId").addEventListener("input", (event) => {
-      if (event.target.value.trim() === state.buildId) return;
-      stopBuildPolling("Build ID 已更改；查询旧构建已停止，请查询新 ID。", "muted");
-      resetBuildView({ keepInput: true });
-    });
     ["routeCheckAppId", "routeCheckCommitId", "routeCheckBuildId"].forEach((id) => {
       $(id).addEventListener("change", () => {
         state.routeCheckGeneration += 1;
         if (id === "routeCheckCommitId") {
-          renderRouteCheckResults("staticCheckResults", [], "static");
-          setRouteCheckStatus("Commit 已更改，请查询该版本的静态检查结果。", "muted", "staticCheckResultStatus");
+          setRouteCheckStatus("静态检查上下文已更新；列表仍展示该应用的全部历史任务。", "muted", "staticRouteCheckStatus");
         }
         if (id === "routeCheckBuildId") {
-          renderRouteCheckResults("dynamicCheckResults", [], "dynamic");
-          setRouteCheckStatus("构建已更改，请查询该构建的动态检查结果。", "muted", "dynamicCheckResultStatus");
+          setRouteCheckStatus("动态检查上下文已更新；列表仍展示该应用的全部历史任务。", "muted", "dynamicRouteCheckStatus");
         }
       });
     });
-    $("staticRouteCheckButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(submitStaticRouteCheck, "staticRouteCheckStatus"), null));
-    $("refreshRouteChecksButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(refreshRouteCheckResults, "staticCheckResultStatus"), null));
-    $("dynamicRouteCheckButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(submitDynamicRouteCheck, "dynamicRouteCheckStatus"), null));
-    $("refreshDynamicCheckResultButton").addEventListener("click", () => withFeedback(() => runRouteCheckAction(refreshDynamicCheckResult, "dynamicCheckResultStatus"), null));
     $("environment").addEventListener("input", () => { state.environmentDirty = true; });
     $("appForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createApp, "appOutput"); });
     $("workspaceUploadForm").addEventListener("submit", (event) => {
@@ -2626,7 +3040,6 @@
     });
     $("workspacePreviousButton").addEventListener("click", () => { state.workspacePage -= 1; renderWorkspace(); });
     $("workspaceNextButton").addEventListener("click", () => { state.workspacePage += 1; renderWorkspace(); });
-    $("getAppButton").addEventListener("click", () => withFeedback(getApp, "appOutput"));
     $("patchAppButton").addEventListener("click", () => withFeedback(patchApp, "appOutput"));
     $("syncAppButton").addEventListener("click", () => {
       if (state.appOperation) return;
@@ -2636,33 +3049,57 @@
       });
     });
     $("buildForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(createBuild, "buildOutput"); });
-    $("buildQueryForm").addEventListener("submit", (event) => { event.preventDefault(); withFeedback(getBuild, "buildOutput"); });
-    $("pollBuildButton").addEventListener("click", () => withFeedback(getBuild, "buildOutput"));
-    $("historyFilterForm").addEventListener("submit", (event) => {
+    bindOptional("buildQueryForm", "submit", (event) => { event.preventDefault(); withFeedback(getBuild, "buildOutput"); });
+    bindOptional("pollBuildButton", "click", () => withFeedback(getBuild, "buildOutput"));
+    bindOptional("historyFilterForm", "submit", (event) => {
       event.preventDefault();
       withFeedback(() => loadHistory({ resetPage: true }), null);
     });
-    $("historyRefreshButton").addEventListener("click", () => withFeedback(() => loadHistory(), null));
-    $("historyPageSize").addEventListener("change", () => withFeedback(() => loadHistory({ resetPage: true }), null));
-    $("historyPreviousButton").addEventListener("click", () => {
+    bindOptional("historyRefreshButton", "click", () => withFeedback(() => loadHistory(), null));
+    bindOptional("historyPageSize", "change", () => withFeedback(() => loadHistory({ resetPage: true }), null));
+    bindOptional("historyPreviousButton", "click", () => {
       if (state.historyPage <= 1) return;
       state.historyPage -= 1;
       withFeedback(() => loadHistory(), null);
     });
-    $("historyNextButton").addEventListener("click", () => {
+    bindOptional("historyNextButton", "click", () => {
       if (state.historyPage >= historyPageCount()) return;
       state.historyPage += 1;
       withFeedback(() => loadHistory(), null);
     });
-    $("historyAutoRefresh").addEventListener("change", updateHistoryPolling);
-    $("historyDetailCloseButton").addEventListener("click", () => {
-      $("historyDetailPanel").hidden = true;
+    bindOptional("historyAutoRefresh", "change", updateHistoryPolling);
+    bindOptional("taskDetailCloseButton", "click", closeTaskDetail);
+    bindOptional("historyDetailCloseButton", "click", closeTaskDetail);
+    document.querySelectorAll("[data-task-detail-close]").forEach((button) => button.addEventListener("click", closeTaskDetail));
+    function closeTaskDetail() {
+      const drawer = taskDrawerElement();
+      if (drawer) {
+        drawer.hidden = true;
+        drawer.classList.remove("is-open");
+      }
       stopHistoryDetailLoading();
+      stopBuildPolling("任务详情已关闭。", "muted");
+    }
+    document.addEventListener("keydown", (event) => {
+      const drawer = taskDrawerElement();
+      if (event.key === "Escape" && drawer && !drawer.hidden) closeTaskDetail();
     });
-    document.querySelectorAll(".resource-button").forEach((button) => {
-      button.addEventListener("click", () => withFeedback(() => loadResource(button.dataset.resource), "resourceOutput"));
+    ["events", "images", "services", "access", "alerts"].forEach((resource) => {
+      bindOptional(`resource-${resource}-refresh`, "click", () => withFeedback(() => loadResource(resource), null));
     });
-    $("refreshAccessButton").addEventListener("click", () => withFeedback(() => loadResource("access"), "resourceOutput"));
+    bindOptional("newBuildButton", "click", () => openModal("buildModal"));
+    bindOptional("newStaticCheckButton", "click", () => openModal("staticCheckModal"));
+    bindOptional("newDynamicCheckButton", "click", () => openModal("dynamicCheckModal"));
+    bindOptional("staticCheckForm", "submit", (event) => {
+      event.preventDefault();
+      withFeedback(() => runRouteCheckAction(submitStaticRouteCheck, "staticRouteCheckStatus"), null);
+    });
+    bindOptional("dynamicCheckForm", "submit", (event) => {
+      event.preventDefault();
+      withFeedback(() => runRouteCheckAction(submitDynamicRouteCheck, "dynamicRouteCheckStatus"), null);
+    });
+    bindOptional("staticCheckRefreshButton", "click", () => withFeedback(() => runRouteCheckAction(() => refreshRouteCheckTaskList("static"), "staticRouteCheckStatus"), null));
+    bindOptional("dynamicCheckRefreshButton", "click", () => withFeedback(() => runRouteCheckAction(() => refreshRouteCheckTaskList("dynamic"), "dynamicRouteCheckStatus"), null));
     bindOptional("loadTemplatesButton", "click", () => withFeedback(loadTemplates, null));
     bindOptional("loadComposePromptButton", "click", () => withFeedback(loadComposePrompt, null));
     bindOptional("templateForm", "submit", (event) => {
@@ -2708,9 +3145,18 @@
 
   async function restoreSession() {
     if (!state.token) return;
+    const restoreSection = sectionFromHash() || persistedUiState.activeSection || "appListSection";
+    const restoreAppid = state.appid;
     try {
       setSession(true, "登录状态已恢复");
-      await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles()]);
+      await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles(), loadCodexConfig()]);
+      if (restoreAppid && state.apps.some((app) => app.appid === restoreAppid)) {
+        await openApplication(restoreAppid);
+      }
+      if ($(restoreSection)?.classList.contains("workspace-section")) {
+        window.location.hash = restoreSection;
+        syncNavigation();
+      }
       updateHistoryPolling();
     } catch {
       setSession(false);
