@@ -13,9 +13,11 @@ _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONSOLE_NOTE = re.compile(r"\x1b\[8mha:.*?\x1b\[0m", re.DOTALL)
 _TIMESTAMP = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s*")
 _STAGE = re.compile(r"\[Pipeline\]\s*\{\s*\((.+)\)\s*$")
+_EXCEPTION_HOOK_START = re.compile(r"^Error in sys\.excepthook:")
+_EXCEPTION_HOOK_END = re.compile(r"^Original exception was:")
 _WRAPPER = re.compile(
     r"script returned exit code|did not complete successfully|failed to solve|executor failed|"
-    r"build step .+ marked build as failure|hudson\.AbortException",
+    r"build step .+ marked build as failure|hudson\.AbortException|subprocess\.CalledProcessError",
     re.IGNORECASE,
 )
 _ERROR = re.compile(
@@ -26,6 +28,7 @@ _ERROR = re.compile(
     re.IGNORECASE,
 )
 _CAUSES = (
+    ("包管理器注册表请求失败", r"error when performing the request to https?://registry\."),
     ("DNS 解析失败", r"could not resolve host|couldn't resolve host|name or service not known|temporary failure in name resolution|\bENOTFOUND\b|\bEAI_AGAIN\b"),
     ("TLS 证书校验失败", r"\bx509:|SSL certificate problem|certificate verify failed|certificate signed by unknown authority|unable to (?:get local issuer|verify the first) certificate"),
     ("依赖运行时版本不兼容", r"\bEBADENGINE\b|unsupported engine|not compatible with your version of node"),
@@ -77,11 +80,22 @@ def _shorten(text: str, limit: int) -> str:
 
 def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterable[str] = ()) -> str:
     lines = [_TIMESTAMP.sub("", line).strip() for line in redact_console(console, sensitive_values).splitlines()]
+    exception_hook_lines = set()
+    in_exception_hook = False
+    for index, line in enumerate(lines):
+        if _EXCEPTION_HOOK_START.search(line):
+            in_exception_hook = True
+        if in_exception_hook and not _EXCEPTION_HOOK_END.search(line):
+            exception_hook_lines.add(index)
+        elif in_exception_hook:
+            in_exception_hook = False
     stages = []
     node = ""
     candidates = []
     exit_code = ""
     for index, line in enumerate(lines):
+        if index in exception_hook_lines:
+            continue
         stage = _STAGE.search(line)
         if stage:
             stages.append(stage.group(1))

@@ -523,6 +523,23 @@ def test_swarm_adapter_reports_failed_task_after_readiness_timeout() -> None:
         adapter._wait_for_service_ready(docker, "demo-api")
 
 
+def test_swarm_adapter_surfaces_failed_task_error_without_leaking_environment_secrets() -> None:
+    docker = FakeDocker()
+    service = TaskService("demo-api", ["failed", "failed"])
+    service.tasks = lambda: [
+        {"DesiredState": "shutdown", "Status": {"State": "failed", "Err": "exec: --bind-addr not found PASSWORD=private-test-value"}},
+        {"DesiredState": "shutdown", "Status": {"State": "failed", "Err": "exec: --bind-addr not found PASSWORD=private-test-value"}},
+    ]
+    service.attrs["Spec"]["TaskTemplate"] = {"ContainerSpec": {"Env": ["PASSWORD=private-test-value"]}}
+    docker.services.items[service.name] = service
+    adapter = DockerSwarmAdapter(docker_client=docker, readiness_timeout_seconds=60)
+
+    with pytest.raises(DockerServiceError, match="exec: --bind-addr not found") as error:
+        adapter._wait_for_service_ready(docker, "demo-api")
+
+    assert "private-test-value" not in str(error.value)
+
+
 def test_swarm_adapter_rolls_back_new_service_and_network_after_readiness_failure() -> None:
     docker = FakeDocker()
     adapter = DockerSwarmAdapter(docker_client=docker)

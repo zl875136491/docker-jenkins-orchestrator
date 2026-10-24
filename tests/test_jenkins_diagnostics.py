@@ -123,6 +123,34 @@ def test_cleanup_error_does_not_replace_original_business_failure():
     assert "deleteDir" not in summary
 
 
+def test_apport_exception_hook_does_not_replace_primary_buildkit_failure():
+    console = "\n".join([
+        "[Pipeline] { (Build And Push)",
+        "#14 0.269 Internal Error: Error when performing the request to https://registry.npmjs.org/pnpm",
+        "#14 ERROR: process did not complete successfully: exit code: 1",
+        "ERROR: failed to build: failed to solve: process exited with code 1",
+        "Traceback (most recent call last):",
+        "subprocess.CalledProcessError: docker build returned non-zero exit status 1",
+        "Error in sys.excepthook:",
+        "Traceback (most recent call last):",
+        '  File "/usr/lib/python3/dist-packages/apport_python_hook.py", line 114, in apport_excepthook',
+        "FileNotFoundError: temporary build path no longer exists",
+        "Original exception was:",
+        "Traceback (most recent call last):",
+        "subprocess.CalledProcessError: docker build returned non-zero exit status 1",
+        "[Pipeline] // stage",
+        "ERROR: script returned exit code 1",
+    ])
+
+    summary = summarize_failure(console)
+
+    assert "阶段=Build And Push" in summary
+    assert "包管理器注册表请求失败" in summary
+    assert "registry.npmjs.org/pnpm" in summary
+    assert "apport_python_hook.py" not in summary
+    assert "FileNotFoundError" not in summary
+
+
 def test_warnings_and_zero_failure_counts_do_not_win_over_the_error():
     console = "\n".join([
         "[Pipeline] { (Build And Push)",

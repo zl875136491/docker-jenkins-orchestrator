@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
 from orchestrator.adapters import AdapterError
+from orchestrator.jenkins_diagnostics import redact_console
 from orchestrator.models import DeploymentService, PublishedPort as PublishedPortModel, ResourceState
 from orchestrator.naming import NamingError, bounded_resource_name, build_namespace, external_namespace, managed_volume_name
 
@@ -498,6 +499,8 @@ class DockerSwarmAdapter:
                 raise DockerServiceError(f"Docker returned invalid tasks for service {service_name}")
             last_states = []
             running = 0
+            failed_tasks = []
+            in_progress = False
             for task in tasks:
                 if not isinstance(task, Mapping):
                     continue
@@ -506,6 +509,14 @@ class DockerSwarmAdapter:
                 state = str(status.get("State", "unknown"))
                 desired_state = str(task.get("DesiredState", "running"))
                 last_states.append(f"{desired_state}:{state}")
+                if state in {"failed", "rejected"}:
+                    task_error = status.get("Err") or status.get("Message")
+                    if isinstance(task_error, str) and task_error.strip():
+                        failed_tasks.append(self._safe_task_error_detail(service, task_error))
+                if desired_state in {"running", "ready"} and state in {
+                    "new", "allocated", "pending", "assigned", "accepted", "preparing", "ready", "starting",
+                }:
+                    in_progress = True
                 # During an update Docker can report an old task as running
                 # while its DesiredState is shutdown. It must not satisfy the
                 # readiness check for the new revision.
@@ -513,8 +524,14 @@ class DockerSwarmAdapter:
                     running += 1
             if running >= desired:
                 return
+            if len(failed_tasks) >= max(2, desired) and not in_progress:
+                raise DockerServiceError(
+                    f"Docker service {service_name} failed to start: {failed_tasks[-1]}"
+                )
             if time.monotonic() >= deadline:
                 detail = ", ".join(last_states) if last_states else "no tasks"
+                if failed_tasks:
+                    detail += f"; last task error: {failed_tasks[-1]}"
                 raise DockerServiceError(
                     f"Docker service {service_name} did not reach running state within "
                     f"{self.readiness_timeout_seconds:g}s ({detail})"
@@ -1944,7 +1961,7 @@ class DockerSwarmAdapter:
         return isinstance(exc, KeyError) or getattr(exc, "status_code", None) == 404 or exc.__class__.__name__ == "NotFound"
 
     @staticmethod
-    def _safe_error_detail(exc: Exception) -> str:
+    def _safe_error_detail(exc: Exception, *, sensitive_values: Sequence[str] = ()) -> str:
         """Return a bounded Docker error explanation without credentials.
 
         Docker SDK API errors expose a server-provided ``explanation``.  Keep
@@ -1955,9 +1972,27 @@ class DockerSwarmAdapter:
         detail = getattr(exc, "explanation", None) or str(exc) or exc.__class__.__name__
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", "replace")
+        detail = redact_console(str(detail), sensitive_values)
+        detail = re.sub(r"(https?://)\*\*\*@", r"\1***:***@", detail)
         detail = str(detail).replace("\r", " ").replace("\n", " ").strip()
-        detail = re.sub(r"(https?://)([^/@\s]+):([^/@\s]+)@", r"\1***:***@", detail)
         return detail[:300] or exc.__class__.__name__
+
+    @classmethod
+    def _safe_task_error_detail(cls, service: Any, detail: str) -> str:
+        attrs = getattr(service, "attrs", None)
+        spec = attrs.get("Spec") if isinstance(attrs, Mapping) else None
+        task_template = spec.get("TaskTemplate") if isinstance(spec, Mapping) else None
+        container = task_template.get("ContainerSpec") if isinstance(task_template, Mapping) else None
+        environment = container.get("Env") if isinstance(container, Mapping) else None
+        sensitive_values = []
+        if isinstance(environment, Sequence) and not isinstance(environment, (str, bytes)):
+            for item in environment:
+                if not isinstance(item, str) or "=" not in item:
+                    continue
+                key, value = item.split("=", 1)
+                if re.search(r"password|passwd|secret|token|credential|authorization|api[_-]?key", key, re.IGNORECASE):
+                    sensitive_values.append(value)
+        return cls._safe_error_detail(RuntimeError(detail), sensitive_values=sensitive_values)
 
 
 # A descriptive alias for callers using the existing adapter terminology.
