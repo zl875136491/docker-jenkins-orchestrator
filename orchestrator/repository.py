@@ -123,6 +123,7 @@ class Repository(Protocol):
     def update_route_check(self, check_id: str, fields: dict[str, Any], expected: dict[str, Any] | None = None) -> RouteCheckResult | None: ...
     def delete_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> bool: ...
     def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]: ...
+    def list_route_checks_for_app(self, app_id: str) -> list[RouteCheckResult]: ...
     def list_pending_route_checks(self) -> list[RouteCheckResult]: ...
     def create_build(self, build: BuildJob) -> BuildJob: ...
     def get_build(self, build_id: str) -> BuildJob | None: ...
@@ -326,6 +327,12 @@ class InMemoryRepository:
     def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]:
         with self._lock:
             values = [item for item in self.route_checks.values() if item.app_id == app_id and item.commit_id == commit_id]
+            values.sort(key=lambda item: (_sortable_datetime(item.created_at), item.check_id), reverse=True)
+            return [self._copy(item) for item in values]
+
+    def list_route_checks_for_app(self, app_id: str) -> list[RouteCheckResult]:
+        with self._lock:
+            values = [item for item in self.route_checks.values() if item.app_id == app_id]
             values.sort(key=lambda item: (_sortable_datetime(item.created_at), item.check_id), reverse=True)
             return [self._copy(item) for item in values]
 
@@ -753,6 +760,10 @@ class MongoRepository:
     def list_route_checks(self, app_id: str, commit_id: str) -> list[RouteCheckResult]:
         return [self._model(RouteCheckResult, doc) for doc in self.route_checks.find(
             {"app_id": app_id, "commit_id": commit_id}).sort([("created_at", -1), ("check_id", -1)])]
+
+    def list_route_checks_for_app(self, app_id: str) -> list[RouteCheckResult]:
+        return [self._model(RouteCheckResult, doc) for doc in self.route_checks.find(
+            {"app_id": app_id}).sort([("created_at", -1), ("check_id", -1)])]
 
     def list_route_check_commits(self, app_id: str) -> list[str]:
         return sorted(self.route_checks.distinct("commit_id", {"app_id": app_id}), reverse=True)

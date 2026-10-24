@@ -108,6 +108,7 @@ AUTH_ENDPOINTS = [
     ("GET", "/api/v1/agent-roles/static_build_agent", None),
     ("PUT", "/api/v1/agent-roles/static_build_agent", {"prompt": "Changed"}),
     ("POST", "/api/v1/apps/missing/static-checks", {}),
+    ("GET", "/api/v1/apps/missing/check-results", None),
     ("GET", results_path("missing"), None),
     ("DELETE", results_path("missing"), None),
     ("POST", "/api/v1/apps/missing/dynamic-checks", {"build_id": "missing"}),
@@ -286,6 +287,21 @@ def test_results_return_all_historical_routes_and_role_versions_and_delete_only_
     assert api.repository.get_route_check(first.check_id) is not None
     assert api.repository.get_route_check(second.check_id) is not None
     assert {item["check_id"] for item in api.client.get(results_path(), headers=api.headers).json()} == {first.check_id, second.check_id}
+
+
+def test_app_results_return_historical_checks_across_all_commits(api):
+    create_checked_app(api)
+    first = approve(api)
+    api.adapter.commit_sha = NEXT_SHA
+    second_response = api.client.post("/api/v1/apps/api-app/static-checks", headers=api.headers)
+    assert second_response.status_code == 202
+    second = api.repository.get_route_check(second_response.json()["check_id"])
+    assert second is not None and second.commit_id == NEXT_SHA
+
+    response = api.client.get("/api/v1/apps/api-app/check-results", headers=api.headers)
+    assert response.status_code == 200
+    assert [item["check_id"] for item in response.json()] == [second.check_id, first.check_id]
+    assert all(PRIVATE_CHECK_FIELDS.isdisjoint(item) for item in response.json())
 
 
 @pytest.mark.parametrize("method", ["GET", "DELETE"])

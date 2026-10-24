@@ -378,6 +378,7 @@ textarea { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 
 .meta-label { font-size: 10px; font-weight: 800; letter-spacing: 0.14em; }
 code { background: #e7efed; border: 1px solid var(--line); border-radius: 3px; color: var(--teal-dark); font-size: 11px; padding: 5px 7px; }
+pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
 
 .metric-strip { border-bottom: 1px solid var(--line-strong); border-top: 1px solid var(--line-strong); display: grid; grid-template-columns: repeat(3, 1fr); margin: 0 auto 34px; max-width: 1180px; }
 .metric-cell { min-height: 78px; padding: 14px 16px; }
@@ -621,6 +622,7 @@ code { background: #e7efed; border: 1px solid var(--line); border-radius: 3px; c
 }
 .task-detail-drawer.is-open, .task-detail-drawer:not([hidden]) { display: flex; }
 .task-detail-drawer[hidden] { display: none; }
+.task-detail-drawer-backdrop { background: transparent; border: 0; flex: 1 1 auto; height: 100%; min-width: 0; padding: 0; }
 .task-detail-drawer-panel {
   background: var(--surface);
   border-left: 1px solid var(--line-strong);

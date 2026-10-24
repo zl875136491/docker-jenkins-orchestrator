@@ -10,7 +10,7 @@
 4. 使用 `POST /api/v1/docker/template_compose?format=json` 获取 Compose JSON 与完整路径注释，或使用 `?format=yaml` 获取带注释 YAML；也可以提交用户模型输出的 `yaml_original`、`json_data`、`line_comments` 后再生成。
 5. 如果仓库 Compose 有更新，调用 `POST /api/v1/jenkins/app_sync/{app_id}`；它不需要请求体，默认同步创建应用时保存的 `git_ref`。
 6. 如需人工覆盖或调整 Compose，调用 `PATCH /api/v1/jenkins/app_info/{app_id}` 保存包含 `services` 的 Compose。
-   构建前必须查询 `/api/v1/apps/{app_id}/commits/{commit_id}/check-results`，确认当前四维
+   构建前必须查询 `/api/v1/apps/{app_id}/check-results` 或按 commit 查询 `/api/v1/apps/{app_id}/commits/{commit_id}/check-results`，确认当前四维
    静态门禁通过；需要强制重跑时 POST `/api/v1/apps/{app_id}/static-checks`，再等待检查完成。
 7. 如需 workspace 文件，在 APP 注册之后调用 `POST /api/v1/workspace/{appid}`（兼容 `POST /workspace/{appid}`），以 multipart `files` 字段上传。可重复上传同路径以覆盖暂存文件；全部文件准备好后，`POST /api/v1/jenkins/build_create/{app_id}` 创建异步构建并冻结 Compose 和 workspace 快照，保存返回的 `build_id`。HTTP `202` 表示请求已受理，响应中的 `queued` 只是此刻的状态快照，不能作为之后仍在排队的依据。
 8. 每 3--10 秒调用 `GET /api/v1/jenkins/build_info/{build_id}`，直到状态为 `succeeded`、`failed` 或 `cancelled`。

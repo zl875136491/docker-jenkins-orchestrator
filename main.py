@@ -378,6 +378,7 @@ def create_app(
                 "POST /api/v1/jenkins/build_create/{app_id}", "GET /api/v1/jenkins/build_info/{build_id}",
                 "GET /api/v1/agent-roles", "GET/PUT /api/v1/agent-roles/{role_key}",
                 "POST /api/v1/apps/{app_id}/static-checks (forced rerun)",
+                "GET /api/v1/apps/{app_id}/check-results",
                 "GET/DELETE /api/v1/apps/{app_id}/commits/{commit_id}/check-results",
                 "POST /api/v1/apps/{app_id}/dynamic-checks",
                 "GET /api/v1/jenkins/build_resources/{build_id}",
@@ -601,6 +602,14 @@ def create_app(
         except NotFoundError as exc:
             raise HTTPException(status_code=404, detail="App not found") from exc
         return container.route_checks.submit(app, commit_id=request.commit_id if request else None, force=True)
+
+    @api.get("/api/v1/apps/{app_id}/check-results", response_model=list[RouteCheckResult],
+             response_model_exclude={"__all__": _CHECK_PRIVATE_FIELDS})
+    def get_app_check_results(app_id: str, _: dict = Depends(require_token)) -> list[RouteCheckResult]:
+        try:
+            return container.route_checks.results_for_app(app_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="App not found") from exc
 
     def check_commit_id(commit_id: str) -> str:
         if re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", commit_id) is None:

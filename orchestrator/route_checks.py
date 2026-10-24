@@ -251,6 +251,11 @@ class RouteCheckService:
             raise KeyError("App not found")
         return self.repository.list_route_checks(app_id, commit_id)
 
+    def results_for_app(self, app_id: str) -> list[RouteCheckResult]:
+        if self.repository.get_app(app_id) is None:
+            raise KeyError("App not found")
+        return self.repository.list_route_checks_for_app(app_id)
+
     def delete_latest(self, app_id: str, commit_id: str) -> bool:
         app = self.repository.get_app(app_id)
         if app is None:

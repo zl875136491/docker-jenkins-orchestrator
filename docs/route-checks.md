@@ -141,6 +141,7 @@ Teardown 使用 build_id 专属清理器，清理服务、容器、私有网络�
 | `GET /api/v1/agent-roles/{role_key}` | 当前 Prompt、Schema、参数和版本 |
 | `PUT /api/v1/agent-roles/{role_key}` | 每次配置更新生效后版本 +1 |
 | `POST /api/v1/apps/{app_id}/static-checks` | 强制重跑；body 可省略或为 `{"commit_id":"完整SHA"}`；202 |
+| `GET /api/v1/apps/{app_id}/check-results` | 当前应用所有 commit 的历史路由检查列表，供控制台任务页使用 |
 | `GET /api/v1/apps/{app_id}/commits/{commit_id}/check-results` | 此 commit 所有历史路由/版本维度列表 |
 | `DELETE /api/v1/apps/{app_id}/commits/{commit_id}/check-results` | 仅删除当前路由 + 最新静态版本；返回 JSON bool |
 | `POST /api/v1/apps/{app_id}/dynamic-checks` | body `{"build_id":"构建ID"}`；重验运行中部署；202 |

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#18252c" />
     <title>Orchestrator Control</title>
-    <link rel="stylesheet" href="/ui/styles.css" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20261024-frontend-fix-1" />
   </head>
   <body>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
@@ -509,7 +509,7 @@
             </div>
           </section>
 
-          <aside id="taskDetailDrawer" class="task-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="taskDetailTitle" hidden>
+          <aside id="taskDetailDrawer" class="task-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="taskDetailTitle" aria-hidden="true" hidden>
             <button class="task-detail-drawer-backdrop" type="button" aria-label="关闭任务详情" data-task-detail-close></button>
             <div class="task-detail-drawer-panel">
               <div class="section-heading">
@@ -517,7 +517,7 @@
                   <p class="eyebrow">TASK INSPECTION</p>
                   <h2 id="taskDetailTitle">任务详情</h2>
                 </div>
-                <button id="taskDetailCloseButton" class="drawer-close-button" type="button" aria-label="关闭任务详情">×</button>
+                <button id="taskDetailCloseButton" class="drawer-close-button" type="button" aria-label="关闭任务详情" data-task-detail-close>×</button>
               </div>
               <p id="taskDetailMeta" class="muted small"></p>
               <p id="taskDetailStatus" class="history-detail-status muted small" aria-live="polite"></p>
@@ -913,6 +913,6 @@
         </main>
       </div>
     </div>
-    <script src="/ui/app.js" defer></script>
+    <script src="/ui/app.js?v=20261024-frontend-fix-1" defer></script>
   </body>
 </html>

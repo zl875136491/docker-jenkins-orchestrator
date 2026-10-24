@@ -260,6 +260,15 @@ class MockApi:
                           "cache_hit": False, "message": "静态检查任务已排队", "result": result}, 202)
         if call.path.startswith("/api/v1/apps/") and call.path.endswith("/check-results") and call.method == "GET":
             parts = call.path.split("/")
+            if len(parts) == 6:
+                appid = parts[4]
+                results = [
+                    item
+                    for (result_appid, _), items in self.route_check_results.items()
+                    if result_appid == appid
+                    for item in items
+                ]
+                return Reply(deepcopy(results))
             appid, commit_id = parts[4], parts[6]
             return Reply(deepcopy(self.route_check_results.get((appid, commit_id), [])))
         if call.path.startswith("/api/v1/apps/") and call.path.endswith("/dynamic-checks") and call.method == "POST":
@@ -675,7 +684,7 @@ def test_route_check_workspace_submits_static_and_dynamic_checks_and_shows_resul
     console.page.locator("#staticCheckTaskRows tr").click()
     expect(console.page.locator("#taskDetailOutput")).to_contain_text("queued")
     expect(console.page.locator("#taskDetailOutput")).to_contain_text("static_agent_role_version")
-    assert console.api.matching("GET", f"/api/v1/apps/alpha/commits/{OLD_COMMIT}/check-results")
+    assert console.api.matching("GET", "/api/v1/apps/alpha/check-results")
 
     console.page.locator("#taskDetailCloseButton").click()
     console.page.locator('.side-nav a[href="#dynamicChecksSection"]').click()
@@ -1523,6 +1532,25 @@ def test_split_task_pages_use_lists_modals_and_a_shared_detail_drawer(console: C
     expect(console.page.locator("#taskDetailTitle")).to_contain_text("动态检查详情")
     console.page.locator("#taskDetailCloseButton").click()
     expect(console.page.locator("#taskDetailTitle")).to_contain_text("动态检查详情")
+
+
+def test_refresh_restores_session_app_section_and_tolerates_optional_load_failure(console: Console) -> None:
+    console.load_app()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
+    expect(console.page.locator("#staticCheckTaskRows tr")).to_have_count(0)
+    console.api.overrides[("GET", "/api/v1/docker/base_image_list")] = Reply({"detail": "temporary failure"}, 503)
+
+    console.page.reload(wait_until="domcontentloaded")
+    expect(console.page.locator("#sessionStatus")).to_have_text("已登录")
+    expect(console.page.locator("#appSelector")).to_have_value("alpha")
+    expect(console.page).to_have_url(re.compile(r"#staticChecksSection$"))
+    expect(console.page.locator("#staticRouteCheckStatus")).to_contain_text("当前应用暂无静态检查任务")
+
+    style = console.page.locator("#taskDetailOutput").evaluate(
+        "item => ({height: getComputedStyle(item).height, maxHeight: getComputedStyle(item).maxHeight, overflow: getComputedStyle(item).overflow})"
+    )
+    assert style["maxHeight"] == "none"
+    assert style["overflow"] == "visible"
 
 
 def test_runtime_resource_panels_load_and_refresh_independently(console: Console) -> None:

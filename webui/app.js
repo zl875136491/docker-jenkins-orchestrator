@@ -71,6 +71,7 @@
     activatedAppid: "",
     resourceGenerations: {},
     currentAppCommit: "",
+    sessionReady: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -522,6 +523,17 @@
     return $("taskDetailDrawer") || $("historyDetailPanel");
   }
 
+  function closeTaskDetail() {
+    const drawer = taskDrawerElement();
+    if (drawer) {
+      drawer.hidden = true;
+      drawer.classList.remove("is-open");
+      drawer.setAttribute("aria-hidden", "true");
+    }
+    stopHistoryDetailLoading();
+    stopBuildPolling("任务详情已关闭。", "muted");
+  }
+
   function statusClass(status) {
     const normalized = String(status || "").toLowerCase();
     if (normalized === "succeeded") return "success";
@@ -940,7 +952,7 @@
 
   function activateWorkspace() {
     const section = state.activeSection;
-    if (!state.token || !state.appid || state.appOperation) return;
+    if (!state.sessionReady || !state.token || !state.appid || state.appOperation) return;
     if (state.activatedSection === section && state.activatedAppid === state.appid) return;
     state.activatedSection = section;
     state.activatedAppid = state.appid;
@@ -1519,11 +1531,30 @@
     localStorage.setItem(TOKEN_KEY, state.token);
     if (state.refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, state.refreshToken);
     setSession(true, `登录成功，访问令牌有效 ${payload.expires_in || "未知"} 秒`);
+    state.sessionReady = true;
     activateWorkspace();
     closeModal("loginModal");
-    await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles(), loadCodexConfig()]);
+    await loadApps();
+    await loadSessionResources();
     updateHistoryPolling();
     return payload;
+  }
+
+  async function loadSessionResources() {
+    const resources = [
+      ["模板", loadTemplates],
+      ["基础镜像", loadBaseImages],
+      ["Agent 角色", loadAgentRoles],
+      ["Codex 配置", loadCodexConfig],
+    ];
+    const settled = await Promise.allSettled(resources.map(([, loader]) => loader()));
+    const failed = settled
+      .map((result, index) => result.status === "rejected" ? resources[index][0] : "")
+      .filter(Boolean);
+    if (failed.length) {
+      setActivity(`登录已恢复，但部分全局数据加载失败：${failed.join("、")}。`, "error");
+    }
+    return settled;
   }
 
   function sameJson(left, right) {
@@ -1877,6 +1908,7 @@
     if (!drawer) return;
     drawer.hidden = false;
     drawer.classList.add("is-open");
+    drawer.setAttribute("aria-hidden", "false");
     const identifier = checkTaskIdentifier(task, checkType);
     const title = `${checkType === "static" ? "静态检查" : "动态检查"}详情：${identifier || task.check_id}`;
     const meta = `App ID：${task.app_id || state.appid} · Commit：${task.commit_id || "--"} · Check ID：${task.check_id || "--"}`;
@@ -1956,18 +1988,25 @@
       renderCheckTaskList(checkType, tasks);
       return tasks;
     }
-    const commits = [...new Set(state.appIdentifiers.commitShas)];
-    if (!commits.length) {
-      state.routeCheckTasks[checkType] = [];
-      renderCheckTaskList(checkType, []);
-      return [];
+    let all;
+    try {
+      const response = await request(`/api/v1/apps/${encodeURIComponent(appid)}/check-results`, {}, true, true);
+      all = Array.isArray(response) ? response : [];
+    } catch (error) {
+      if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) throw error;
+      const commits = [...new Set(state.appIdentifiers.commitShas)];
+      if (!commits.length) {
+        state.routeCheckTasks[checkType] = [];
+        renderCheckTaskList(checkType, []);
+        return [];
+      }
+      const responses = await Promise.all(commits.map((commitId) => request(
+        `/api/v1/apps/${encodeURIComponent(appid)}/commits/${encodeURIComponent(commitId)}/check-results`,
+      )));
+      all = responses.flatMap((items) => Array.isArray(items) ? items : []);
     }
-    const responses = await Promise.all(commits.map((commitId) => request(
-      `/api/v1/apps/${encodeURIComponent(appid)}/commits/${encodeURIComponent(commitId)}/check-results`,
-    )));
     if (generation !== state.routeCheckTasksGeneration[checkType]
       || appid !== state.appid || appVersion !== state.appContextVersion || !state.token) return null;
-    const all = responses.flatMap((items) => Array.isArray(items) ? items : []);
     const tasks = all.filter((task) => task.app_id === appid && (checkType === "static"
       ? Boolean(task.static_status) && task.static_status !== "skipped"
       : Boolean(task.dynamic_build_id)));
@@ -2965,6 +3004,7 @@
       if (state.appOperation) return;
       state.token = "";
       state.refreshToken = "";
+      state.sessionReady = true;
       state.routeCheckGeneration += 1;
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(REFRESH_TOKEN_KEY);
@@ -3070,16 +3110,12 @@
     bindOptional("historyAutoRefresh", "change", updateHistoryPolling);
     bindOptional("taskDetailCloseButton", "click", closeTaskDetail);
     bindOptional("historyDetailCloseButton", "click", closeTaskDetail);
-    document.querySelectorAll("[data-task-detail-close]").forEach((button) => button.addEventListener("click", closeTaskDetail));
-    function closeTaskDetail() {
-      const drawer = taskDrawerElement();
-      if (drawer) {
-        drawer.hidden = true;
-        drawer.classList.remove("is-open");
+    document.addEventListener("click", (event) => {
+      if (event.target.closest("#taskDetailCloseButton, #historyDetailCloseButton, [data-task-detail-close]")) {
+        event.preventDefault();
+        closeTaskDetail();
       }
-      stopHistoryDetailLoading();
-      stopBuildPolling("任务详情已关闭。", "muted");
-    }
+    });
     document.addEventListener("keydown", (event) => {
       const drawer = taskDrawerElement();
       if (event.key === "Escape" && drawer && !drawer.hidden) closeTaskDetail();
@@ -3144,26 +3180,47 @@
   }
 
   async function restoreSession() {
-    if (!state.token) return;
+    if (!state.token) {
+      state.sessionReady = true;
+      return;
+    }
     const restoreSection = sectionFromHash() || persistedUiState.activeSection || "appListSection";
     const restoreAppid = state.appid;
+    state.sessionReady = false;
     try {
       setSession(true, "登录状态已恢复");
-      await Promise.all([loadApps(), loadTemplates(), loadBaseImages(), loadAgentRoles(), loadCodexConfig()]);
+      await loadApps();
+      await loadSessionResources();
       if (restoreAppid && state.apps.some((app) => app.appid === restoreAppid)) {
-        await openApplication(restoreAppid);
+        try {
+          await openApplication(restoreAppid);
+        } catch (error) {
+          if (!state.token) throw error;
+          setActivity(`登录已恢复，但当前应用加载失败：${errorMessage(error)}。`, "error");
+          state.activatedSection = "";
+          state.activatedAppid = "";
+        }
       }
       if ($(restoreSection)?.classList.contains("workspace-section")) {
         window.location.hash = restoreSection;
-        syncNavigation();
       }
-      updateHistoryPolling();
-    } catch {
-      setSession(false);
-      stopHistoryPolling();
+    } catch (error) {
+      if (!state.token || (error instanceof ApiError && [401, 403].includes(error.status))) {
+        setSession(false, "登录已失效，请重新登录。");
+        stopHistoryPolling();
+      } else {
+        setActivity(`登录状态已恢复，但应用列表加载失败：${errorMessage(error)}。`, "error");
+      }
+    } finally {
+      state.sessionReady = true;
+      if (state.token) {
+        syncNavigation();
+        updateHistoryPolling();
+      }
     }
   }
 
+  state.sessionReady = !state.token;
   bindEvents();
   bindModals();
   bindNavigation();
