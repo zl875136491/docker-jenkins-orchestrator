@@ -25,6 +25,7 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "workspace-footer" not in page.text
     assert 'id="activityMessage"' not in page.text
     assert "请求完成" not in page.text
+    assert "只有明确声明的变量会注入对应服务" in page.text
     assert 'id="toastRegion"' in page.text
     assert "历史任务" in page.text
     assert "buildTaskRows" in page.text

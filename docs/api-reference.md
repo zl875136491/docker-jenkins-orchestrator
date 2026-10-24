@@ -70,7 +70,7 @@ Content-Type: application/json
 | Compose 生成提示词 | `GET /api/v1/docker/compose_prompt` |
 | 基础镜像列表/同步 | `GET /api/v1/docker/base_image_list`、`POST /api/v1/docker/base_image_sync` |
 
-应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。构建返回 `202` 和 `build_id`，不是同步完成结果。多 worker 部署时，每个 worker 在启动环境中使用 `WORKER_REGION` 标识所在区域，`app_access` 响应会在最外层返回 `region`。
+应用请求体仍使用领域字段 `appid`、`name`、`repository_url`、`git_ref`、`environment`、`compose` 和 `components`；路径参数统一使用 `app_id`。`environment` 值加密保存且不在读 API 中返回；Compose 服务的 `environment` 可通过 `$NAME`、`${NAME}`、`${NAME:-default}` 或 `${NAME-default}` 引用，只有该服务显式声明的键会注入容器。缺少必需变量时 Build 在触发 Jenkins 前失败，Jenkins 不会收到应用密钥。构建返回 `202` 和 `build_id`，不是同步完成结果。多 worker 部署时，每个 worker 在启动环境中使用 `WORKER_REGION` 标识所在区域，`app_access` 响应会在最外层返回 `region`。
 
 ### GitLab Compose 自动发现与仓库同步
 

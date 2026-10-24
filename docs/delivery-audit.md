@@ -42,9 +42,9 @@ python3 -m compileall -q .        # passed
 
 `depends_on` 会被验证并用于依赖优先创建；worker 现在会等待 Docker task 进入 `running`，并在配置公开 host 时探测 published TCP 端口，但 Docker Swarm Service API 仍没有 Compose 的 `service_healthy` 依赖启动闸门。应用必须自身具备连接重试，或后续增加按应用协议执行的健康检查/回滚流程。
 
-### 中优先级：`env_file` 必须在用户角色/Jenkins 侧展开
+### 中优先级：`env_file` 必须转换为显式服务变量
 
-Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上下文。当前适配器会拒绝 `env_file`，要求用户角色在系统外将模板中的变量填入 `environment`，再由 Jenkins 输出 artifact。若 Jenkins job 继续原样传递官方 Compose，构建会安全失败而不是错误部署；这属于明确的输入前置条件。
+Jenkins JSON artifact 没有 Compose `env_file` 路径对应的文件系统上下文，适配器仍会拒绝 `env_file`。用户应把所需键显式写入服务的 `environment`，并用 `${NAME}` 引用应用配置中加密保存的变量；Worker 在部署时解析引用，只将声明的键注入对应服务，不把应用密钥发送给 Jenkins。缺少引用值会在触发 Jenkins 前失败并记录变量名，不记录变量值。
 
 ### 中优先级：Swarm 不是完整 Compose 实现
 

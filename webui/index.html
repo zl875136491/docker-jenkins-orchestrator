@@ -234,7 +234,7 @@
               <label class="span-2">
                 环境变量 JSON
                 <textarea id="environment" name="environment" rows="5" spellcheck="false" aria-describedby="environmentHelp">{}</textarea>
-                <span id="environmentHelp" class="field-help">创建时使用此 JSON；载入应用时只返回变量名，不返回密钥值。更新时留空或不修改会保留原有环境变量；明确填写 {} 会清空它们。</span>
+                <span id="environmentHelp" class="field-help">变量值会加密保存且不会回显。Compose 服务的 environment 可用 ${NAME} 引用；只有明确声明的变量会注入对应服务。缺少变量时构建会在启动 Jenkins 前失败。更新时留空或不修改会保留原值；明确填写 {} 会清空。</span>
               </label>
               <label class="span-2">
                 Docker Compose JSON

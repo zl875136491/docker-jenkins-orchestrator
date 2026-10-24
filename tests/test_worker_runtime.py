@@ -235,7 +235,13 @@ def prepare_static_pass(harness: RuntimeHarness, appid: str):
     })
 
 
-def queue_build(harness: RuntimeHarness, appid: str = "demo", *, compose: dict | None = None):
+def queue_build(
+    harness: RuntimeHarness,
+    appid: str = "demo",
+    *,
+    compose: dict | None = None,
+    environment: dict[str, str] | None = None,
+):
     compose = deepcopy(APP_COMPOSE if compose is None else compose)
     for service in compose.get("services", {}).values():
         if isinstance(service, dict):
@@ -246,7 +252,7 @@ def queue_build(harness: RuntimeHarness, appid: str = "demo", *, compose: dict |
             name="Demo",
             repository_url=f"https://git.example/{appid}.git",
             git_ref="main",
-            environment={"DEPLOY_TOKEN": "not-exposed"},
+            environment=environment if environment is not None else {"DEPLOY_TOKEN": "not-exposed"},
             require_route="/ready", compose=compose,
         )
     )
@@ -312,10 +318,70 @@ def test_start_build_triggers_jenkins_and_schedules_the_first_poll() -> None:
     assert request.appid == "demo"
     assert request.repository_url == "https://git.example/demo.git"
     assert request.git_ref == "a" * 40
-    assert dict(request.environment) == {"DEPLOY_TOKEN": "not-exposed"}
+    assert dict(request.environment) == {}
     assert request.compose == APP_COMPOSE
     assert request.image_repository == "harbor.example/apps/demo"
     assert gitlab.calls == []
+
+
+def test_worker_resolves_only_declared_compose_environment_without_sending_secrets_to_jenkins() -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"]["environment"] = {
+        "PASSWORD": "${DEPLOY_TOKEN}",
+        "LOG_LEVEL": "${UNSET_LEVEL:-info}",
+        "LITERAL": "$$DOLLAR",
+        "FIXED": "compose-value",
+    }
+    artifact_compose = deepcopy(source)
+    artifact_compose["services"]["api"].pop("build")
+    artifact_compose["services"]["api"]["image"] = "harbor.example/apps/demo:build-42"
+    artifact = JenkinsResultArtifact(
+        images=("harbor.example/apps/demo:build-42",),
+        compose=artifact_compose,
+        _payload={"images": ["harbor.example/apps/demo:build-42"], "compose": artifact_compose},
+    )
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=42)],
+        build=JenkinsBuild(number=42, building=False, result="SUCCESS"),
+        artifact=artifact,
+    )
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness, compose=source)
+
+    harness.runtime.start_build(build.build_id, task_id="start-task")
+    result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+
+    assert result == {"build_id": build.build_id, "status": "succeeded"}
+    assert dict(jenkins.requests[0].environment) == {}
+    assert jenkins.requests[0].compose["services"]["api"]["environment"]["PASSWORD"] == "${DEPLOY_TOKEN}"
+    deployed_environment = docker_services.calls[0][1]["services"]["api"]["environment"]
+    assert deployed_environment == {
+        "PASSWORD": "not-exposed",
+        "LOG_LEVEL": "info",
+        "LITERAL": "$DOLLAR",
+        "FIXED": "compose-value",
+    }
+    assert source["services"]["api"]["environment"]["PASSWORD"] == "${DEPLOY_TOKEN}"
+
+
+def test_missing_application_environment_reference_fails_before_jenkins() -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"]["environment"] = {"PASSWORD": "${MISSING_PASSWORD}"}
+    jenkins = FakeJenkins([])
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    build = queue_build(harness, compose=source)
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    stored = harness.container.repository.get_build(build.build_id)
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert stored is not None
+    assert "MISSING_PASSWORD" in stored.error
+    assert "missing application variable" in stored.error
+    assert jenkins.requests == []
+    assert docker_services.calls == []
 
 
 @pytest.mark.parametrize(
@@ -728,7 +794,12 @@ def test_artifact_preserves_template_volume_identity_and_raw_owner(appid: str, b
     )
     docker_services = FakeDockerServices(replace(successful_deployment(), appid=appid))
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
-    build = queue_build(harness, appid=appid, compose=source)
+    build = queue_build(
+        harness,
+        appid=appid,
+        compose=source,
+        environment={"MONGO_INITDB_ROOT_PASSWORD": "test-mongo-password"},
+    )
 
     harness.runtime.start_build(build.build_id, task_id="start-task")
     result = harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
@@ -736,7 +807,16 @@ def test_artifact_preserves_template_volume_identity_and_raw_owner(appid: str, b
     assert result == {"build_id": build.build_id, "status": "succeeded"}
     assert jenkins.requests[0].appid == appid
     assert jenkins.requests[0].compose == source
-    assert docker_services.calls == [(appid, artifact_compose)]
+    expected_deployment_compose = deepcopy(artifact_compose)
+    for service in expected_deployment_compose["services"].values():
+        if "environment" in service:
+            service["environment"].update(
+                {
+                    "MONGO_INITDB_ROOT_PASSWORD": "test-mongo-password",
+                    "MONGO_INITDB_ROOT_USERNAME": "app",
+                }
+            )
+    assert docker_services.calls == [(appid, expected_deployment_compose)]
     assert docker_services.calls[0][1]["volumes"] == source["volumes"]
     records = harness.container.repository.list_services(appid)
     assert len(records) == 1

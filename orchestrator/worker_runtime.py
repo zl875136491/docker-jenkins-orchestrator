@@ -8,6 +8,7 @@ through the configured repository.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import re
 import socket
@@ -36,6 +37,10 @@ from orchestrator.build_resources import build_lease, ResourceConflict
 
 _SYSTEM_APPID = "_system"
 _TERMINAL_STATUSES = {BuildStatus.SUCCEEDED, BuildStatus.FAILED, BuildStatus.CANCELLED}
+_COMPOSE_VARIABLE = re.compile(
+    r"\$\$|\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:-|:\?|\-|\?)(?P<default>[^}]*))?\}"
+    r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
+)
 
 
 class WorkerRuntime:
@@ -242,11 +247,13 @@ class WorkerRuntime:
 
             if build.status is BuildStatus.VALIDATING:
                 runtime_compose = self._workspace_compose(build, compose)
+                application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+                runtime_compose = self._resolve_application_environment(runtime_compose, application_environment)
                 self._validate_source_compose(runtime_compose)
                 if self._isolated(build):
                     self._docker_validation_adapter().validate_build_compose(
                         runtime_compose,
-                        environment=self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext),
+                        environment=application_environment,
                     )
                     if any(len(f"{build.build_id}-{name}") > 128 for name in compose["services"]):
                         raise BuildInputError("Build-exclusive image tags must fit Docker's 128-character limit")
@@ -291,7 +298,7 @@ class WorkerRuntime:
                     appid=app.appid,
                     repository_url=app.repository_url,
                     git_ref=git_ref,
-                    environment=self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext),
+                    environment={},
                     compose=compose or {},
                     image_repository=self._image_repository(app.appid),
                     workspace_archive_url=self._workspace_archive_url(build, compose),
@@ -515,6 +522,8 @@ class WorkerRuntime:
         source = build.compose_snapshot if build.compose_snapshot is not None else app.compose
         self._validate_artifact_topology(source, artifact.compose)
         deployment_compose = self._workspace_compose(build, artifact.compose)
+        application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+        deployment_compose = self._resolve_application_environment(deployment_compose, application_environment)
         self._validate_deployment_compose(deployment_compose)
         tracker = self._operation_tracker.get()
         tracker.guard()
@@ -805,6 +814,52 @@ class WorkerRuntime:
                 WorkerRuntime._validate_artifact_topology(source_compose, compose)
         except DockerServiceError as exc:
             raise BuildInputError(str(exc)) from exc
+
+    @staticmethod
+    def _resolve_application_environment(compose: Any, environment: Mapping[str, str]) -> dict[str, Any]:
+        resolved = deepcopy(compose)
+        services = resolved.get("services") if isinstance(resolved, Mapping) else None
+        if not isinstance(services, Mapping):
+            return resolved
+
+        for service_name, service in services.items():
+            if not isinstance(service, Mapping):
+                continue
+            raw_environment = service.get("environment")
+            if raw_environment is None:
+                continue
+            try:
+                entries = DockerSwarmAdapter._environment(raw_environment)
+            except DockerServiceError as exc:
+                raise BuildInputError(str(exc)) from exc
+            service_environment: dict[str, str] = {}
+            for entry in entries:
+                key, value = entry.split("=", 1)
+
+                def replace(match: re.Match[str]) -> str:
+                    if match.group(0) == "$$":
+                        return "$"
+                    variable = match.group("braced") or match.group("bare")
+                    operator = match.group("operator")
+                    default = match.group("default") or ""
+                    if variable not in environment:
+                        if operator in {"-", ":-"}:
+                            return default
+                        raise BuildInputError(
+                            f"Compose service {service_name} environment {key} references missing application variable {variable}"
+                        )
+                    value_from_app = environment[variable]
+                    if operator in {":-", ":?"} and not value_from_app:
+                        if operator == ":-":
+                            return default
+                        raise BuildInputError(
+                            f"Compose service {service_name} environment {key} requires a non-empty application variable {variable}"
+                        )
+                    return value_from_app
+
+                service_environment[key] = _COMPOSE_VARIABLE.sub(replace, value)
+            service["environment"] = service_environment
+        return resolved
 
     @staticmethod
     def _validate_artifact_topology(source_compose: Any, artifact_compose: Any) -> None:

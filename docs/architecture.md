@@ -37,7 +37,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | `deployment_services` | `appid+build_id+service_name` | Docker Swarm Service ID、镜像、状态、内部端点和已发布端口 |
 | `alerts` | `appid+created_at` | 构建/部署失败及需要人工处理的告警 |
 
-环境变量不会在读 API 或事件中回显；生产 MongoDB 数据使用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存。Jenkins 只在任务执行时获得解密后的变量。
+环境变量不会在读 API 或事件中回显；生产 MongoDB 数据使用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存。Worker 在构建时解密应用变量，用它们展开 Compose 服务 `environment` 中的 `$NAME`、`${NAME}`、`${NAME:-default}` 和 `${NAME-default}` 引用；只有 Compose 明确声明的变量会进入对应容器。应用密钥不发送给 Jenkins，缺失的必需变量会在触发 Jenkins 前以可操作错误写入 Build。
 
 ## 4. 认证与 API
 
@@ -113,10 +113,10 @@ Celery 执行步骤：
 
 1. 读取应用和构建记录，校验 conductor 提供的 Compose 服务结构、本地 build context 和每个 Dockerfile 声明；仓库内不存在可交付的 Compose 时，构建请求必须在入口处失败；
 2. 可选调用 GitLab API 验证仓库及 Git 引用；解析成功时将提交 SHA 写入 `build_jobs`，Jenkins 使用该 SHA 构建；
-3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose、环境变量和目标 Harbor 镜像仓库；
+3. 调用 Jenkins 参数化任务，传递 `APPID`、仓库、Git 引用/提交 SHA、Compose 和目标 Harbor 镜像仓库，不传递应用密钥；
 4. 定时 Celery 任务轮询 Jenkins queue/build 状态；
 5. 成功后读取 Jenkins `orchestrator-result.json` 产物，登记应用镜像；
-6. 调用 Docker Engine/Swarm 创建或更新 Services；真实 Docker SDK 下等待期望 task 进入 `running`，配置 `ORCHESTRATOR_PUBLIC_HOST` 时再探测每个 published TCP 端口；
+6. Worker 用加密保存的应用环境变量展开 artifact 中各服务显式声明的 `environment`，再调用 Docker Engine/Swarm 创建或更新 Services；真实 Docker SDK 下等待期望 task 进入 `running`，配置 `ORCHESTRATOR_PUBLIC_HOST` 时再探测每个 published TCP 端口；
 7. 只有运行态和公开端口检查通过才登记 service 并写入 `succeeded`，任意失败写入 `failed` 并创建告警；beat 重新发现非终态构建时，从已存储的状态继续，不依赖 Celery result backend。
 
 Jenkins job 必须输出 `orchestrator-result.json`：
