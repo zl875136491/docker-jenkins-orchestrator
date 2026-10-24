@@ -355,7 +355,10 @@ class RouteCheckService:
                 payload = None
                 if passed:
                     from orchestrator.route_probes import validate_probe_payload
-                    payload = validate_probe_payload(output.get("probe_payload"), require_route=check.require_route)
+                    try:
+                        payload = validate_probe_payload(output.get("probe_payload"), require_route=check.require_route)
+                    except ValueError as exc:
+                        raise RouteCheckInputError(str(exc)) from None
                 if not passed and not report.strip():
                     report = "目标路由需要修改；请审核 diff 并提交后重新检查" if diffs else "未找到目标路由且无法生成微小补丁"
                 fields = {"static_status": "succeeded" if passed else "failed", "static_check_passed": passed,

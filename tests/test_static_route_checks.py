@@ -601,6 +601,23 @@ def test_invalid_agent_output_or_probe_fails_closed_and_is_persisted(environment
     _assert_original_and_temporary_worktrees_are_clean(env)
 
 
+def test_invalid_probe_reports_safe_reason_without_exposing_agent_values(environment):
+    env = environment
+    secret_destination = "https://private.example.invalid/secret"
+    env.agent.output = _output(probe_payload={
+        **_probe(),
+        "url": secret_destination,
+    })
+    submitted = env.service.create_or_reuse(env.app, env.commit)
+
+    assert env.service.execute_static(submitted.check_id, 1)["status"] == "failed"
+    result = env.repository.get_route_check(submitted.check_id)
+    assert result.static_check_passed is False
+    assert "Invalid probe payload" in result.static_report_text
+    assert "explicit destination" in result.static_report_text
+    assert secret_destination not in result.static_report_text
+
+
 @pytest.mark.parametrize("failure,diagnostic", [
     ("timeout", "configured timeout"), ("invalid_json", "invalid or oversized structured output"),
     ("schema", "does not match"), ("nonzero", "did not complete successfully"),
