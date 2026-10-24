@@ -665,7 +665,7 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
   word-break: break-word;
 }
 .resource-panel-output:empty { background: #fafcfb; }
-.resource-panel-output .json-output { margin-top: 0; max-height: none; }
+.resource-panel-output.json-output { background: var(--surface-alt); color: var(--ink); margin-top: 0; max-height: none; }
 
 @media (max-width: 900px) {
   .page-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: max-content minmax(0, 1fr); }

@@ -42,6 +42,7 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "notifyError" in script.text
     assert "请求完成" not in script.text
     assert "color: var(--ink);" in stylesheet.text
+    assert ".resource-panel-output.json-output {" in stylesheet.text
 
 
 def test_control_console_sidebar_navigation_targets_each_workspace_section() -> None:
