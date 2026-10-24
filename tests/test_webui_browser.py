@@ -1558,6 +1558,14 @@ def test_runtime_resource_panels_load_and_refresh_independently(console: Console
     console.page.get_by_role("link", name="运行资源").click()
     for resource in ("events", "images", "services", "access", "alerts"):
         expect(console.page.locator(f"#resource-{resource}-status")).to_contain_text("最近刷新")
+    expect(console.page.locator("#resource-events-output")).to_have_text("[]")
+    output_style = console.page.locator("#resource-events-output").evaluate(
+        "item => ({color: getComputedStyle(item).color, background: getComputedStyle(item).backgroundColor, maxHeight: getComputedStyle(item).maxHeight, overflow: getComputedStyle(item).overflow})"
+    )
+    assert output_style["color"] == "rgb(27, 42, 48)"
+    assert output_style["background"] == "rgb(237, 243, 241)"
+    assert output_style["maxHeight"] == "none"
+    assert output_style["overflow"] == "visible"
     before = {resource: len(console.api.matching("GET", f"/api/v1/jenkins/app_{resource}/alpha"))
               for resource in ("events", "images", "services", "access", "alerts")}
     console.page.locator("#resource-images-refresh").click()
@@ -1728,7 +1736,7 @@ def test_account_menu_groups_health_login_and_logout_actions(console: Console) -
     expect(console.page.locator("#openLoginModal")).to_have_text("重新登录")
     expect(console.page.locator("#disconnectButton")).to_be_visible()
     console.page.locator("#healthButton").click()
-    expect(console.page.locator("#activityMessage")).to_have_text("请求完成")
+    expect(console.page.locator("#activityMessage")).to_have_count(0)
     assert len(console.api.matching("GET", "/healthz")) == 1
     expect(console.page.locator("#sessionMenu")).not_to_have_attribute("open", "")
 

@@ -21,6 +21,8 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
 
     assert page.status_code == 200
     assert "Orchestrator" in page.text
+    assert "Docker-Jenkins Orchestrator" not in page.text
+    assert 'id="activityMessage"' not in page.text
     assert 'id="toastRegion"' in page.text
     assert "历史任务" in page.text
     assert "buildTaskRows" in page.text
@@ -38,6 +40,8 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "serviceAccessTable" in page.text
     assert "未发布端口" in script.text
     assert "notifyError" in script.text
+    assert "请求完成" not in script.text
+    assert "color: var(--ink);" in stylesheet.text
 
 
 def test_control_console_sidebar_navigation_targets_each_workspace_section() -> None:

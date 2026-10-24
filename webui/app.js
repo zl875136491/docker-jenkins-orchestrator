@@ -167,6 +167,7 @@
 
   function setActivity(message, tone = "") {
     const target = $("activityMessage");
+    if (!target) return;
     target.textContent = message;
     target.className = tone ? `activity-${tone}` : "";
   }
@@ -1511,7 +1512,6 @@
       const value = await action();
       if (value === null || value === undefined) return null;
       if (outputId) pretty(outputId, value);
-      setActivity("请求完成", "success");
       return value;
     } catch (error) {
       const message = notifyError(error);

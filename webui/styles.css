@@ -97,7 +97,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .topbar-actions { grid-area: account; justify-self: end; }
 
 .brand-lockup, .topbar-actions, .section-heading, .inline-heading, .viewer-heading,
-.build-summary, .workspace-footer { align-items: center; display: flex; }
+.build-summary { align-items: center; display: flex; }
 
 .brand-lockup { flex: 0 0 auto; gap: 10px; }
 
@@ -653,6 +653,7 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
   background: var(--surface-alt);
   border: 1px solid var(--line);
   border-radius: 3px;
+  color: var(--ink);
   height: auto;
   max-height: none;
   min-height: 0;
@@ -665,8 +666,6 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
 }
 .resource-panel-output:empty { background: #fafcfb; }
 .resource-panel-output .json-output { margin-top: 0; max-height: none; }
-
-.workspace-footer { color: var(--muted); font-size: 11px; justify-content: space-between; margin: 16px auto 0; max-width: 1180px; padding-bottom: 8px; }
 
 @media (max-width: 900px) {
   .page-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: max-content minmax(0, 1fr); }
