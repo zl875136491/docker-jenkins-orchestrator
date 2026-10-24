@@ -151,6 +151,41 @@ def test_apport_exception_hook_does_not_replace_primary_buildkit_failure():
     assert "FileNotFoundError" not in summary
 
 
+def test_buildkit_failure_wins_over_failure_word_in_checkout_commit_message():
+    console = "\n".join([
+        "[Pipeline] stage",
+        "[Pipeline] { (Checkout)",
+        "HEAD is now at c77bdcb test: reproduce package registry build failure",
+        "[Pipeline] // stage",
+        "[Pipeline] stage",
+        "[Pipeline] { (Build And Push)",
+        "#14 0.268 Internal Error: Error when performing the request to https://registry.npmjs.org/pnpm",
+        "#14 ERROR: process did not complete successfully: exit code: 1",
+        "ERROR: failed to build: failed to solve: process exited with code 1",
+        "Traceback (most recent call last):",
+        "subprocess.CalledProcessError: docker build returned non-zero exit status 1",
+        "[Pipeline] // stage",
+        "[Pipeline] stage",
+        "[Pipeline] { (Declarative: Post Actions)",
+        "Error in sys.excepthook:",
+        '  File \"/usr/lib/python3/dist-packages/apport_python_hook.py\", line 228, in partial_apport_excepthook',
+        "FileNotFoundError: temporary build path no longer exists",
+        "Original exception was:",
+        "subprocess.CalledProcessError: docker build returned non-zero exit status 1",
+        "[Pipeline] // stage",
+        "ERROR: script returned exit code 1",
+    ])
+
+    summary = summarize_failure(console)
+
+    assert "阶段=Build And Push" in summary
+    assert "包管理器注册表请求失败" in summary
+    assert "registry.npmjs.org/pnpm" in summary
+    assert "test: reproduce package registry build failure" not in summary
+    assert "apport_python_hook.py" not in summary
+    assert "FileNotFoundError" not in summary
+
+
 def test_warnings_and_zero_failure_counts_do_not_win_over_the_error():
     console = "\n".join([
         "[Pipeline] { (Build And Push)",

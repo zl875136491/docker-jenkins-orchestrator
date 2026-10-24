@@ -15,6 +15,7 @@ _TIMESTAMP = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s*")
 _STAGE = re.compile(r"\[Pipeline\]\s*\{\s*\((.+)\)\s*$")
 _EXCEPTION_HOOK_START = re.compile(r"^Error in sys\.excepthook:")
 _EXCEPTION_HOOK_END = re.compile(r"^Original exception was:")
+_INFORMATIONAL_GIT = re.compile(r"^(?:HEAD is now at\b|Checking out Revision\b)", re.IGNORECASE)
 _WRAPPER = re.compile(
     r"script returned exit code|did not complete successfully|failed to solve|executor failed|"
     r"build step .+ marked build as failure|hudson\.AbortException|subprocess\.CalledProcessError",
@@ -110,7 +111,7 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
         code = re.search(r"(?:script returned exit code|exit code[: ]+)\s*(\d+)", line, re.IGNORECASE)
         if code and not exit_code:
             exit_code = code.group(1)
-        if not line or line.startswith(("[Pipeline]", "+ ", "Finished:", "Stage \"")):
+        if not line or _INFORMATIONAL_GIT.search(line) or line.startswith(("[Pipeline]", "+ ", "Finished:", "Stage \"")):
             continue
         if line.startswith("Timeout set to expire in "):
             continue
@@ -132,8 +133,7 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
         return "日志中未识别出具体错误；请查看该 Jenkins 构建的控制台"
     primary = [candidate for candidate in candidates if "Declarative: Post Actions" not in candidate[2]]
     if primary:
-        failed_stage = primary[0][2]
-        candidates = [candidate for candidate in primary if candidate[2] == failed_stage]
+        candidates = primary
     _, index, stage, node, cause = max(candidates, key=lambda candidate: candidate[0])
     parts = []
     if stage:
