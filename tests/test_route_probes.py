@@ -304,6 +304,13 @@ def test_payload_validation_rejects_ignored_or_unsafe_agent_options(changes):
         validate_probe_payload(http_payload(**changes), "/core")
 
 
+def test_payload_validation_names_forbidden_header_without_echoing_its_value():
+    secret_value = "private-host.example.invalid"
+    with pytest.raises(ValueError, match="header host cannot override") as error:
+        validate_probe_payload(http_payload(headers={"Host": secret_value}), "/core")
+    assert secret_value not in str(error.value)
+
+
 @pytest.mark.parametrize("removed", ["method", "query_params", "body", "assertions"])
 def test_http_complete_payload_is_mandatory(removed):
     payload = http_payload()

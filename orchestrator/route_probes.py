@@ -140,7 +140,7 @@ def _validate_headers(value: Any, *, request: bool) -> dict[str, str]:
             raise _invalid("headers contain an invalid name or value")
         lower_name = name.lower()
         if request and (lower_name in _FORBIDDEN_HEADERS or lower_name.startswith(":") or lower_name.startswith("grpc-")):
-            raise _invalid("headers cannot override transport authority or framing")
+            raise _invalid(f"header {lower_name} cannot override transport authority or framing")
         if lower_name in result:
             raise _invalid("headers contain a duplicate name")
         result[lower_name] = content
