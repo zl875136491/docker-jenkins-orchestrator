@@ -418,7 +418,7 @@ class AgentRuntimeConfig(DomainModel):
     sandbox_mode: Literal["danger-full-access", "workspace-write", "read-only"] = "danger-full-access"
     skip_git_repo_check: bool = True
     model: str | None = Field(default=None, min_length=1, max_length=128)
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     timeout_seconds: int = Field(default=900, gt=0, le=7200)
 
 

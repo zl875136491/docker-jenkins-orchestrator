@@ -30,6 +30,36 @@ def test_worker_has_local_codex_authentication_and_persistent_login_without_api_
         assert environment["ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS"] == "${ORCHESTRATOR_ROUTE_CHECK_LEASE_SECONDS:-120}"
         assert environment["ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS"] == "${ORCHESTRATOR_ROUTE_PROBE_TIMEOUT_SECONDS:-15}"
         assert environment["ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES"] == "${ORCHESTRATOR_ROUTE_PROBE_MAX_RESPONSE_BYTES:-65536}"
+        if name == "docker-compose.yml":
+            for key in (
+                "CODEX_PROVIDER_NAME", "CODEX_PROVIDER_ENDPOINT", "CODEX_DEFAULT_MODEL", "CODEX_DEFAULT_EFFORT",
+                "CODEX_PROVIDER_ID", "CODEX_PROVIDER_WIRE_API", "CODEX_PROVIDER_REQUIRES_OPENAI_AUTH",
+            ):
+                assert key in environment
+    if name == "docker-compose.yml":
+        assert document["services"]["api"]["environment"]["CODEX_API_KEY"] == "${CODEX_API_KEY:-}"
+        assert document["services"]["worker"]["depends_on"]["api"]["condition"] == "service_healthy"
+
+
+def test_codex_https_proxy_is_optional_and_forwarded_only_to_production_worker():
+    document = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    worker = document["services"]["worker"]["environment"]
+    assert worker["ORCHESTRATOR_CODEX_HTTPS_PROXY"] == "${ORCHESTRATOR_CODEX_HTTPS_PROXY:-}"
+    for service in ("api", "beat"):
+        assert "HTTPS_PROXY" not in document["services"][service]["environment"]
+        assert "ORCHESTRATOR_CODEX_HTTPS_PROXY" not in document["services"][service]["environment"]
+    assert "HTTPS_PROXY" not in worker
+    example = (ROOT / ".env.example").read_text()
+    assert "ORCHESTRATOR_CODEX_HTTPS_PROXY=\n" in example
+
+
+def test_codex_proxy_setting_uses_a_dedicated_environment_variable(monkeypatch):
+    from orchestrator.config import Settings
+
+    monkeypatch.setenv("ORCHESTRATOR_CODEX_HTTPS_PROXY", "http://codex-proxy.example:7890")
+    configured = Settings(_env_file=None)
+
+    assert configured.codex_https_proxy.get_secret_value() == "http://codex-proxy.example:7890"
 
 
 def test_dockerfile_installs_fixed_codex_cli_and_verifies_the_copied_runtime():

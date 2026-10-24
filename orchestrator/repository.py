@@ -114,6 +114,8 @@ class Repository(Protocol):
     def list_agent_roles(self) -> list[AgentRole]: ...
     def get_agent_role(self, role_key: str) -> AgentRole | None: ...
     def save_agent_role(self, role: AgentRole, expected_version: int | None = None) -> AgentRole | None: ...
+    def get_codex_provider_config(self) -> dict[str, Any] | None: ...
+    def save_codex_provider_config(self, config: dict[str, Any]) -> None: ...
     def get_route_check(self, check_id: str) -> RouteCheckResult | None: ...
     def find_route_check(self, app_id: str, commit_id: str, require_route: str, static_role_version: int) -> RouteCheckResult | None: ...
     def ensure_route_check(self, result: RouteCheckResult) -> tuple[RouteCheckResult, bool]: ...
@@ -183,6 +185,7 @@ class InMemoryRepository:
         self.build_resources: dict[str, BuildResources] = {}
         self.port_allocations: dict[tuple[str, str, int], dict[str, str]] = {}
         self.agent_roles: dict[str, AgentRole] = {}
+        self.codex_provider_config: dict[str, Any] | None = None
         self.route_checks: dict[str, RouteCheckResult] = {}
 
     @staticmethod
@@ -194,6 +197,14 @@ class InMemoryRepository:
 
     def close(self) -> None:
         return None
+
+    def get_codex_provider_config(self) -> dict[str, Any] | None:
+        with self._lock:
+            return deepcopy(self.codex_provider_config)
+
+    def save_codex_provider_config(self, config: dict[str, Any]) -> None:
+        with self._lock:
+            self.codex_provider_config = deepcopy(config)
 
     def create_app(self, app: UserAppRecord) -> UserAppRecord:
         with self._lock:
@@ -581,6 +592,7 @@ class MongoRepository:
         self.build_resources = database["build_resources"]
         self.port_allocations = database["port_allocations"]
         self.agent_roles = database["agent_roles"]
+        self.system_configs = database["system_configs"]
         self.route_checks = database["route_check_list"]
 
     @classmethod
@@ -634,6 +646,19 @@ class MongoRepository:
 
     def list_agent_roles(self) -> list[AgentRole]:
         return [self._model(AgentRole, doc) for doc in self.agent_roles.find({}).sort("role_key", 1)]
+
+    def get_codex_provider_config(self) -> dict[str, Any] | None:
+        document = self.system_configs.find_one({"_id": "codex-provider"})
+        if document is None:
+            return None
+        document = dict(document)
+        document.pop("_id", None)
+        return document
+
+    def save_codex_provider_config(self, config: dict[str, Any]) -> None:
+        self.system_configs.replace_one(
+            {"_id": "codex-provider"}, {"_id": "codex-provider", **deepcopy(config)}, upsert=True,
+        )
 
     def get_agent_role(self, role_key: str) -> AgentRole | None:
         return self._model(AgentRole, self.agent_roles.find_one({"role_key": role_key}))

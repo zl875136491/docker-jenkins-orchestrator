@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal, Annotated
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 import json
 
@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     celery_recovery_interval_seconds: int = 300
     base_image_sync_interval_hours: int = 24
     codex_executable: str = Field(default="codex", min_length=1)
+    codex_provider_name: str | None = Field(default=None, validation_alias=AliasChoices("CODEX_PROVIDER_NAME", "codex_provider_name"), repr=False)
+    codex_provider_endpoint: str | None = Field(default=None, validation_alias=AliasChoices("CODEX_PROVIDER_ENDPOINT", "codex_provider_endpoint"), repr=False)
+    codex_api_key: SecretStr | None = Field(default=None, validation_alias=AliasChoices("CODEX_API_KEY", "codex_api_key"), repr=False)
+    codex_https_proxy: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("ORCHESTRATOR_CODEX_HTTPS_PROXY", "codex_https_proxy"), repr=False,
+    )
+    codex_default_model: str | None = Field(default=None, validation_alias=AliasChoices("CODEX_DEFAULT_MODEL", "codex_default_model"), repr=False)
+    codex_default_effort: str | None = Field(default=None, validation_alias=AliasChoices("CODEX_DEFAULT_EFFORT", "codex_default_effort"), repr=False)
+    codex_provider_id: str = Field(default="department-relay", validation_alias=AliasChoices("CODEX_PROVIDER_ID", "codex_provider_id"))
+    codex_provider_wire_api: str = Field(default="responses", validation_alias=AliasChoices("CODEX_PROVIDER_WIRE_API", "codex_provider_wire_api"))
+    codex_provider_requires_openai_auth: bool = Field(
+        default=False, validation_alias=AliasChoices("CODEX_PROVIDER_REQUIRES_OPENAI_AUTH", "codex_provider_requires_openai_auth"),
+    )
     route_check_lease_seconds: int = Field(default=120, ge=10)
     route_probe_timeout_seconds: float = Field(default=15, gt=0, le=120)
     route_probe_max_response_bytes: int = Field(default=65536, ge=1024, le=1048576)
@@ -74,6 +87,24 @@ class Settings(BaseSettings):
     @field_validator("harbor_ca_file", mode="before")
     @classmethod
     def normalize_harbor_ca_file(cls, value):
+        return None if value == "" else value
+
+    @field_validator(
+        "codex_provider_name", "codex_provider_endpoint", "codex_default_model", "codex_default_effort",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_codex_strings(cls, value):
+        return None if value == "" else value
+
+    @field_validator("codex_api_key", mode="before")
+    @classmethod
+    def normalize_optional_codex_api_key(cls, value):
+        return None if value == "" else value
+
+    @field_validator("codex_https_proxy", mode="before")
+    @classmethod
+    def normalize_optional_codex_https_proxy(cls, value):
         return None if value == "" else value
 
     @field_validator("cleanup_docker_targets", mode="before")

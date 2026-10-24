@@ -6,6 +6,16 @@ run without importing HTTP routes. Business state is always written to MongoDB.
 
 from orchestrator.celery_runtime import celery_app
 
+from orchestrator.config import get_settings
+
+
+_settings = get_settings()
+if _settings.environment == "production":
+    from orchestrator.container import create_container
+
+    _container = create_container(_settings)
+    _container.close()
+
 
 @celery_app.task(name="orchestrator.pipeline.start_build", bind=True)
 def start_build(self, build_id: str) -> dict[str, str]:

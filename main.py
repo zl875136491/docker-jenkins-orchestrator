@@ -20,6 +20,11 @@ from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 
 from orchestrator.config import Settings, get_settings
+from orchestrator.codex_config import (
+    CodexConfigurationError,
+    CodexProviderConfigUpdate,
+    CodexProviderConfigView,
+)
 from orchestrator.container import ApplicationContainer, create_container
 from orchestrator.gitlab import (
     GitLabComposeAmbiguousError,
@@ -567,6 +572,25 @@ def create_app(
             return container.route_checks.roles.update(role_key, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Agent role not found") from exc
+
+    @api.get("/api/v1/system/codex-config", response_model=CodexProviderConfigView)
+    def get_codex_config(_: dict = Depends(require_token)) -> CodexProviderConfigView:
+        try:
+            return container.codex_config.view()
+        except CodexConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @api.put("/api/v1/system/codex-config", response_model=CodexProviderConfigView)
+    def update_codex_config(
+        request: CodexProviderConfigUpdate,
+        _: dict = Depends(require_token),
+    ) -> CodexProviderConfigView:
+        try:
+            return container.codex_config.update(request)
+        except CodexConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid Codex provider configuration") from None
 
     @api.post("/api/v1/apps/{app_id}/static-checks", response_model=StaticCheckSubmission,
               response_model_exclude={"result": _CHECK_PRIVATE_FIELDS}, status_code=status.HTTP_202_ACCEPTED)

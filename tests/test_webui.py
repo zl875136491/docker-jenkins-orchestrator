@@ -23,7 +23,7 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert "Orchestrator" in page.text
     assert 'id="toastRegion"' in page.text
     assert "历史任务" in page.text
-    assert "historySection" in page.text
+    assert "buildTaskRows" in page.text
     assert "/ui/app.js" in page.text
     assert stylesheet.status_code == 200
     assert "page-grid" in stylesheet.text
@@ -31,7 +31,7 @@ def test_control_console_assets_are_served_without_api_authentication() -> None:
     assert script.status_code == 200
     assert "/oauth2/token" in script.text
     assert "/api/v1/jenkins/build_list?" in script.text
-    assert 'data-resource="access"' in page.text
+    assert 'data-resource-refresh="access"' in page.text
     assert 'id="loadComposePromptButton"' in page.text
     assert 'id="composePromptOutput"' in page.text
     assert 'resource === "access"' in script.text
@@ -48,21 +48,28 @@ def test_control_console_sidebar_navigation_targets_each_workspace_section() -> 
     assert navigation is not None
     navigation_markup = navigation.group(1)
     for section_id in (
-        "appSection", "buildSection", "routeChecksSection", "workspaceSection", "historySection",
-        "buildResourcesSection", "resourcesSection", "templatesSection", "baseImagesSection", "agentSettingsSection",
+        "appSection", "workspaceSection", "staticChecksSection", "buildSection", "dynamicChecksSection",
+        "resourcesSection", "buildResourcesSection", "templatesSection", "baseImagesSection", "codexSettingsSection", "agentSettingsSection",
     ):
         assert f'href="#{section_id}"' in navigation_markup
         assert f'id="{section_id}"' in page.text
+    assert navigation_markup.index('href="#appSection"') < navigation_markup.index('href="#workspaceSection"')
+    assert navigation_markup.index('href="#workspaceSection"') < navigation_markup.index('href="#staticChecksSection"')
+    assert navigation_markup.index('href="#staticChecksSection"') < navigation_markup.index('href="#buildSection"')
+    assert navigation_markup.index('href="#buildSection"') < navigation_markup.index('href="#dynamicChecksSection"')
+    assert "historySection" not in navigation_markup
     assert 'id="appListNavigation"' not in navigation_markup
     assert 'href="#operationSection"' not in navigation_markup
     assert 'id="applicationTab"' in navigation_markup
     assert 'id="globalTab"' in navigation_markup
     assert "应用详情" in navigation_markup
     assert "应用构建" in navigation_markup
-    assert "应用检查" in navigation_markup
+    assert "静态检查" in navigation_markup
+    assert "动态检查" in navigation_markup
     assert "资源回收" in navigation_markup
     assert "模板设置" in navigation_markup
     assert "镜像设置" in navigation_markup
+    assert "Codex 配置" in navigation_markup
     assert "Agent 设置" in navigation_markup
 
 
@@ -73,21 +80,21 @@ def test_control_console_exposes_static_and_dynamic_route_check_controls() -> No
     for marker in (
         'id="requireRoute"',
         'name="require_route"',
-        'id="routeChecksSection"',
+        'id="staticChecksSection"',
         'id="routeCheckAppId"',
         'id="routeCheckCommitId"',
         'id="staticRouteCheckButton"',
-        'id="refreshRouteChecksButton"',
+        'id="staticCheckRefreshButton"',
         'id="routeCheckBuildId"',
         'id="dynamicRouteCheckButton"',
-        'id="refreshDynamicCheckResultButton"',
-        'id="staticCheckResults"',
-        'id="dynamicCheckResults"',
+        'id="dynamicCheckRefreshButton"',
+        'id="staticCheckTaskRows"',
+        'id="dynamicCheckTaskRows"',
     ):
         assert marker in page.text
-    assert page.text.index('id="routeCheckContextTitle"') < page.text.index('id="staticRouteCheckTitle"')
-    assert 'class="route-check-columns"' in page.text
-    assert 'class="route-check-column"' in page.text
+    assert 'id="staticCheckModal"' in page.text and 'id="staticCheckForm"' in page.text
+    assert 'id="dynamicCheckModal"' in page.text and 'id="dynamicCheckForm"' in page.text
+    assert 'id="taskDetailDrawer"' in page.text
     assert 'class="intro-band"' not in page.text
     assert 'id="selectedAppBanner"' not in page.text
     assert "/static-checks`" in script.text
@@ -189,19 +196,21 @@ def test_control_console_loads_apps_from_the_application_list() -> None:
     assert "/api/v1/docker/compose_prompt" in script.text
     assert "function loadApps" in script.text
     assert "function openApplication" in script.text
-    assert 'localStorage.removeItem("orchestrator.control.appid")' in script.text
+    assert 'const UI_STATE_KEY = "orchestrator.control.ui-state"' in script.text
+    assert "function persistUiState" in script.text
+    assert 'localStorage.setItem(UI_STATE_KEY, JSON.stringify(value))' in script.text
 
 
 def test_app_workspaces_are_nested_under_the_application_list() -> None:
     page = client.get("/ui/")
     stylesheet = client.get("/ui/styles.css")
     script = client.get("/ui/app.js")
-    for section in ("appSection", "buildSection", "routeChecksSection", "workspaceSection", "historySection", "buildResourcesSection", "resourcesSection"):
+    for section in ("appSection", "workspaceSection", "staticChecksSection", "buildSection", "dynamicChecksSection", "buildResourcesSection", "resourcesSection"):
         assert f'href="#{section}" data-navigation-scope="application"' in page.text
-    assert 'id="historyAppId" placeholder="从应用列表打开应用" autocomplete="off" readonly' in page.text
+    assert 'id="historyAppId" placeholder="从顶部选择应用" autocomplete="off" readonly' in page.text
     assert 'id="appSelector"' in page.text
     assert 'id="routeCheckCommitId"' in page.text and '<select id="routeCheckCommitId"' in page.text
-    assert 'id="buildId" required disabled' in page.text and '<select id="buildId"' in page.text
+    assert 'id="buildId" type="hidden"' in page.text
     assert 'id="buildResourcesId" required disabled' in page.text and '<select id="buildResourcesId"' in page.text
     assert 'id="allHistoryNavigation"' not in page.text
     assert '全部任务' not in page.text
@@ -241,7 +250,6 @@ def test_control_console_exposes_compose_discovery_and_repository_sync_results()
         "syncComposeFile",
         "syncUpdatedAt",
         "appSyncOutput",
-        "buildCommit",
         "serviceAccessRegion",
     ):
         assert f'id="{element_id}"' in page.text
@@ -252,8 +260,8 @@ def test_build_workspace_distinguishes_receipt_and_automatic_status_queries() ->
     page = client.get("/ui/")
     script = client.get("/ui/app.js")
     assert 'id="buildPollStatus"' in page.text
-    assert "HTTP 202 仅表示任务已受理" in page.text
-    assert "约每 5 秒自动查询" in page.text
+    assert "HTTP 202 表示任务已受理" in page.text
+    assert "约 5 秒后再次查询" in script.text
     assert "const BUILD_POLL_INTERVAL_MS = 5000" in script.text
     assert 'window.addEventListener("pagehide"' in script.text
     assert "状态未刷新" in script.text

@@ -14,6 +14,7 @@ from orchestrator.workspaces import WorkspaceStore
 from orchestrator.build_resources import BuildResourceService
 from orchestrator.route_checks import RouteCheckService
 from orchestrator.dynamic_checks import DynamicCheckService
+from orchestrator.codex_config import CodexProviderConfigService
 
 
 @dataclass
@@ -21,6 +22,7 @@ class ApplicationContainer:
     settings: Settings
     repository: Repository
     secret_box: SecretBox
+    codex_config: CodexProviderConfigService
     applications: ApplicationService
     builds: BuildService
     dispatcher: TaskDispatcher
@@ -48,6 +50,8 @@ def create_container(
             repository = InMemoryRepository()
     repository.ensure_indexes()
     secret_box = SecretBox(settings.data_encryption_key, require_encryption=settings.storage_backend == "mongo")
+    codex_config = CodexProviderConfigService(repository, secret_box, settings)
+    codex_config.validate_startup(required=settings.environment == "production")
     if dispatcher is None:
         if settings.task_dispatcher == "celery":
             from orchestrator.celery_dispatcher import CeleryTaskDispatcher
@@ -61,7 +65,10 @@ def create_container(
     applications = ApplicationService(repository, secret_box, workspace=workspace)
     if settings.gitlab_url and settings.gitlab_token:
         applications.gitlab = GitLabHttpAdapter.from_settings(settings)
-    route_checks = RouteCheckService(repository, dispatcher, settings, gitlab_factory=lambda: applications.gitlab)
+    route_checks = RouteCheckService(
+        repository, dispatcher, settings, gitlab_factory=lambda: applications.gitlab,
+        codex_config=codex_config,
+    )
     applications.route_checks = route_checks
     tech_stacks = TechStackService(repository, catalog)
     builds = BuildService(repository, applications, dispatcher, route_checks=route_checks)
@@ -71,6 +78,7 @@ def create_container(
         settings=settings,
         repository=repository,
         secret_box=secret_box,
+        codex_config=codex_config,
         applications=applications,
         builds=builds,
         dispatcher=dispatcher,

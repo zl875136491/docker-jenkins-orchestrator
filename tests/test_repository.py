@@ -46,6 +46,7 @@ def mongo_app_repository() -> tuple[MongoRepository, FakeAppCollection]:
             "build_resources",
             "port_allocations",
             "agent_roles",
+            "system_configs",
             "route_check_list",
         )
     }

@@ -140,11 +140,17 @@ def _aware(value):
 
 class RouteCheckService:
     def __init__(self, repository: Any, dispatcher: TaskDispatcher, settings: Settings, *,
-                 executor: Any | None = None, gitlab_factory: Any | None = None) -> None:
+                 executor: Any | None = None, gitlab_factory: Any | None = None,
+                 codex_config: Any | None = None) -> None:
         self.repository = repository
         self.dispatcher = dispatcher
         self.settings = settings
-        self.executor = executor or CodexCliExecutor(settings.codex_executable)
+        self.executor = executor or CodexCliExecutor(
+            settings.codex_executable,
+            provider_config=codex_config,
+            require_provider=settings.environment == "production",
+            https_proxy=(settings.codex_https_proxy.get_secret_value() if settings.codex_https_proxy else None),
+        )
         self.gitlab_factory = gitlab_factory
         self.roles = AgentRoleService(repository)
 

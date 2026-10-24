@@ -83,6 +83,7 @@ class MockApi:
     def __init__(self) -> None:
         self.apps = {name: app_record(name) for name in ("alpha", "beta")}
         self.workspace_files: dict[str, dict[str, bytes]] = {}
+        self.build_history: list[dict[str, Any]] = []
         self.route_check_results: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self.calls: list[ApiCall] = []
         self.overrides: dict[tuple[str, str], Reply | Callable[[ApiCall], Reply]] = {}
@@ -210,6 +211,16 @@ class MockApi:
                 {"role_key": "static_build_agent", "prompt": "Static role prompt", "output_schema": {"type": "object", "properties": {}}, "runtime_config": {"timeout_seconds": 900}, "agent_role_version": 1},
                 {"role_key": "dynamic_debug_agent", "prompt": "Dynamic role prompt", "output_schema": {"type": "object", "properties": {}}, "runtime_config": {"timeout_seconds": 900}, "agent_role_version": 1},
             ])
+        if call.path == "/api/v1/system/codex-config":
+            config = {
+                "provider_name": "测试中转", "provider_endpoint": "https://relay.example.test/v1",
+                "default_model": "gpt-test", "default_effort": "medium", "provider_id": "department-relay",
+                "wire_api": "responses", "requires_openai_auth": False,
+                "api_key_configured": True, "source": "database",
+            }
+            if call.method == "PUT":
+                config.update({key: value for key, value in call.body.items() if key != "api_key"})
+            return Reply(config)
         if call.path.startswith("/api/v1/agent-roles/") and call.method == "PUT":
             role_key = call.path.rsplit("/", 1)[-1]
             return Reply({"role_key": role_key, **call.body, "agent_role_version": 2})
@@ -218,7 +229,20 @@ class MockApi:
         if call.path in ("/api/v1/docker/tech_stack_list", "/api/v1/docker/base_image_list"):
             return Reply([])
         if call.path == "/api/v1/jenkins/build_list":
-            return Reply({"items": [], "page": 1, "page_size": 20, "total": 0})
+            query = parse_qs(call.query)
+            appid = query.get("app_id", [""])[0]
+            page = max(1, int(query.get("page", ["1"])[0]))
+            page_size = max(1, int(query.get("page_size", ["20"])[0]))
+            builds = [item for item in self.build_history if item.get("appid") == appid]
+            start = (page - 1) * page_size
+            return Reply({"items": deepcopy(builds[start:start + page_size]), "page": page,
+                          "page_size": page_size, "total": len(builds)})
+        if call.method == "GET" and call.path.startswith("/api/v1/jenkins/app_"):
+            resource = call.path.rsplit("_", 1)[-1].split("/", 1)[0]
+            if resource in {"events", "images", "services", "alerts"}:
+                return Reply([])
+            if resource == "access":
+                return Reply({"region": "test", "services": []})
         if call.path.startswith("/api/v1/apps/") and call.path.endswith("/static-checks") and call.method == "POST":
             appid = call.path.split("/")[4]
             commit_id = call.body.get("commit_id") or self.apps[appid]["compose_source_commit"] or NEW_COMMIT
@@ -242,6 +266,13 @@ class MockApi:
             appid = call.path.split("/")[4]
             build_id = call.body["build_id"]
             commit_id = self.apps[appid]["compose_source_commit"] or NEW_COMMIT
+            self.build_history = [item for item in self.build_history if item.get("build_id") != build_id]
+            self.build_history.insert(0, {
+                "build_id": build_id, "appid": appid, "status": "deploying", "git_ref": "master",
+                "git_commit_sha": commit_id, "dynamic_build_id": build_id,
+                "dynamic_run_id": "mock-dynamic-run", "dynamic_status": "queued",
+                "created_at": "2026-10-10T09:00:00Z", "updated_at": "2026-10-10T09:00:00Z",
+            })
             results = self.route_check_results.setdefault((appid, commit_id), [])
             if results:
                 results[0]["dynamic_status"] = "queued"
@@ -256,6 +287,7 @@ class MockApi:
                 })
             return Reply({"build_id": build_id, "appid": appid, "status": "deploying", "git_ref": "master",
                           "git_commit_sha": commit_id, "route_check_id": f"check-{appid}",
+                          "dynamic_build_id": build_id, "dynamic_run_id": "mock-dynamic-run",
                           "static_agent_role_version": 2, "dynamic_agent_role_version": 3,
                           "dynamic_status": "queued", "dynamic_check_passed": None}, 202)
         if call.path == "/api/v1/jenkins/app_create" and call.method == "POST":
@@ -285,7 +317,7 @@ class MockApi:
             return Reply(self.sync_result(call.path.rsplit("/", 1)[1]))
         if call.path.startswith("/api/v1/jenkins/build_create/") and call.method == "POST":
             appid = call.path.rsplit("/", 1)[1]
-            return Reply({
+            build = {
                 "build_id": "mock-submitted-build",
                 "appid": appid,
                 "status": "queued",
@@ -293,7 +325,12 @@ class MockApi:
                 "git_commit_sha": None,
                 "jenkins_build_number": None,
                 "celery_task_id": "mock-celery-task",
-            }, 202)
+                "created_at": "2026-10-10T09:00:00Z",
+                "updated_at": "2026-10-10T09:00:00Z",
+            }
+            self.build_history = [item for item in self.build_history if item.get("build_id") != build["build_id"]]
+            self.build_history.insert(0, deepcopy(build))
+            return Reply(build, 202)
         if call.path.startswith("/api/v1/jenkins/build_info/"):
             return Reply({
                 "build_id": call.path.rsplit("/", 1)[1],
@@ -378,6 +415,12 @@ class Console:
         self.page.locator("#compose").fill(compose)
 
     def load_app(self, appid: str = "alpha", *, force: bool = False) -> dict[str, Any]:
+        if self.page.locator("#taskDetailDrawer").is_visible():
+            self.page.locator("#taskDetailCloseButton").click()
+        for modal_id in ("buildModal", "staticCheckModal", "dynamicCheckModal"):
+            modal = self.page.locator(f"#{modal_id}")
+            if modal.is_visible():
+                modal.locator(".modal-close").click()
         if (not force and self.page.locator("#appId").input_value() == appid
                 and self.page.locator("#appId").get_attribute("readonly") is not None
                 and self.page.locator("#appName").input_value() == self.api.apps[appid]["name"]):
@@ -545,27 +588,42 @@ def build_record(build_id: str, status: str, *, appid: str = "alpha") -> dict[st
 
 
 def build_query(console: Console, build_id: str) -> None:
-    console.page.locator('a[href="#buildSection"]').click()
-    console.page.locator("#buildId").select_option(build_id)
-    console.page.locator('#buildQueryForm button[type="submit"]').click()
+    history_query(console, build_record(build_id, "building"))
 
 
 def open_operation_subsection(console: Console, section: str) -> None:
+    if section == "historySection":
+        section = "buildSection"
     console.page.locator(f'.side-nav a[href="#{section}"]').click()
 
 
 def open_history_section(console: Console) -> None:
-    open_operation_subsection(console, "historySection")
+    open_operation_subsection(console, "buildSection")
 
 
 def history_query(console: Console, record: dict[str, Any]) -> None:
+    # The task drawer and create modal are intentionally modal. Follow the same
+    # user path as the UI before navigating or choosing another task.
+    if console.page.locator("#taskDetailDrawer").is_visible():
+        console.page.locator("#taskDetailCloseButton").click()
+    if console.page.locator("#buildModal").is_visible():
+        console.page.locator("#buildModal .modal-close").click()
     console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [record], "page": 1, "page_size": 20, "total": 1})
     for resource in ("events", "images", "services", "alerts"):
         console.api.overrides.setdefault(("GET", f"/api/v1/jenkins/app_{resource}/{record['appid']}"), Reply([]))
     open_history_section(console)
     console.page.locator("#historyRefreshButton").click()
-    expect(console.page.locator(".history-detail-button")).to_have_count(1)
-    console.page.locator(".history-detail-button").click()
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(1)
+    console.page.locator("#buildTaskRows tr").click()
+
+
+def open_build_modal(console: Console) -> None:
+    if not console.page.locator("#buildModal").is_visible():
+        if console.page.locator("#taskDetailDrawer").is_visible():
+            console.page.locator("#taskDetailCloseButton").click()
+        console.page.locator('.side-nav a[href="#buildSection"]').click()
+        console.page.locator("#newBuildButton").click()
+    expect(console.page.locator("#buildModal")).to_be_visible()
 
 
 def submit_build_event(console: Console) -> None:
@@ -603,40 +661,48 @@ def test_app_create_and_update_include_required_route_configuration(console: Con
 
 def test_route_check_workspace_submits_static_and_dynamic_checks_and_shows_results(console: Console) -> None:
     console.load_app()
-    console.page.locator('a[href="#routeChecksSection"]').click()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
     expect(console.page.locator("#routeCheckAppId")).to_have_value("alpha")
     expect(console.page.locator("#routeCheckCommitId")).to_have_value(OLD_COMMIT)
 
+    console.page.locator("#newStaticCheckButton").click()
     console.page.locator("#staticRouteCheckButton").click()
     expect(console.page.locator("#staticRouteCheckStatus")).to_contain_text("已排队")
     static_call = console.api.matching("POST", "/api/v1/apps/alpha/static-checks")[0]
     assert static_call.body == {"commit_id": OLD_COMMIT}
 
-    console.page.locator("#refreshRouteChecksButton").click()
-    expect(console.page.locator("#staticCheckResults")).to_contain_text("queued")
-    expect(console.page.locator("#staticCheckResults")).to_contain_text("Agent 版本：静态 v2 / 动态 v3")
+    expect(console.page.locator("#staticCheckTaskRows tr")).to_have_count(1)
+    console.page.locator("#staticCheckTaskRows tr").click()
+    expect(console.page.locator("#taskDetailOutput")).to_contain_text("queued")
+    expect(console.page.locator("#taskDetailOutput")).to_contain_text("static_agent_role_version")
     assert console.api.matching("GET", f"/api/v1/apps/alpha/commits/{OLD_COMMIT}/check-results")
 
+    console.page.locator("#taskDetailCloseButton").click()
+    console.page.locator('.side-nav a[href="#dynamicChecksSection"]').click()
     console.page.locator("#routeCheckBuildId").select_option("mock-deployed-build")
+    console.page.locator("#newDynamicCheckButton").click()
     console.page.locator("#dynamicRouteCheckButton").click()
     expect(console.page.locator("#dynamicRouteCheckStatus")).to_contain_text("动态重验已受理")
     dynamic_call = console.api.matching("POST", "/api/v1/apps/alpha/dynamic-checks")[0]
     assert dynamic_call.body == {"build_id": "mock-deployed-build"}
     expect(console.page.locator("#buildStatus")).to_contain_text("deploying")
 
-    console.page.locator("#refreshDynamicCheckResultButton").click()
-    expect(console.page.locator("#dynamicCheckResultStatus")).to_contain_text("动态检查结果：queued")
-    expect(console.page.locator("#dynamicCheckResults")).to_contain_text("mock-deployed-build")
-    expect(console.page.locator("#dynamicCheckResults")).to_contain_text("动态检查任务仍在执行")
-    assert console.api.matching("GET", "/api/v1/jenkins/build_info/mock-deployed-build")
+    expect(console.page.locator("#dynamicCheckTaskRows tr")).to_have_count(1)
+    console.page.locator("#dynamicCheckTaskRows tr").click()
+    expect(console.page.locator("#taskDetailOutput")).to_contain_text("mock-deployed-build")
+    expect(console.page.locator("#taskDetailOutput")).to_contain_text('"dynamic_status": "queued"')
+    expect(console.page.locator("#taskDetailTitle")).to_contain_text("动态检查详情")
 
+    console.page.locator("#taskDetailCloseButton").click()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
     console.page.locator("#routeCheckCommitId").select_option(NEW_COMMIT)
-    expect(console.page.locator("#staticCheckResultStatus")).to_contain_text("Commit 已更改")
-    expect(console.page.locator("#staticCheckResults")).to_contain_text("此 commit 暂无静态检查结果")
+    console.page.locator("#staticCheckRefreshButton").click()
+    expect(console.page.locator("#staticCheckTaskRows tr")).to_have_count(1)
+    expect(console.page.locator("#staticRouteCheckStatus")).to_contain_text("共 1 条静态检查任务")
 
 
 def test_route_check_columns_and_select_heights_are_stable_at_responsive_sizes(console: Console) -> None:
-    console.page.locator('a[href="#routeChecksSection"]').click()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
     for width, height in ((1440, 900), (900, 1000), (390, 844)):
         console.page.set_viewport_size({"width": width, "height": height})
         select_heights = console.page.locator("select").evaluate_all(
@@ -645,23 +711,22 @@ def test_route_check_columns_and_select_heights_are_stable_at_responsive_sizes(c
         assert dict(select_heights)["appSelector"] == "34px"
         assert all(value == "40px" for key, value in select_heights if key != "appSelector")
         field_heights = console.page.locator(
-            "#routeCheckAppId, #routeCheckCommitId, #routeCheckBuildId"
+            "#routeCheckAppId, #routeCheckCommitId"
         ).evaluate_all("items => items.map(select => Math.round(select.getBoundingClientRect().height))")
-        assert field_heights == [40, 40, 40]
+        assert field_heights == [40, 40]
 
-        static_card = console.page.locator("#staticRouteCheckTitle").locator("xpath=../..").bounding_box()
-        dynamic_card = console.page.locator("#dynamicRouteCheckTitle").locator("xpath=../..").bounding_box()
-        assert static_card is not None and dynamic_card is not None
-        if width > 640:
-            assert static_card["x"] < dynamic_card["x"]
-            assert abs(static_card["y"] - dynamic_card["y"]) < 2
-        else:
-            assert dynamic_card["y"] > static_card["y"]
+        static_section = console.page.locator("#staticChecksSection").bounding_box()
+        assert static_section is not None
+        console.page.locator('.side-nav a[href="#dynamicChecksSection"]').click()
+        dynamic_section = console.page.locator("#dynamicChecksSection").bounding_box()
+        assert dynamic_section is not None
+        assert console.page.locator("#routeCheckBuildId").evaluate("item => Math.round(item.getBoundingClientRect().height)") == 40
+        console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
 
 
 def test_static_check_head_receipt_adds_commit_to_selector(console: Console) -> None:
     console.load_app()
-    console.page.locator('a[href="#routeChecksSection"]').click()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
     new_head = "3" * 40
     console.api.overrides[("POST", "/api/v1/apps/alpha/static-checks")] = lambda call: Reply({
         "check_id": "check-alpha-new-head", "task_id": "mock-static-task", "queued": True,
@@ -673,17 +738,20 @@ def test_static_check_head_receipt_adds_commit_to_selector(console: Console) -> 
             "static_check_passed": None, "dynamic_check_passed": None,
         },
     }, 202)
+    console.page.locator("#newStaticCheckButton").click()
     console.page.locator("#staticRouteCheckButton").click()
     expect(console.page.locator("#routeCheckCommitId")).to_have_value(new_head)
     assert new_head in console.page.locator("#routeCheckCommitId option").evaluate_all("items => items.map(item => item.value)")
 
 
 def test_route_checks_cannot_be_retargeted_to_another_application(console: Console) -> None:
-    console.page.locator('a[href="#routeChecksSection"]').click()
+    console.load_app()
+    console.page.locator('.side-nav a[href="#staticChecksSection"]').click()
     assert console.page.locator("#routeCheckAppId").is_disabled()
     assert console.page.locator("#routeCheckAppId option").all_text_contents() == ["alpha"]
     console.page.locator("#routeCheckAppId").evaluate("select => { select.disabled = false; select.add(new Option('beta', 'beta')); select.value = 'beta'; select.dispatchEvent(new Event('change', {bubbles: true})); }")
-    console.page.locator("#staticRouteCheckButton").click()
+    console.page.locator("#newStaticCheckButton").click()
+    console.page.locator("#staticCheckForm").dispatch_event("submit")
     expect(console.page.locator("#staticRouteCheckStatus")).to_contain_text("仅允许操作顶部当前选择的应用")
     assert not console.api.matching("POST", "/api/v1/apps/beta/static-checks")
 
@@ -753,7 +821,7 @@ def test_sync_busy_blocks_duplicate_submission_and_conflicting_actions(console: 
     console.api.paused.add(("POST", "/api/v1/jenkins/app_sync/alpha"))
     console.sync()
     expect(console.page.locator("#syncAppButton")).to_be_disabled()
-    for selector in ("#getAppButton", "#patchAppButton", "#appId", '#appForm button[type="submit"]', '#buildForm button[type="submit"]'):
+    for selector in ("#patchAppButton", "#appId", '#appForm button[type="submit"]', '#buildForm button[type="submit"]'):
         expect(console.page.locator(selector)).to_be_disabled()
     console.page.once("dialog", lambda dialog: dialog.accept())
     console.page.locator("#syncAppButton").dispatch_event("click")
@@ -815,21 +883,24 @@ def test_sync_success_with_refresh_failure_keeps_draft_and_reports_both_outcomes
 
     # A successful backend sync with an unread new configuration is not safe
     # to build yet. The guard must apply even from the separate build panel.
-    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator('.side-nav a[href="#buildSection"]').click()
+    console.page.locator("#newBuildButton").click()
     console.page.locator('#buildForm button[type="submit"]').click()
     expect(console.page.locator("#buildOutput")).to_contain_text(re.compile(r"读取|刷新"))
     assert not console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")
+    console.page.locator("#buildModal .modal-close").click()
 
     # A successful explicit reread clears that guard, without issuing another
     # sync or automatically creating a build in the meantime.
-    console.page.locator('a[href="#appSection"]').click()
+    console.page.locator('.side-nav a[href="#appSection"]').click()
     del console.api.overrides[("GET", "/api/v1/jenkins/app_info/alpha")]
-    console.page.locator("#getAppButton").click()
+    console.load_app(force=True)
     expect(console.page.locator("#composeSourceCommit")).to_have_text(NEW_COMMIT)
     assert editor_json(console) == NEW_COMPOSE
     assert len(console.api.matching("POST", "/api/v1/jenkins/app_sync/alpha")) == 1
     assert not console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")
-    console.page.locator('a[href="#buildSection"]').click()
+    console.page.locator('.side-nav a[href="#buildSection"]').click()
+    console.page.locator("#newBuildButton").click()
     console.page.locator('#buildForm button[type="submit"]').click()
     expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
     assert len(console.api.matching("POST", "/api/v1/jenkins/build_create/alpha")) == 1
@@ -903,9 +974,7 @@ def test_patch_omits_unread_environment_but_includes_explicit_edits(console: Con
 
 def test_build_query_displays_immutable_commit(console: Console) -> None:
     console.load_app()
-    console.page.locator('a[href="#buildSection"]').click()
-    console.page.locator("#buildId").select_option("mock-build-43")
-    console.page.locator('#buildQueryForm button[type="submit"]').click()
+    build_query(console, "mock-build-43")
     expect(console.page.locator("#buildCommit")).to_have_text(NEW_COMMIT)
     expect(console.page.locator("#buildStatus")).to_have_text("failed")
     assert not any("/build_create/" in item.path for item in console.api.calls)
@@ -917,7 +986,7 @@ def test_build_submission_is_mutually_exclusive_and_recovers_after_failure(conso
     pause_clock(console.page)
     key = ("POST", "/api/v1/jenkins/build_create/alpha")
     console.api.paused.add(key)
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     button = console.page.locator('#buildForm button[type="submit"]')
     button.click()
     expect(button).to_be_disabled()
@@ -949,10 +1018,11 @@ def test_querying_another_build_does_not_cancel_or_unlock_pending_submission(con
     pause_clock(console.page)
     key = ("POST", "/api/v1/jenkins/build_create/alpha")
     console.api.paused.add(key)
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     button = console.page.locator('#buildForm button[type="submit"]')
     button.click()
     expect(button).to_be_disabled()
+    console.page.locator("#buildModal .modal-close").click()
     build_query(console, "other-build")
     expect(console.page.locator("#buildStatus")).to_have_text("failed")
     submit_build_event(console)
@@ -970,13 +1040,13 @@ def test_old_submission_cleanup_cannot_unlock_new_context_submission(console: Co
     old_key = ("POST", "/api/v1/jenkins/build_create/alpha")
     new_key = ("POST", "/api/v1/jenkins/build_create/beta")
     console.api.paused.update([old_key, new_key])
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     button = console.page.locator('#buildForm button[type="submit"]')
     button.click()
     expect(button).to_be_disabled()
-    console.page.locator('a[href="#appSection"]').click()
+    console.page.locator("#buildModal .modal-close").click()
     console.load_app("beta")
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     expect(button).to_be_enabled()
     button.click()
     expect(button).to_be_disabled()
@@ -1019,7 +1089,9 @@ def test_build_info_identity_mismatch_never_overwrites_selected_build(console: C
         console.page.clock.run_for(5000)
     expect(console.page.locator("#buildPollStatus")).to_contain_text("与查询")
     expect(console.page.locator("#buildId")).to_have_value(build_id)
-    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）" if known_owner else "--")
+    # Every list-row inspection starts with a clean detail state; an invalid
+    # identity response must not restore the status from a previously opened row.
+    expect(console.page.locator("#buildStatus")).to_have_text("building（未刷新）" if entry == "poll" else "--")
     expect(console.page.locator("#buildOutput")).not_to_contain_text("unexpected-build")
     expect(console.page.locator("#buildOutput")).not_to_contain_text('"appid": "beta"')
     expect(console.page.locator("#buildOutput")).not_to_contain_text('"status": "failed"')
@@ -1066,13 +1138,17 @@ def test_build_query_is_scoped_to_selected_app_and_pins_owner_for_manual_refresh
     key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
     console.api.overrides[key] = Reply(build_record(build_id, "building", appid="beta"))
 
-    console.page.locator('a[href="#buildSection"]').click()
-    expect(console.page.locator(f'#buildId option[value="{build_id}"]')).to_have_count(0)
+    console.api.build_history = [build_record(build_id, "building", appid="beta")]
+    console.page.locator('.side-nav a[href="#buildSection"]').click()
+    console.page.locator("#historyRefreshButton").click()
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(0)
     assert not console.api.matching(*key)
 
     console.page.locator("#appSelector").select_option("beta")
     expect(console.page.locator("#appId")).to_have_value("beta")
-    expect(console.page.locator(f'#buildId option[value="{build_id}"]')).to_have_count(1)
+    console.page.locator('.side-nav a[href="#buildSection"]').click()
+    console.page.locator("#historyRefreshButton").click()
+    expect(console.page.locator('#buildTaskRows tr[data-task-id="beta-only-build"]')).to_have_count(1)
     build_query(console, build_id)
     expect(console.page.locator("#buildStatus")).to_have_text("building")
     expect(console.page.locator("#buildOutput")).to_contain_text('"appid": "beta"')
@@ -1094,20 +1170,22 @@ def test_submission_cleanup_preserves_concurrent_app_operation_button_state(cons
     create_key = ("POST", "/api/v1/jenkins/build_create/alpha")
     app_key = ("GET", "/api/v1/jenkins/app_info/alpha")
     console.api.paused.update([create_key, app_key])
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     button = console.page.locator('#buildForm button[type="submit"]')
     button.click()
     expect(button).to_be_disabled()
-    console.page.locator('a[href="#appSection"]').click()
-    console.page.locator("#getAppButton").click()
-    expect(console.page.locator("#getAppButton")).to_be_disabled()
+    console.page.locator("#buildModal .modal-close").click()
+    console.page.locator('.side-nav a[href="#appSection"]').click()
+    console.page.locator("#appSelector").select_option("")
+    console.page.locator('.app-card button[data-appid="alpha"]').click()
+    expect(console.page.locator("#patchAppButton")).to_be_disabled()
     console.api.paused.remove(create_key)
     console.api.release(reply=Reply({"detail": "Submission unavailable"}, 503))
     expect(console.page.locator("#buildForm")).not_to_have_attribute("aria-busy", "true")
     expect(button).to_be_disabled()
     console.api.paused.remove(app_key)
     console.api.release()
-    expect(console.page.locator("#getAppButton")).to_be_enabled()
+    expect(console.page.locator("#patchAppButton")).to_be_enabled()
     expect(button).to_be_enabled()
 
 
@@ -1119,7 +1197,7 @@ def test_submitted_build_polls_until_terminal_without_history_refresh(console: C
     key = ("GET", f"/api/v1/jenkins/build_info/{build_id}")
     replies = [Reply(build_record(build_id, "building")), Reply(build_record(build_id, terminal))]
     console.api.overrides[key] = lambda call: replies.pop(0)
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     console.page.locator('#buildForm button[type="submit"]').click()
 
     expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
@@ -1175,13 +1253,12 @@ def test_late_build_response_cannot_overwrite_new_context(console: Console, chan
     console.page.wait_for_timeout(10)
     assert len(console.api.pending) == 1
     if change == "app":
-        console.page.locator('a[href="#appSection"]').click()
         console.load_app("beta")
     new_id = "new-build"
     new_appid = "beta" if change == "app" else "alpha"
     new_key = ("GET", f"/api/v1/jenkins/build_info/{new_id}")
     console.api.overrides[new_key] = Reply(build_record(new_id, "succeeded", appid=new_appid))
-    build_query(console, new_id)
+    history_query(console, build_record(new_id, "building", appid=new_appid))
     expect(console.page.locator("#buildStatus")).to_have_text("succeeded")
     console.api.paused.remove(old_key)
     console.api.release(reply=Reply(build_record(old_id, "failed")))
@@ -1198,11 +1275,11 @@ def test_late_create_receipt_is_ignored_after_app_switch(console: Console) -> No
     pause_clock(console.page)
     key = ("POST", "/api/v1/jenkins/build_create/alpha")
     console.api.paused.add(key)
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     console.page.locator('#buildForm button[type="submit"]').click()
     console.page.wait_for_timeout(10)
     assert len(console.api.pending) == 1
-    console.page.locator('a[href="#appSection"]').click()
+    console.page.locator("#buildModal .modal-close").click()
     console.load_app("beta")
     console.api.paused.remove(key)
     console.api.release()
@@ -1218,7 +1295,7 @@ def test_poll_errors_are_stale_quiet_and_retry_with_backoff(console: Console) ->
     key = ("GET", "/api/v1/jenkins/build_info/mock-submitted-build")
     replies = [Reply({"detail": "Temporary upstream failure"}, 503)] * 2 + [Reply(build_record("mock-submitted-build", "succeeded"))]
     console.api.overrides[key] = lambda call: replies.pop(0)
-    console.page.locator('a[href="#buildSection"]').click()
+    open_build_modal(console)
     console.page.locator('#buildForm button[type="submit"]').click()
     expect(console.page.locator("#buildStatus")).to_have_text("queued（受理回执）")
     console.page.clock.run_for(5000)
@@ -1269,8 +1346,8 @@ def test_history_inspection_tracks_build_separately_from_list_refresh(console: C
         console.api.overrides[("GET", f"/api/v1/jenkins/app_{resource}/alpha")] = Reply([])
     open_history_section(console)
     console.page.locator("#historyRefreshButton").click()
-    expect(console.page.locator(".history-detail-button")).to_have_count(1)
-    console.page.locator(".history-detail-button").click()
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(1)
+    console.page.locator("#buildTaskRows tr").click()
     expect(console.page.locator("#historyDetailBuild")).to_contain_text('"status": "building"')
     console.api.overrides[key] = Reply(build_record(build_id, "failed"))
     list_count = len(console.api.matching("GET", "/api/v1/jenkins/build_list"))
@@ -1382,14 +1459,14 @@ def test_history_is_scoped_to_open_app_and_rejects_other_app_records(console: Co
     console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [other_app_build], "page": 1, "page_size": 20, "total": 1})
     open_history_section(console)
     console.page.locator("#historyRefreshButton").click()
-    expect(console.page.locator("#historyTableBody tr")).to_have_count(0)
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(0)
     expect(console.page.locator("#toastRegion")).to_contain_text("历史任务响应包含其他应用的数据")
     assert "app_id=alpha" in console.api.matching("GET", "/api/v1/jenkins/build_list")[-1].query
 
     alpha_build = build_record("alpha-history-build", "succeeded", appid="alpha")
     console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [alpha_build], "page": 1, "page_size": 20, "total": 1})
     console.page.locator("#historyRefreshButton").click()
-    expect(console.page.locator(".history-detail-button")).to_have_count(1)
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(1)
     assert "app_id=alpha" in console.api.matching("GET", "/api/v1/jenkins/build_list")[-1].query
 
 
@@ -1399,10 +1476,68 @@ def test_app_list_is_the_only_top_level_entry_and_history_requires_open_app(cons
     expect(console.page.locator("#allHistoryNavigation")).to_have_count(0)
     before = len(console.api.matching("GET", "/api/v1/jenkins/build_list"))
 
-    console.page.evaluate("window.location.hash = '#historySection'")
+    console.page.evaluate("window.location.hash = '#buildSection'")
     expect(console.page.locator("#appListSection")).to_be_visible()
     expect(console.page).to_have_url(re.compile(r"#appListSection$"))
     assert len(console.api.matching("GET", "/api/v1/jenkins/build_list")) == before
+
+
+def test_split_task_pages_use_lists_modals_and_a_shared_detail_drawer(console: Console) -> None:
+    console.load_app()
+    console.page.get_by_role("link", name="静态检查").click()
+    expect(console.page.locator("#staticCheckTaskRows tr")).to_have_count(0)
+    console.page.locator("#newStaticCheckButton").click()
+    expect(console.page.locator("#staticCheckModal")).to_be_visible()
+    expect(console.page.locator("#routeCheckCommitId")).to_have_value(OLD_COMMIT)
+    console.page.locator("#staticRouteCheckButton").click()
+    expect(console.page.locator("#staticCheckModal")).to_be_hidden()
+    expect(console.page.locator("#staticCheckTaskRows tr")).to_have_count(1)
+    assert console.api.matching("POST", "/api/v1/apps/alpha/static-checks")[-1].body == {"commit_id": OLD_COMMIT}
+    console.page.locator("#staticCheckTaskRows tr").click()
+    expect(console.page.locator("#taskDetailDrawer")).to_be_visible()
+    expect(console.page.locator("#taskDetailTitle")).to_contain_text("静态检查详情")
+    console.page.locator("#taskDetailCloseButton").click()
+    expect(console.page.locator("#taskDetailDrawer")).to_be_hidden()
+
+    console.page.get_by_role("link", name="应用构建").click()
+    expect(console.page.locator("#historyEmpty")).to_be_visible()
+    console.page.locator("#newBuildButton").click()
+    expect(console.page.locator("#buildModal")).to_be_visible()
+    console.page.locator('#buildForm button[type="submit"]').click()
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(1)
+    row = console.page.locator("#buildTaskRows tr").first
+    expect(row.locator("td")).to_have_count(6)
+    row.click()
+    expect(console.page.locator("#taskDetailDrawer")).to_be_visible()
+    expect(console.page.locator("#taskDetailTitle")).to_contain_text("构建任务详情")
+    console.page.locator("#taskDetailCloseButton").click()
+
+    console.page.get_by_role("link", name="动态检查").click()
+    console.page.locator("#routeCheckBuildId").select_option("mock-deployed-build")
+    console.page.locator("#newDynamicCheckButton").click()
+    expect(console.page.locator("#dynamicCheckModal")).to_be_visible()
+    console.page.locator("#dynamicRouteCheckButton").click()
+    expect(console.page.locator("#dynamicCheckTaskRows tr")).to_have_count(1)
+    console.page.locator("#dynamicCheckTaskRows tr").click()
+    expect(console.page.locator("#taskDetailDrawer")).to_be_visible()
+    expect(console.page.locator("#taskDetailTitle")).to_contain_text("动态检查详情")
+    console.page.locator("#taskDetailCloseButton").click()
+    expect(console.page.locator("#taskDetailTitle")).to_contain_text("动态检查详情")
+
+
+def test_runtime_resource_panels_load_and_refresh_independently(console: Console) -> None:
+    console.load_app()
+    console.page.get_by_role("link", name="运行资源").click()
+    for resource in ("events", "images", "services", "access", "alerts"):
+        expect(console.page.locator(f"#resource-{resource}-status")).to_contain_text("最近刷新")
+    before = {resource: len(console.api.matching("GET", f"/api/v1/jenkins/app_{resource}/alpha"))
+              for resource in ("events", "images", "services", "access", "alerts")}
+    console.page.locator("#resource-images-refresh").click()
+    expect(console.page.locator("#resource-images-status")).to_contain_text("最近刷新")
+    after = {resource: len(console.api.matching("GET", f"/api/v1/jenkins/app_{resource}/alpha"))
+             for resource in before}
+    assert after["images"] == before["images"] + 1
+    assert all(after[resource] == before[resource] for resource in before if resource != "images")
 
 
 def test_long_app_cards_keep_open_buttons_inside_at_desktop_and_mobile(console: Console) -> None:
@@ -1464,7 +1599,7 @@ def test_selected_app_navigation_stays_grouped_on_narrow_screens(console: Consol
 @pytest.mark.parametrize("width", [390, 652, 1440])
 def test_console_uses_inner_scrolling_and_pins_account_menu_right(console: Console, width: int) -> None:
     console.page.set_viewport_size({"width": width, "height": 760})
-    console.page.locator('a[href="#appSection"]').click()
+    console.page.locator('.side-nav a[href="#appSection"]').click()
     assert console.page.evaluate("document.documentElement.scrollHeight <= window.innerHeight")
     assert console.page.evaluate("document.body.scrollHeight <= window.innerHeight")
     assert console.page.evaluate("window.scrollTo(0, 100); window.scrollY === 0")
@@ -1507,7 +1642,7 @@ def test_returning_to_app_list_clears_the_open_application_context(console: Cons
     expect(console.page.locator("#applicationNavigation")).to_be_visible()
     expect(console.page.locator("#selectedAppBanner")).to_have_count(0)
     expect(console.page.locator("#routeCheckAppId")).to_have_value("")
-    expect(console.page.locator("#historyTableBody tr")).to_have_count(0)
+    expect(console.page.locator("#buildTaskRows tr")).to_have_count(0)
     console.page.locator('.app-card button[data-appid="beta"]').click()
     expect(console.page.locator("#appId")).to_have_value("beta")
     expect(console.page.locator("#routeCheckAppId")).to_have_value("beta")
@@ -1542,6 +1677,23 @@ def test_agent_settings_read_and_write_role_configuration(console: Console) -> N
     assert update.body["output_schema"]["type"] == "object"
 
 
+def test_codex_settings_read_and_write_configuration_without_exposing_saved_key(console: Console) -> None:
+    console.page.locator("#globalTab").click()
+    console.page.locator('#globalNavigation a[href="#codexSettingsSection"]').click()
+    expect(console.page.locator("#codexProviderName")).to_have_value("测试中转")
+    expect(console.page.locator("#codexApiKeyStatus")).to_have_text("已配置（密钥不回显）")
+    expect(console.page.locator("#codexApiKey")).to_have_value("")
+
+    console.page.locator("#codexProviderName").fill("更新后的中转")
+    console.page.locator("#codexApiKey").fill("new-private-key")
+    console.page.locator("#saveCodexConfigButton").click()
+
+    expect(console.page.locator("#codexConfigStatus")).to_contain_text("已保存到数据库")
+    update = console.api.matching("PUT", "/api/v1/system/codex-config")[-1]
+    assert update.body["provider_name"] == "更新后的中转"
+    assert update.body["api_key"] == "new-private-key"
+
+
 def test_account_menu_groups_health_login_and_logout_actions(console: Console) -> None:
     console.open_account_menu()
     expect(console.page.locator("#healthButton")).to_be_visible()
@@ -1567,6 +1719,9 @@ def test_build_poll_stops_for_session_or_page_end(console: Console, end: str) ->
         console.page.clock.run_for(5000)
         console.page.wait_for_timeout(10)
         assert len(console.api.pending) == 1
+        # Task details are modal; close the drawer before using the top-bar
+        # account menu. Closing it also cancels the in-flight detail poll.
+        console.page.locator("#taskDetailCloseButton").click()
         console.logout()
         expect(console.page.locator("#sessionStatus")).to_have_text("未登录")
         console.api.release(reply=Reply(build_record(build_id, "failed")))
@@ -1598,15 +1753,15 @@ def test_access_region_is_populated_has_legacy_fallback_and_resets_with_app_cont
     key = ("GET", "/api/v1/jenkins/app_access/alpha")
     console.api.overrides[key] = Reply(payload)
     open_operation_subsection(console, "resourcesSection")
-    console.page.locator('button[data-resource="access"]').click()
+    console.page.locator("#resource-access-refresh").click()
     expect(console.page.locator("#serviceAccessRegion")).to_have_text("beijing")
 
     console.api.overrides[key] = Reply({name: value for name, value in payload.items() if name != "region"})
-    console.page.locator('button[data-resource="access"]').click()
+    console.page.locator("#resource-access-refresh").click()
     expect(console.page.locator("#serviceAccessRegion")).to_have_text("--")
 
     console.api.overrides[key] = Reply(payload)
-    console.page.locator('button[data-resource="access"]').click()
+    console.page.locator("#resource-access-refresh").click()
     expect(console.page.locator("#serviceAccessRegion")).to_have_text("beijing")
     console.load_app("beta")
     expect(console.page.locator("#serviceAccessRegion")).to_have_text("--")
@@ -1865,9 +2020,10 @@ def test_console_sync_and_refresh_times_use_east_eight_in_other_browser_timezone
     build_query(console, "timezone-build")
     expect(console.page.locator("#buildPollStatus")).to_contain_text("最近刷新：08:00:00")
     console.api.overrides[("GET", "/api/v1/jenkins/app_alerts/alpha")] = Reply([])
+    console.page.locator("#taskDetailCloseButton").click()
     open_operation_subsection(console, "resourcesSection")
-    console.page.locator('button[data-resource="alerts"]').click()
-    expect(console.page.locator("#resourceTimestamp")).to_have_text("08:00:00")
+    console.page.locator("#resource-alerts-refresh").click()
+    expect(console.page.locator("#resource-alerts-status")).to_have_text("最近刷新：08:00:00")
 
 
 @pytest.mark.parametrize("console", ["UTC", "America/New_York"], indirect=True)
@@ -1879,4 +2035,4 @@ def test_console_history_dates_use_east_eight_without_double_conversion(console:
     console.api.overrides[("GET", "/api/v1/jenkins/build_list")] = Reply({"items": [record], "page": 1, "page_size": 20, "total": 1})
     open_history_section(console)
     console.page.locator("#historyRefreshButton").click()
-    expect(console.page.locator("#historyTableBody")).to_contain_text("09:55:20")
+    expect(console.page.locator("#buildTaskRows")).to_contain_text("09:55:20")

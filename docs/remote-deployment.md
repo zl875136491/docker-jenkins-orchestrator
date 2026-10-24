@@ -33,13 +33,15 @@
 ## 启用真实检查和交付前还需配置
 
 - GitLab URL 和 Token：静态检查需要访问关联仓库并 checkout 固定 commit。
-- `OPENAI_API_KEY`，或在 Worker 的 `codex-data` volume 中完成 Codex CLI 登录。
+- `CODEX_PROVIDER_NAME`、`CODEX_PROVIDER_ENDPOINT`、`CODEX_API_KEY`、`CODEX_DEFAULT_MODEL`、`CODEX_DEFAULT_EFFORT`：API 启动时优先加载 MongoDB 中的有效配置；首次启动使用 `.env` 初始化，并用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存 API Key。Worker 从 MongoDB 获取该配置，不把 API Key 放入 Worker 环境变量。
+- 登录控制台后，可在全局 → Codex 配置查看和修改 Provider；页面不会回显 API Key，留空保存会保留现有密钥。
+- 若 Worker 不能直连模型 API，在权限为 `0600` 的 `.env` 设置 `ORCHESTRATOR_CODEX_HTTPS_PROXY` 为可访问模型 API 的 HTTP(S) CONNECT 代理 URL；该值由 Worker 单独传给 Codex CLI 子进程，不设置为 Worker 的全局 `HTTPS_PROXY`，避免 GitLab、Jenkins 等服务请求误走模型代理。
 - Jenkins URL、用户、密码和 Job；Harbor URL、用户和密码。
 - Docker Engine socket。该 Worker 可控制主机 Docker；只应运行可信仓库。
 - 当前 Docker Engine 的 Swarm 状态是 `inactive`。真正部署用户服务及完成动态检查前，需要专用且经授权的 Swarm Engine。因为主机已有其他容器，此部署不自行执行 `docker swarm init`，避免改变共享 Engine 状态。
 
 - GitLab URL/Token、Jenkins 地址/用户/密码和 Harbor 地址/用户/密码当前未配置；GitLab checkout、镜像发布及真实 Jenkins 交付还不能工作。
-- Worker 环境中存在非空 `OPENAI_API_KEY`，但未发起模型请求验证密钥有效性或配额；Codex CLI volume 当前没有登录。请完成实际凭据验证后再触发静态检查。
+- 2026-10-23 复核：Worker 经 `ORCHESTRATOR_CODEX_HTTPS_PROXY` 可建立模型 API HTTPS 隧道；原先对官方 `/v1/models` 的验证返回 HTTP 401。系统现在支持自定义 Codex Provider，部署后仍需通过真实 Codex CLI 请求确认内部中转服务的鉴权和 Responses API 兼容性。
 - Worker 挂载 Docker socket 并以 root 运行 Celery（日志会显示 Celery 超级用户警告），这赋予其接近宿主机 root 的 Docker 权限。仅允许可信仓库访问此控制面，并限制 8088 的网络来源；不要将服务直接暴露到不可信网络。
 - 当前 Docker Engine 的 Swarm 为 `inactive`；真实服务部署及动态探针还需要单独确认并授权该主机的 Swarm 用途。本次没有运行真实仓库检查、模型请求或 Swarm 服务部署。
 

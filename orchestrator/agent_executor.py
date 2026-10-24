@@ -24,6 +24,7 @@ from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
 from orchestrator.models import AgentRole
+from orchestrator.codex_config import CodexProviderConfig, codex_cli_overrides
 
 
 class AgentExecutionError(RuntimeError):
@@ -139,12 +140,18 @@ class CodexCliExecutor:
         *,
         runner: Any | None = None,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        provider_config: Any | None = None,
+        require_provider: bool = False,
+        https_proxy: str | None = None,
     ) -> None:
         if isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes < 1:
             raise ValueError("max_output_bytes must be a positive integer")
         self.executable = executable
         self.runner = runner if runner is not None else _run_process_group
         self.max_output_bytes = max_output_bytes
+        self.provider_config = provider_config
+        self.require_provider = require_provider
+        self.https_proxy = https_proxy
 
     @staticmethod
     def _environment(env: Mapping[str, str] | None) -> dict[str, str]:
@@ -245,6 +252,20 @@ class CodexCliExecutor:
     ) -> dict[str, Any]:
         schema_text, validator = self._schema(role)
         process_env = self._environment(env)
+        if self.https_proxy:
+            process_env["HTTPS_PROXY"] = self.https_proxy
+        provider = None
+        if self.provider_config is not None:
+            if hasattr(self.provider_config, "resolve"):
+                provider, _ = self.provider_config.resolve(required=self.require_provider)
+            elif callable(self.provider_config):
+                provider = self.provider_config()
+            if provider is None and self.require_provider:
+                raise AgentExecutionError("Codex provider configuration is unavailable")
+            if provider is not None:
+                if not isinstance(provider, CodexProviderConfig):
+                    raise AgentExecutionError("Codex provider configuration is invalid")
+                process_env["CODEX_API_KEY"] = provider.api_key.get_secret_value()
         executable = self._executable(process_env)
         try:
             workdir = Path(cwd).resolve(strict=True)
@@ -293,10 +314,14 @@ class CodexCliExecutor:
                 ])
                 if config.skip_git_repo_check:
                     command.append("--skip-git-repo-check")
-                if config.model:
-                    command.extend(["--model", config.model])
-                if config.reasoning_effort:
-                    command.extend(["-c", f"model_reasoning_effort={json.dumps(config.reasoning_effort)}"])
+                if provider is not None:
+                    command.extend(codex_cli_overrides(provider))
+                model = config.model or (provider.default_model if provider is not None else None)
+                reasoning_effort = config.reasoning_effort or (provider.default_effort if provider is not None else None)
+                if model:
+                    command.extend(["--model", model])
+                if reasoning_effort:
+                    command.extend(["-c", f"model_reasoning_effort={json.dumps(reasoning_effort)}"])
                 # Never expose application logs, environment secrets or the
                 # prompt itself in argv/process listings.
                 command.append("-")

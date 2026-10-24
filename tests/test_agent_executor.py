@@ -144,6 +144,15 @@ def test_environment_inherits_runtime_auth_and_explicit_overrides_not_worker_cre
     assert "APPLICATION_TOKEN" not in os.environ
 
 
+def test_codex_proxy_is_injected_only_into_the_codex_subprocess(tmp_path, monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    runner = RecordingRunner()
+    executor(runner, https_proxy="http://codex-proxy.example:7890").run_json(role(), {}, cwd=tmp_path)
+    child_environment = runner.calls[0][1]["env"]
+    assert child_environment["HTTPS_PROXY"] == "http://codex-proxy.example:7890"
+    assert "HTTPS_PROXY" not in os.environ
+
+
 @pytest.mark.parametrize("credential", ["CODEX_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"])
 @pytest.mark.parametrize("value", ["", " \t\n"])
 def test_blank_api_key_overrides_do_not_mask_persisted_cli_auth(tmp_path, monkeypatch, credential, value):
