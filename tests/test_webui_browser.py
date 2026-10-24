@@ -1560,8 +1560,9 @@ def test_runtime_resource_panels_load_and_refresh_independently(console: Console
         expect(console.page.locator(f"#resource-{resource}-status")).to_contain_text("最近刷新")
     expect(console.page.locator("#resource-events-output")).to_have_text("[]")
     output_style = console.page.locator("#resource-events-output").evaluate(
-        "item => ({color: getComputedStyle(item).color, background: getComputedStyle(item).backgroundColor, maxHeight: getComputedStyle(item).maxHeight, overflow: getComputedStyle(item).overflow})"
+        "item => ({classes: item.className, color: getComputedStyle(item).color, background: getComputedStyle(item).backgroundColor, maxHeight: getComputedStyle(item).maxHeight, overflow: getComputedStyle(item).overflow})"
     )
+    assert output_style["classes"] == "resource-panel-output"
     assert output_style["color"] == "rgb(27, 42, 48)"
     assert output_style["background"] == "rgb(237, 243, 241)"
     assert output_style["maxHeight"] == "none"

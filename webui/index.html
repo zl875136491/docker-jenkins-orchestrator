@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#18252c" />
     <title>Orchestrator Control</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=20261024-runtime-resource-contrast-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20261024-resource-output-isolated-1" />
   </head>
   <body>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
@@ -602,7 +602,7 @@
                   </div>
                   <button id="resource-events-refresh" class="button button-quiet" data-resource-refresh="events" type="button">刷新</button>
                 </div>
-                <pre id="resource-events-output" class="resource-panel-output json-output tall" aria-live="polite">等待查询事件</pre>
+                <pre id="resource-events-output" class="resource-panel-output" aria-live="polite">等待查询事件</pre>
               </section>
 
               <section id="resourcePanel-images" class="resource-panel" aria-labelledby="resource-images-title">
@@ -614,7 +614,7 @@
                   </div>
                   <button id="resource-images-refresh" class="button button-quiet" data-resource-refresh="images" type="button">刷新</button>
                 </div>
-                <pre id="resource-images-output" class="resource-panel-output json-output tall" aria-live="polite">等待查询用户镜像</pre>
+                <pre id="resource-images-output" class="resource-panel-output" aria-live="polite">等待查询用户镜像</pre>
               </section>
 
               <section id="resourcePanel-services" class="resource-panel" aria-labelledby="resource-services-title">
@@ -626,7 +626,7 @@
                   </div>
                   <button id="resource-services-refresh" class="button button-quiet" data-resource-refresh="services" type="button">刷新</button>
                 </div>
-                <pre id="resource-services-output" class="resource-panel-output json-output tall" aria-live="polite">等待查询 Docker Services</pre>
+                <pre id="resource-services-output" class="resource-panel-output" aria-live="polite">等待查询 Docker Services</pre>
               </section>
 
               <section id="resourcePanel-access" class="resource-panel service-access" aria-labelledby="serviceAccessTitle">
@@ -656,7 +656,7 @@
                 </table>
                 <p id="serviceAccessEmpty" class="access-empty muted">请先登录并从应用列表打开应用，再查询访问入口。</p>
                 </div>
-                <pre id="resource-access-output" class="resource-panel-output json-output" aria-live="polite">等待查询访问入口</pre>
+                <pre id="resource-access-output" class="resource-panel-output" aria-live="polite">等待查询访问入口</pre>
               </section>
 
               <section id="resourcePanel-alerts" class="resource-panel" aria-labelledby="resource-alerts-title">
@@ -668,7 +668,7 @@
                   </div>
                   <button id="resource-alerts-refresh" class="button button-quiet" data-resource-refresh="alerts" type="button">刷新</button>
                 </div>
-                <pre id="resource-alerts-output" class="resource-panel-output json-output tall" aria-live="polite">等待查询告警</pre>
+                <pre id="resource-alerts-output" class="resource-panel-output" aria-live="polite">等待查询告警</pre>
               </section>
             </div>
           </section>
