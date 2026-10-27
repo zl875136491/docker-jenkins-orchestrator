@@ -1553,9 +1553,26 @@ def test_refresh_restores_session_app_section_and_tolerates_optional_load_failur
     assert style["overflow"] == "visible"
 
 
+def test_workspace_pages_share_the_same_page_heading_without_metric_strip(console: Console) -> None:
+    console.load_app()
+    expect(console.page.locator(".metric-strip")).to_have_count(0)
+    section_ids = (
+        "appListSection", "appSection", "workspaceSection", "staticChecksSection", "buildSection",
+        "dynamicChecksSection", "operationSection", "buildResourcesSection", "resourcesSection",
+        "templatesSection", "baseImagesSection", "codexSettingsSection", "agentSettingsSection",
+    )
+    for section_id in section_ids:
+        heading = console.page.locator(f"#{section_id} > .page-heading")
+        expect(heading).to_have_count(1)
+        expect(heading.locator(":scope > div:first-child > .eyebrow")).to_have_count(1)
+        expect(heading.locator(":scope > div:first-child > h2")).to_have_count(1)
+        expect(heading.locator(":scope > div:first-child > p.muted")).to_have_count(1)
+
+
 def test_runtime_resource_panels_load_and_refresh_independently(console: Console) -> None:
     console.load_app()
     console.page.get_by_role("link", name="运行资源").click()
+    expect(console.page.locator("#resourcesSection .resource-panels > section").first).to_have_id("resourcePanel-access")
     for resource in ("events", "images", "services", "access", "alerts"):
         expect(console.page.locator(f"#resource-{resource}-status")).to_contain_text("最近刷新")
     expect(console.page.locator("#resource-events-output")).to_have_text("[]")

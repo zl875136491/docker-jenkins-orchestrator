@@ -66,7 +66,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   justify-content: space-between;
   opacity: 0;
   padding: 12px 12px 12px 14px;
-  pointer-events: auto;
+  pointer-events: none;
   transform: translateY(-8px);
   transition: opacity 160ms ease, transform 160ms ease;
 }
@@ -75,7 +75,7 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .toast-content { display: grid; gap: 2px; min-width: 0; }
 .toast-title { color: #8e3427; font-size: 12px; }
 .toast-message { color: var(--ink); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.toast-close { background: transparent; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 0 2px; }
+.toast-close { background: transparent; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 0 2px; pointer-events: auto; }
 .toast-close:hover { color: var(--ink); }
 
 .topbar {
@@ -289,6 +289,12 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .section-heading.compact { align-items: flex-start; margin-bottom: 16px; }
 .section-heading h2 { font-size: 22px; letter-spacing: 0; margin: 0; }
 .section-heading.compact h2 { font-size: 16px; }
+.page-heading { align-items: flex-start; margin-bottom: 26px; }
+.page-heading > div:first-child { min-width: 0; }
+.page-heading .eyebrow { font-size: 12px; letter-spacing: 0.22em; margin-bottom: 9px; }
+.page-heading h2 { font-size: clamp(32px, 3vw, 40px); line-height: 1.14; margin: 0 0 12px; }
+.page-heading > div:first-child > .muted { font-size: 17px; line-height: 1.65; margin: 0; max-width: 78ch; }
+.page-heading .section-heading-actions { align-self: flex-start; }
 .section-note { color: var(--muted); font-size: 12px; }
 
 .stack-form { display: grid; gap: 12px; }
@@ -379,13 +385,6 @@ textarea { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace
 .meta-label { font-size: 10px; font-weight: 800; letter-spacing: 0.14em; }
 code { background: #e7efed; border: 1px solid var(--line); border-radius: 3px; color: var(--teal-dark); font-size: 11px; padding: 5px 7px; }
 pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
-
-.metric-strip { border-bottom: 1px solid var(--line-strong); border-top: 1px solid var(--line-strong); display: grid; grid-template-columns: repeat(3, 1fr); margin: 0 auto 34px; max-width: 1180px; }
-.metric-cell { min-height: 78px; padding: 14px 16px; }
-.metric-cell + .metric-cell { border-left: 1px solid var(--line); }
-.metric-label { color: var(--muted); display: block; font-size: 11px; font-weight: 700; margin-bottom: 5px; }
-.metric-cell strong { display: block; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.metric-health strong { color: var(--teal); }
 
 .app-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); margin-top: 20px; }
 .app-card { align-items: center; background: #fff; border: 1px solid var(--line); border-radius: 6px; display: flex; gap: 14px; justify-content: space-between; min-width: 0; padding: 18px; }
@@ -687,9 +686,6 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
   .app-selector-label select { min-width: 0; }
   .modal-shell { padding: 12px; }
   .modal-card { max-height: calc(100vh - 24px); padding: 18px; }
-  .metric-strip { grid-template-columns: repeat(2, 1fr); }
-  .metric-cell:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
-  .metric-cell:nth-child(4) { border-top: 1px solid var(--line); }
   .form-grid, .split-panel, .metadata-grid { grid-template-columns: 1fr; }
   .codex-config-grid { grid-template-columns: 1fr; }
   .codex-config-wide { grid-column: auto; }
@@ -708,6 +704,9 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
   .task-list-table { min-width: 620px; }
   .task-detail-drawer-panel { border-left: 0; padding: 18px 15px; width: 100vw; }
   .build-task-summary { grid-template-columns: minmax(0, 1fr); }
+  .page-heading { flex-direction: column; gap: 12px; }
+  .page-heading h2 { font-size: 32px; }
+  .page-heading > div:first-child > .muted { font-size: 15px; }
   .resource-panel { padding: 12px; }
   .resource-panel-output { padding: 9px; }
   .navigation-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }

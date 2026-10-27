@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#18252c" />
     <title>Orchestrator Control</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=20261024-resource-output-isolated-1" />
+    <link rel="stylesheet" href="/ui/styles.css?v=20261026-page-heading-1" />
   </head>
   <body>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
@@ -162,26 +162,12 @@
         </aside>
 
         <main class="workspace">
-          <section class="metric-strip" aria-label="当前状态摘要">
-            <div class="metric-cell">
-              <span class="metric-label">最近构建</span>
-              <strong id="metricBuild">--</strong>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-label">服务</span>
-              <strong id="metricServices">--</strong>
-            </div>
-            <div class="metric-cell metric-health">
-              <span class="metric-label">API 状态</span>
-              <strong id="metricHealth">未检查</strong>
-            </div>
-          </section>
-
           <section id="appListSection" class="workspace-section default-section" aria-labelledby="appListTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">APPLICATIONS</p>
                 <h2 id="appListTitle">应用列表</h2>
+                <p class="muted">查看和管理当前系统中的应用，或创建新的应用工作区。</p>
               </div>
               <div class="button-row">
                 <button id="refreshAppsButton" class="button button-secondary" type="button">刷新列表</button>
@@ -194,10 +180,11 @@
           </section>
 
           <section id="appSection" class="workspace-section">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">01 / APPLICATION</p>
                 <h2>应用详情</h2>
+                <p class="muted">维护当前应用的代码仓库、构建参数和部署配置。</p>
               </div>
               <div class="section-heading-actions">
                 <button id="patchAppButton" class="button button-primary" type="button">更新信息</button>
@@ -273,10 +260,11 @@
           </section>
 
           <section id="workspaceSection" class="workspace-section" aria-labelledby="workspaceTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">APP / WORKSPACE FILES</p>
                 <h2 id="workspaceTitle">文件管理</h2>
+                <p class="muted">管理当前应用的工作区文件，为后续构建准备源码和配置。</p>
               </div>
             </div>
             <p class="muted small">当前 App ID：<strong id="workspaceAppId">未设置</strong>。文件按应用独立存储；先上传源码和配置，再创建新的构建。</p>
@@ -338,7 +326,7 @@
           </section>
 
           <section id="staticChecksSection" class="workspace-section" aria-labelledby="staticChecksTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">STATIC VALIDATION</p>
                 <h2 id="staticChecksTitle">静态检查</h2>
@@ -385,17 +373,17 @@
           </section>
 
           <section id="buildSection" class="workspace-section" aria-labelledby="buildTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">BUILD PIPELINE</p>
                 <h2 id="buildTitle">应用构建</h2>
+                <p class="muted">历史任务已合并到应用构建列表。提交后 HTTP 202 表示任务已受理，不代表构建完成；选择任务可查看构建及关联资源详情。</p>
               </div>
               <div class="section-heading-actions">
                 <button id="historyRefreshButton" class="button button-quiet" type="button">刷新历史</button>
                 <button id="newBuildButton" class="button button-primary" type="button">新建构建</button>
               </div>
             </div>
-            <p class="muted small">历史任务已合并到应用构建列表。提交后 HTTP 202 表示任务已受理，不代表构建完成；选择任务可查看构建及关联资源详情。</p>
             <form id="historyFilterForm" class="history-controls">
               <label>
                 应用
@@ -460,7 +448,7 @@
           </section>
 
           <section id="dynamicChecksSection" class="workspace-section" aria-labelledby="dynamicChecksTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">DYNAMIC VALIDATION</p>
                 <h2 id="dynamicChecksTitle">动态检查</h2>
@@ -493,7 +481,7 @@
           </section>
 
           <section id="operationSection" class="workspace-section" aria-labelledby="operationTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">04 / OPERATIONS</p>
                 <h2 id="operationTitle">应用操作</h2>
@@ -566,7 +554,7 @@
           </aside>
 
           <section id="buildResourcesSection" class="workspace-section">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">BUILD RESOURCE LIFECYCLE</p>
                 <h2>构建资源与清理</h2>
@@ -585,14 +573,44 @@
           </section>
 
           <section id="resourcesSection" class="workspace-section">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">04 / OBSERVABILITY</p>
                 <h2>运行资源</h2>
+                <p class="muted">查看当前应用的运行事件、镜像、服务访问入口和告警。</p>
               </div>
-              <span class="section-note">纵向查看各类运行资源；每栏可独立刷新</span>
             </div>
             <div class="resource-panels">
+              <section id="resourcePanel-access" class="resource-panel service-access" aria-labelledby="serviceAccessTitle">
+                <div class="inline-heading">
+                <div>
+                  <h3 id="serviceAccessTitle">服务访问入口</h3>
+                  <p id="serviceAccessSummary" class="muted small">查询后显示已发布端口和可访问 URL。</p>
+                  <p class="muted small">工作节点区域：<strong id="serviceAccessRegion">--</strong></p>
+                  <p id="resource-access-status" class="muted small" role="status" aria-live="polite">尚未获取</p>
+                </div>
+                <button id="resource-access-refresh" class="button button-quiet" data-resource-refresh="access" type="button">刷新入口</button>
+                </div>
+                <div class="access-table-wrap">
+                <table id="serviceAccessTable" class="access-table" hidden>
+                  <thead>
+                    <tr>
+                      <th scope="col">Build ID</th>
+                      <th scope="col">服务</th>
+                      <th scope="col">镜像</th>
+                      <th scope="col">状态</th>
+                      <th scope="col">已发布端口</th>
+                      <th scope="col">访问 URL</th>
+                      <th scope="col">说明</th>
+                    </tr>
+                  </thead>
+                  <tbody id="serviceAccessTableBody"></tbody>
+                </table>
+                <p id="serviceAccessEmpty" class="access-empty muted">请先登录并从应用列表打开应用，再查询访问入口。</p>
+                </div>
+                <pre id="resource-access-output" class="resource-panel-output" aria-live="polite">等待查询访问入口</pre>
+              </section>
+
               <section id="resourcePanel-events" class="resource-panel" aria-labelledby="resource-events-title">
                 <div class="inline-heading">
                   <div>
@@ -629,36 +647,6 @@
                 <pre id="resource-services-output" class="resource-panel-output" aria-live="polite">等待查询 Docker Services</pre>
               </section>
 
-              <section id="resourcePanel-access" class="resource-panel service-access" aria-labelledby="serviceAccessTitle">
-                <div class="inline-heading">
-                <div>
-                  <h3 id="serviceAccessTitle">服务访问入口</h3>
-                  <p id="serviceAccessSummary" class="muted small">查询后显示已发布端口和可访问 URL。</p>
-                  <p class="muted small">工作节点区域：<strong id="serviceAccessRegion">--</strong></p>
-                  <p id="resource-access-status" class="muted small" role="status" aria-live="polite">尚未获取</p>
-                </div>
-                <button id="resource-access-refresh" class="button button-quiet" data-resource-refresh="access" type="button">刷新入口</button>
-                </div>
-                <div class="access-table-wrap">
-                <table id="serviceAccessTable" class="access-table" hidden>
-                  <thead>
-                    <tr>
-                      <th scope="col">Build ID</th>
-                      <th scope="col">服务</th>
-                      <th scope="col">镜像</th>
-                      <th scope="col">状态</th>
-                      <th scope="col">已发布端口</th>
-                      <th scope="col">访问 URL</th>
-                      <th scope="col">说明</th>
-                    </tr>
-                  </thead>
-                  <tbody id="serviceAccessTableBody"></tbody>
-                </table>
-                <p id="serviceAccessEmpty" class="access-empty muted">请先登录并从应用列表打开应用，再查询访问入口。</p>
-                </div>
-                <pre id="resource-access-output" class="resource-panel-output" aria-live="polite">等待查询访问入口</pre>
-              </section>
-
               <section id="resourcePanel-alerts" class="resource-panel" aria-labelledby="resource-alerts-title">
                 <div class="inline-heading">
                   <div>
@@ -674,12 +662,12 @@
           </section>
 
           <section id="templatesSection" class="workspace-section">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">05 / TECHNOLOGY STACKS</p>
                 <h2>技术栈工作区</h2>
+                <p class="muted">维护技术栈目录，并组合生成应用所需的 Compose 配置。</p>
               </div>
-              <span class="section-note">维护技术栈目录，并组合生成 Compose</span>
             </div>
 
             <div class="template-toolbar" aria-label="技术栈工具栏">
@@ -793,12 +781,12 @@
           </section>
 
           <section id="baseImagesSection" class="workspace-section last-section">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">06 / REGISTRY</p>
                 <h2>基础镜像</h2>
+                <p class="muted">查看基础镜像同步记录，或投递新的同步任务。</p>
               </div>
-              <span class="section-note">查看同步记录或投递同步任务</span>
             </div>
             <div class="resource-actions">
               <button id="loadBaseImagesButton" class="button button-secondary" type="button">刷新基础镜像</button>
@@ -808,7 +796,7 @@
           </section>
 
           <section id="codexSettingsSection" class="workspace-section last-section" aria-labelledby="codexSettingsTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">GLOBAL / CODEX PROVIDER</p>
                 <h2 id="codexSettingsTitle">Codex 配置</h2>
@@ -871,7 +859,7 @@
           </section>
 
           <section id="agentSettingsSection" class="workspace-section last-section" aria-labelledby="agentSettingsTitle">
-            <div class="section-heading">
+            <div class="section-heading page-heading">
               <div>
                 <p class="eyebrow">GLOBAL / AGENT</p>
                 <h2 id="agentSettingsTitle">Agent 设置</h2>
@@ -909,6 +897,6 @@
         </main>
       </div>
     </div>
-    <script src="/ui/app.js?v=20261024-frontend-fix-2" defer></script>
+    <script src="/ui/app.js?v=20261026-page-heading-1" defer></script>
   </body>
 </html>

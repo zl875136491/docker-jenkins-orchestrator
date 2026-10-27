@@ -622,7 +622,6 @@
     $("serviceAccessEmpty").hidden = false;
     $("serviceAccessEmpty").textContent = "请先登录并从应用列表打开应用，再查询访问入口。";
     resetResourceView();
-    $("metricServices").textContent = "--";
     clearRouteCheckResults();
     setRouteCheckStatus("选择应用后可提交静态检查。", "muted", "staticRouteCheckStatus");
     setRouteCheckStatus("选择应用和构建后可提交动态重验。", "muted", "dynamicRouteCheckStatus");
@@ -1225,7 +1224,6 @@
     state.buildAppid = appid;
     state.latestBuild = build;
     $("buildId").value = state.buildId;
-    $("metricBuild").textContent = build.status || "--";
     if ($("buildStatus")) {
       $("buildStatus").textContent = build.status || "--";
       $("buildStatus").className = `status-pill ${statusClass(build.status)}`;
@@ -1253,7 +1251,7 @@
     state.buildLastRefreshedAt = "";
     state.buildId = keepInput ? $("buildId")?.value || "" : "";
     if (!keepInput && $("buildId")) $("buildId").value = "";
-    ["metricBuild", "buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => {
+    ["buildStatus", "jenkinsBuild", "celeryTask", "buildCommit"].forEach((id) => {
       if ($(id)) $(id).textContent = "--";
     });
     if ($("buildStatus")) $("buildStatus").className = "status-pill neutral";
@@ -1269,7 +1267,6 @@
   function markBuildStale(label = "未刷新") {
     if (!state.latestBuild) return;
     const status = state.latestBuild.status || "未知";
-    $("metricBuild").textContent = `${status}（${label}）`;
     if ($("buildStatus")) $("buildStatus").textContent = `${status}（${label}）`;
   }
 
@@ -2594,7 +2591,6 @@
       const output = $(outputId);
       if (output) prettyNode(output, value);
       if (status) status.textContent = `最近刷新：${formatTime()}`;
-      if (resource === "services" && Array.isArray(value)) $("metricServices").textContent = String(value.length);
       if (resource === "access") {
         renderServiceAccess(value);
         if (output) output.hidden = true;
@@ -3031,9 +3027,7 @@
       setActivity("已退出", "success");
     });
     $("healthButton").addEventListener("click", () => withFeedback(async () => {
-      const value = await request("/healthz");
-      $("metricHealth").textContent = value.status || "ok";
-      return value;
+      return request("/healthz");
     }, null));
     $("appId").addEventListener("input", () => {
       if (state.appid) return;
