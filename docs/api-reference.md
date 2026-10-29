@@ -152,21 +152,57 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jenkins/buil
 
 常见错误：`401` 为客户端凭据或 Bearer 令牌无效，`404` 为应用或构建不存在，`409` 为 appid 重复，`422` 为请求或 Compose 无效。
 
-### Jenkins 失败诊断
+### Jenkins / 动态检查失败诊断
 
-Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建的限量控制台日志，将可识别的失败阶段、构建节点、日志行号、底层错误与退出码追加到原有错误字符串。告警继续使用原有 `message`，不新增字段；构建详情的 `error` 和 `build.alert` 事件的 `message` 保存相同内容，现有调用方式不变。例如：
+Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建的限量控制台日志，将可识别的失败阶段、构建节点、日志行号、底层错误与退出码追加到原有错误字符串。动态路由检查失败时，会附带探针结果与容器日志摘录。
+
+**兼容字段（保持不变）**：`build.error`、`app_alerts[].message`、`build.alert` 事件的 `message`、`dynamic_report_text` 仍为可读摘要字符串，现有轮询方式不变。
+
+**新增结构化字段（`GET /api/v1/jenkins/build_info/{build_id}`）**：
+
+| 字段 | 说明 |
+| --- | --- |
+| `error_detail` | 失败现场对象：`stage` / `node` / `location` / `source_file` / `cause` / `reason` / `exit_code` / `console_line` / `build_id` / `jenkins_build_number` / `jenkins_job` / `recognized` / `summary` 等 |
+| `raw_log_excerpt` | 脱敏后的关键日志摘录（Jenkins 控制台附近行，或动态失败时的容器日志拼接） |
+| `failure_logs` | 日志袋：`source`（`jenkins_console` / `container_logs`）及对应摘录 |
+
+`build.alert` 事件的 `details` 会附带 `error_detail` 与 `raw_log_excerpt_preview`（截断预览）；完整摘录以 `build_info` 为准。
+
+示例：
 
 ```json
 {
-  "message": "Jenkins build finished with FAILURE；Jenkins #67；阶段=Checkout；节点=builder；位置=console L42；原因=DNS 解析失败：fatal: unable to access 'https://gitlab.example/team/app.git/': Could not resolve host: gitlab.example；退出码=128"
+  "error": "Jenkins build finished with FAILURE；Jenkins #114；阶段=Build And Push；位置=Dockerfile:4，console L79；原因=连接失败：... connection refused；退出码=1",
+  "error_detail": {
+    "stage": "Build And Push",
+    "source_file": "Dockerfile:4",
+    "cause": "连接失败",
+    "location": "console L79",
+    "exit_code": "1",
+    "jenkins_build_number": 114,
+    "build_id": "efde613a...",
+    "recognized": true
+  },
+  "raw_log_excerpt": "   L71: ...
+>> L79: dial tcp ... connection refused
+...",
+  "failure_logs": {"source": "jenkins_console", "raw_log_excerpt": "..."}
 }
 ```
 
 诊断直接保留日志证据，不凭最终 `FAILURE` 猜测根因。当前可识别 DNS、连接、TLS、认证/权限、缺少文件、Node engines、存储和端口错误；编译错误保留源码位置，Dockerfile 和 Python traceback 可补充文件行号。跳过的阶段、流水线最终退出包装与 Post Actions 中的后续错误不会覆盖已捕获的主失败。
 
-仅失败终态读取日志，成功构建不增加日志请求。优先用 `HEAD logText/progressiveText` 的 `X-Text-Size` 定位最后 128 KiB，实际响应最多读取 256 KiB；不支持 HEAD 或缺少长度时限量读取开头。尾部片段行号会明确标注为片段内行号及字节起点，不冒充全日志绝对行号。错误字符串上限 1500 字符。
+仅失败终态读取日志，成功构建不增加日志请求。优先用 `HEAD logText/progressiveText` 的 `X-Text-Size` 定位最后窗口（默认 **256 KiB**，配置项 `ORCHESTRATOR_JENKINS_CONSOLE_WINDOW_BYTES`），实际响应最多读取窗口的 2 倍。尾部片段行号会明确标注为片段内行号及字节起点。
 
-日志内容在进入告警前会移除终端控制序列，脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，追加可读的兜底提示，不阻止构建失败状态持久化。
+**截断上限（可配置）**：
+
+| 配置 | 默认 | 作用 |
+| --- | --- | --- |
+| `ORCHESTRATOR_FAILURE_SUMMARY_MAX_CHARS` | 4000 | `error` / alert `message` 摘要上限（原约 1200–1500） |
+| `ORCHESTRATOR_FAILURE_LOG_EXCERPT_MAX_CHARS` | 8000 | `raw_log_excerpt` / `failure_logs` 摘录上限 |
+| `ORCHESTRATOR_JENKINS_CONSOLE_WINDOW_BYTES` | 262144 | Jenkins progressiveText 读取窗口 |
+
+日志内容在进入告警前会移除终端控制序列，脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，追加可读的兜底提示，并尽量填充 `error_detail.recognized=false`。
 
 本机制在新版 worker 运行后对后续失败生效，不自动改写历史告警，也不要求调整应用 Compose、Dockerfile 或 Jenkins 共享 job。
 

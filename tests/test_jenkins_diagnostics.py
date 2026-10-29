@@ -4,7 +4,12 @@ from urllib.parse import quote
 
 import pytest
 
-from orchestrator.jenkins_diagnostics import redact_console, summarize_failure
+from orchestrator.jenkins_diagnostics import (
+    DEFAULT_SUMMARY_MAX_CHARS,
+    diagnose_failure,
+    redact_console,
+    summarize_failure,
+)
 
 
 def test_checkout_failure_keeps_original_stage_and_evidence_not_skipped_stages():
@@ -222,7 +227,7 @@ def test_very_long_lines_and_json_escaped_inputs_are_safely_bounded():
     secret = 'multiline\\quoted"input'
     console = "ERROR: " + "x" * (256 * 1024) + " " + json.dumps(secret)
     summary = summarize_failure(console, sensitive_values=[secret])
-    assert len(summary) <= 1200
+    assert len(summary) <= DEFAULT_SUMMARY_MAX_CHARS
     assert json.dumps(secret)[1:-1] not in summary
 
 
@@ -259,5 +264,51 @@ def test_redaction_removes_credentials_without_changing_console_line_numbers():
 def test_summary_is_bounded_and_does_not_truncate_secrets_before_redaction():
     secret = "credential-that-must-not-survive"
     summary = summarize_failure("ERROR: " + "x" * 400 + " password=" + secret + " " + "y" * 2000)
-    assert len(summary) <= 1200
+    assert len(summary) <= DEFAULT_SUMMARY_MAX_CHARS
     assert secret not in summary
+
+
+def test_diagnose_failure_returns_structured_site_and_excerpt():
+    console = "\n".join([
+        "Running on builder in /opt/jenkins-agent/workspace/app",
+        "[Pipeline] { (Build And Push)",
+        "Dockerfile:4",
+        "ERROR: failed to solve: failed to fetch m.daocloud.io/auth/token: connection refused",
+        "ERROR: script returned exit code 1",
+        "Finished: FAILURE",
+    ])
+    diagnostic = diagnose_failure(console)
+    assert diagnostic.recognized is True
+    assert diagnostic.stage == "Build And Push"
+    assert diagnostic.node == "builder"
+    assert diagnostic.source_file == "Dockerfile:4"
+    assert diagnostic.cause == "连接失败"
+    assert "连接失败" in diagnostic.summary
+    assert "refused" in diagnostic.reason
+    assert diagnostic.exit_code == "1"
+    assert diagnostic.console_line is not None
+    assert ">> L" in diagnostic.raw_log_excerpt
+    assert "refused" in diagnostic.raw_log_excerpt
+    detail = diagnostic.to_error_detail(build_id="abc", jenkins_build_number=114, result="FAILURE")
+    assert detail["build_id"] == "abc"
+    assert detail["jenkins_build_number"] == 114
+    assert detail["source_file"] == "Dockerfile:4"
+    assert detail["cause"] == "连接失败"
+
+
+def test_summarize_failure_still_matches_diagnostic_summary():
+    console = "[Pipeline] { (Checkout)\nfatal: Could not resolve host: gitlab.example\nERROR: script returned exit code 128"
+    assert summarize_failure(console) == diagnose_failure(console).summary
+
+def test_diagnose_failure_keeps_connection_refused_despite_token_redaction():
+    console = "\n".join([
+        "[Pipeline] { (Build And Push)",
+        "Dockerfile:4",
+        "ERROR: failed to solve: failed to fetch m.daocloud.io/auth/token: connection refused",
+        "ERROR: script returned exit code 1",
+    ])
+    diagnostic = diagnose_failure(console)
+    assert diagnostic.cause == "连接失败"
+    assert "连接失败" in diagnostic.summary
+    assert "refused" in diagnostic.reason
+

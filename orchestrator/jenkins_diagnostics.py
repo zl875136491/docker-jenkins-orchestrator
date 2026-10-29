@@ -5,9 +5,20 @@ from __future__ import annotations
 import json
 import re
 from base64 import b64encode
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import quote
 
+
+# Documented limits for APPS-visible failure payloads.
+# Summary string (build.error / alerts.message) default ceiling.
+DEFAULT_SUMMARY_MAX_CHARS = 4000
+# Nearby redacted console excerpt stored on build.raw_log_excerpt.
+DEFAULT_EXCERPT_MAX_CHARS = 8000
+# How many console lines around the primary error to keep in the excerpt.
+DEFAULT_EXCERPT_CONTEXT_BEFORE = 12
+DEFAULT_EXCERPT_CONTEXT_AFTER = 20
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONSOLE_NOTE = re.compile(r"\x1b\[8mha:.*?\x1b\[0m", re.DOTALL)
@@ -39,6 +50,57 @@ _CAUSES = (
     ("存储空间不足", r"no space left on device|\bENOSPC\b"),
     ("端口冲突", r"address already in use|port is already allocated"),
 )
+
+
+@dataclass(frozen=True)
+class FailureDiagnostic:
+    """Structured failure-site evidence for API consumers (APPS / conductor)."""
+
+    summary: str
+    stage: str = ""
+    node: str = ""
+    location: str = ""
+    source_file: str = ""
+    cause: str = ""
+    reason: str = ""
+    context: list[str] = field(default_factory=list)
+    exit_code: str = ""
+    console_line: int | None = None
+    console_byte_start: int = 0
+    raw_log_excerpt: str = ""
+    recognized: bool = False
+
+    def to_error_detail(
+        self,
+        *,
+        build_id: str | None = None,
+        jenkins_build_number: int | None = None,
+        jenkins_job: str | None = None,
+        result: str | None = None,
+    ) -> dict[str, Any]:
+        detail: dict[str, Any] = {
+            "stage": self.stage or None,
+            "node": self.node or None,
+            "location": self.location or None,
+            "source_file": self.source_file or None,
+            "cause": self.cause or None,
+            "reason": self.reason or None,
+            "context": list(self.context),
+            "exit_code": self.exit_code or None,
+            "console_line": self.console_line,
+            "console_byte_start": self.console_byte_start or None,
+            "recognized": self.recognized,
+            "summary": self.summary,
+        }
+        if build_id:
+            detail["build_id"] = build_id
+        if jenkins_build_number is not None:
+            detail["jenkins_build_number"] = jenkins_build_number
+        if jenkins_job:
+            detail["jenkins_job"] = jenkins_job
+        if result:
+            detail["jenkins_result"] = result
+        return {key: value for key, value in detail.items() if value is not None and value != []}
 
 
 def redact_console(text: str, sensitive_values: Iterable[str] = ()) -> str:
@@ -79,8 +141,43 @@ def _shorten(text: str, limit: int) -> str:
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
-def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterable[str] = ()) -> str:
-    lines = [_TIMESTAMP.sub("", line).strip() for line in redact_console(console, sensitive_values).splitlines()]
+def _excerpt_block(lines: list[str], index: int, *, before: int, after: int, max_chars: int) -> str:
+    start = max(0, index - before)
+    end = min(len(lines), index + after + 1)
+    numbered = []
+    for offset, line in enumerate(lines[start:end], start=start + 1):
+        marker = ">>" if offset == index + 1 else "  "
+        numbered.append(f"{marker} L{offset}: {line}")
+    text = "\n".join(numbered)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
+def _strip_console_noise(text: str) -> str:
+    """Remove terminal noise without secret redaction (for cause/location matching)."""
+    text = _CONSOLE_NOTE.sub("", text)
+    text = _ANSI.sub("", text)
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
+
+
+def diagnose_failure(
+    console: str,
+    *,
+    start: int = 0,
+    sensitive_values: Iterable[str] = (),
+    summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+    excerpt_max_chars: int = DEFAULT_EXCERPT_MAX_CHARS,
+) -> FailureDiagnostic:
+    """Parse console text into a summary string plus structured failure-site fields."""
+
+    # Classify on noise-stripped text so auth/token: connection refused keeps cause.
+    cleaned = _strip_console_noise(console)
+    redacted = redact_console(console, sensitive_values)
+    clean_lines = [_TIMESTAMP.sub("", line).strip() for line in cleaned.splitlines()]
+    lines = [_TIMESTAMP.sub("", line).strip() for line in redacted.splitlines()]
+    if len(clean_lines) != len(lines):
+        clean_lines = list(lines)
     exception_hook_lines = set()
     in_exception_hook = False
     for index, line in enumerate(lines):
@@ -90,11 +187,11 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
             exception_hook_lines.add(index)
         elif in_exception_hook:
             in_exception_hook = False
-    stages = []
+    stages: list[str] = []
     node = ""
     candidates = []
     exit_code = ""
-    for index, line in enumerate(lines):
+    for index, line in enumerate(clean_lines):
         if index in exception_hook_lines:
             continue
         stage = _STAGE.search(line)
@@ -111,7 +208,7 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
         code = re.search(r"(?:script returned exit code|exit code[: ]+)\s*(\d+)", line, re.IGNORECASE)
         if code and not exit_code:
             exit_code = code.group(1)
-        if not line or _INFORMATIONAL_GIT.search(line) or line.startswith(("[Pipeline]", "+ ", "Finished:", "Stage \"")):
+        if not line or _INFORMATIONAL_GIT.search(line) or line.startswith(("[Pipeline]", "+ ", "Finished:", 'Stage "')):
             continue
         if line.startswith("Timeout set to expire in "):
             continue
@@ -130,7 +227,20 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
             priority = 50
         candidates.append((priority, index, " / ".join(stages), node, cause))
     if not candidates:
-        return "日志中未识别出具体错误；请查看该 Jenkins 构建的控制台"
+        fallback = "日志中未识别出具体错误；请查看该 Jenkins 构建的控制台"
+        excerpt = _excerpt_block(
+            lines,
+            max(0, len(lines) - 1),
+            before=DEFAULT_EXCERPT_CONTEXT_BEFORE,
+            after=0,
+            max_chars=excerpt_max_chars,
+        ) if lines else ""
+        return FailureDiagnostic(
+            summary=fallback,
+            raw_log_excerpt=excerpt,
+            console_byte_start=start,
+            recognized=False,
+        )
     primary = [candidate for candidate in candidates if "Declarative: Post Actions" not in candidate[2]]
     if primary:
         candidates = primary
@@ -143,7 +253,7 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
     location = f"console L{index + 1}"
     if start:
         location = f"console 尾部片段 L{index + 1}（片段内行号，字节起点 {start}）"
-    nearby = lines[max(0, index - 8) : index + 15]
+    nearby = clean_lines[max(0, index - 8) : index + 15]
     source = ""
     for line in nearby:
         match = re.search(r"(?<![\w./-])[\w./-]*Dockerfile[\w.-]*:\d+", line)
@@ -151,25 +261,92 @@ def summarize_failure(console: str, *, start: int = 0, sensitive_values: Iterabl
             source = match.group(0)
             break
     if not source:
-        for line in reversed(lines[max(0, index - 8) : index + 1]):
-            match = re.search(r'File "([^\"]+)", line (\d+)', line)
+        for line in reversed(clean_lines[max(0, index - 8) : index + 1]):
+            match = re.search(r'File "([^"]+)", line (\d+)', line)
             if match:
                 source = f"{match.group(1)}:{match.group(2)}"
                 break
     parts.append("位置=" + (_shorten(source, 120) + "，" if source else "") + location)
-    reason = _shorten(lines[index], 480)
+    reason_line = clean_lines[index]
+    reason_line = redact_console(reason_line, sensitive_values).strip() or reason_line
+    reason = _shorten(reason_line, 480)
     parts.append("原因=" + (cause + "：" if cause else "") + reason)
-    context = []
-    for line in lines[index + 1 : index + 9]:
+    context: list[str] = []
+    for line in clean_lines[index + 1 : index + 9]:
         if not line or line.startswith("[Pipeline]") or line.startswith("Stage ") or line.startswith("Finished:"):
             break
         if line == lines[index] or _WRAPPER.search(line):
             continue
-        context.append(_shorten(line, 160))
+        context.append(_shorten(redact_console(line, sensitive_values).strip() or line, 160))
     requirements = [line for line in context if re.search(r"\b(?:required|actual):", line, re.IGNORECASE)]
     context = (requirements or context)[:2]
     if context:
         parts.append("上下文=" + " / ".join(context))
     if exit_code:
         parts.append("退出码=" + exit_code)
-    return _shorten("；".join(parts), 1200)
+    summary = _shorten("；".join(parts), summary_max_chars)
+    excerpt = _excerpt_block(
+        lines,
+        index,
+        before=DEFAULT_EXCERPT_CONTEXT_BEFORE,
+        after=DEFAULT_EXCERPT_CONTEXT_AFTER,
+        max_chars=excerpt_max_chars,
+    )
+    return FailureDiagnostic(
+        summary=summary,
+        stage=stage,
+        node=node,
+        location=location,
+        source_file=source,
+        cause=cause,
+        reason=reason_line,
+        context=list(context),
+        exit_code=exit_code,
+        console_line=index + 1,
+        console_byte_start=start,
+        raw_log_excerpt=excerpt,
+        recognized=True,
+    )
+
+
+def summarize_failure(
+    console: str,
+    *,
+    start: int = 0,
+    sensitive_values: Iterable[str] = (),
+    summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+) -> str:
+    """Backward-compatible one-line failure summary for alerts and build.error."""
+
+    return diagnose_failure(
+        console,
+        start=start,
+        sensitive_values=sensitive_values,
+        summary_max_chars=summary_max_chars,
+    ).summary
+
+
+def failure_logs_payload(
+    *,
+    source: str,
+    raw_log_excerpt: str | None = None,
+    container_logs: Mapping[str, str] | None = None,
+    max_chars: int = DEFAULT_EXCERPT_MAX_CHARS,
+) -> dict[str, Any]:
+    """Shape optional log bags returned on build.failure_logs without breaking consumers."""
+
+    payload: dict[str, Any] = {"source": source}
+    if raw_log_excerpt:
+        text = raw_log_excerpt if len(raw_log_excerpt) <= max_chars else raw_log_excerpt[: max_chars - 1] + "…"
+        payload["raw_log_excerpt"] = text
+    if container_logs:
+        trimmed: dict[str, str] = {}
+        remaining = max_chars
+        for key, value in container_logs.items():
+            if remaining <= 0:
+                break
+            chunk = value if len(value) <= remaining else value[: remaining - 1] + "…"
+            trimmed[str(key)] = chunk
+            remaining -= len(chunk)
+        payload["container_logs"] = trimmed
+    return payload

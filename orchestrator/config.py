@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     route_check_lease_seconds: int = Field(default=120, ge=10)
     route_probe_timeout_seconds: float = Field(default=15, gt=0, le=120)
     route_probe_max_response_bytes: int = Field(default=65536, ge=1024, le=1048576)
+    # Failure diagnostics returned on build_info / alerts (characters / bytes).
+    failure_summary_max_chars: int = Field(default=4000, ge=500, le=20000)
+    failure_log_excerpt_max_chars: int = Field(default=8000, ge=500, le=100000)
+    jenkins_console_window_bytes: int = Field(default=262144, ge=32768, le=2097152)
 
     gitlab_url: str | None = None
     gitlab_token: str | None = None

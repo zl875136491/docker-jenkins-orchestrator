@@ -570,13 +570,28 @@ class BuildService:
         self._event(updated.appid, build_id, f"build.{target.value}", f"Build is {target.value}", level)
         return updated
 
-    def fail(self, build_id: str, message: str) -> BuildJob:
+    def fail(
+        self,
+        build_id: str,
+        message: str,
+        *,
+        error_detail: dict[str, Any] | None = None,
+        raw_log_excerpt: str | None = None,
+        failure_logs: dict[str, Any] | None = None,
+    ) -> BuildJob:
         build = self.get_build(build_id)
         if build.status == BuildStatus.FAILED:
             return build
         if build.status in TERMINAL_BUILD_STATUSES:
             return build
-        failed = self.transition(build_id, BuildStatus.FAILED, error=message)
+        fields: dict[str, Any] = {"error": message}
+        if error_detail is not None:
+            fields["error_detail"] = error_detail
+        if raw_log_excerpt is not None:
+            fields["raw_log_excerpt"] = raw_log_excerpt
+        if failure_logs is not None:
+            fields["failure_logs"] = failure_logs
+        failed = self.transition(build_id, BuildStatus.FAILED, **fields)
         self.repository.create_alert(
             Alert(
                 alert_id=uuid4().hex,
@@ -586,5 +601,13 @@ class BuildService:
                 message=message,
             )
         )
-        self._event(failed.appid, failed.build_id, "build.alert", message, EventLevel.ERROR)
+        event_details: dict[str, Any] = {}
+        if error_detail is not None:
+            event_details["error_detail"] = error_detail
+        if raw_log_excerpt is not None:
+            # Keep event payload bounded; full excerpt lives on build_info.
+            event_details["raw_log_excerpt_preview"] = raw_log_excerpt[:500]
+        if failure_logs is not None:
+            event_details["failure_logs_source"] = failure_logs.get("source")
+        self._event(failed.appid, failed.build_id, "build.alert", message, EventLevel.ERROR, **event_details)
         return failed

@@ -26,6 +26,11 @@ from orchestrator.config import Settings, get_settings
 from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
 from orchestrator.gitlab import GitLabError, GitLabHttpAdapter
 from orchestrator.jenkins import JenkinsBuildRequest, JenkinsBuildState, JenkinsError, JenkinsHttpAdapter, JenkinsNotStartedError
+from orchestrator.jenkins_diagnostics import (
+    DEFAULT_EXCERPT_MAX_CHARS,
+    DEFAULT_SUMMARY_MAX_CHARS,
+    failure_logs_payload,
+)
 from orchestrator.models import BaseImage, BuildJob, BuildResources, BuildStatus, CleanupStatus, EventLevel, ResourceState, UserAppRecord, UserImage, utc_now
 from orchestrator.naming import NamingError, external_namespace, is_docker_repository_component, validate_image_repository
 from orchestrator.registry import DockerRegistrySynchronizer, RegistrySyncError
@@ -397,7 +402,15 @@ class WorkerRuntime:
                 self._schedule_poll(build_id, attempt + 1)
                 return _result(build)
             if current.state is not JenkinsBuildState.SUCCEEDED:
-                raise JenkinsError(self._jenkins_failure_message(build, current.number, current.result))
+                fail_message, fail_detail, fail_excerpt, fail_logs = self._jenkins_failure_diagnostic(
+                    build, current.number, current.result
+                )
+                raise JenkinsError(
+                    fail_message,
+                    error_detail=fail_detail,
+                    raw_log_excerpt=fail_excerpt,
+                    failure_logs=fail_logs,
+                )
             return self._complete_deployment(build, current.number)
         except Exception as exc:
             failed = self._fail(build, exc, "Build polling or deployment failed")
@@ -905,43 +918,105 @@ class WorkerRuntime:
                     "the final artifact must preserve the source Compose mount definitions"
                 )
 
-    def _jenkins_failure_message(self, build: BuildJob, number: int, result: str | None) -> str:
+    def _jenkins_sensitive_values(self, build: BuildJob) -> list[str]:
+        app = self._application(build)
+        environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+        sensitive_values = list(environment.values())
+        sensitive_values.extend(
+            value for key, value in self.settings.model_dump().items()
+            if isinstance(value, str) and re.search(r"password|secret|token|encryption_key", key, re.IGNORECASE)
+        )
+        compose = build.compose_snapshot if build.compose_snapshot is not None else app.compose
+        for service in compose.get("services", {}).values():
+            inputs = [service.get("environment", {})]
+            if isinstance(service.get("build"), Mapping):
+                inputs.append(service["build"].get("args", {}))
+            for values in inputs:
+                if isinstance(values, Mapping):
+                    sensitive_values.extend(value for value in values.values() if isinstance(value, str))
+                elif isinstance(values, list):
+                    sensitive_values.extend(
+                        value.split("=", 1)[1] for value in values if isinstance(value, str) and "=" in value
+                    )
+        return sensitive_values
+
+    def _jenkins_failure_diagnostic(self, build: BuildJob, number: int, result: str | None):
+        """Return (message, error_detail, raw_log_excerpt, failure_logs) for a Jenkins failure."""
         message = f"Jenkins build finished with {result or 'unknown result'}；Jenkins #{number}"
+        summary_limit = int(getattr(self.settings, "failure_summary_max_chars", DEFAULT_SUMMARY_MAX_CHARS))
+        excerpt_limit = int(getattr(self.settings, "failure_log_excerpt_max_chars", DEFAULT_EXCERPT_MAX_CHARS))
+        window = int(getattr(self.settings, "jenkins_console_window_bytes", 256 * 1024))
         try:
-            app = self._application(build)
-            environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
-            sensitive_values = list(environment.values())
-            sensitive_values.extend(
-                value for key, value in self.settings.model_dump().items()
-                if isinstance(value, str) and re.search(r"password|secret|token|encryption_key", key, re.IGNORECASE)
+            sensitive_values = self._jenkins_sensitive_values(build)
+            adapter = self._jenkins_adapter()
+            if hasattr(adapter, "get_failure_diagnostic"):
+                diagnostic = adapter.get_failure_diagnostic(
+                    number,
+                    sensitive_values=sensitive_values,
+                    summary_max_chars=summary_limit,
+                    excerpt_max_chars=excerpt_limit,
+                    window_bytes=window,
+                )
+            else:
+                summary = adapter.get_failure_summary(number, sensitive_values=sensitive_values)
+                from orchestrator.jenkins_diagnostics import FailureDiagnostic
+                diagnostic = FailureDiagnostic(summary=summary, recognized=bool(summary))
+            detail = diagnostic.to_error_detail(
+                build_id=build.build_id,
+                jenkins_build_number=number,
+                jenkins_job=getattr(self.settings, "jenkins_job_name", None),
+                result=result,
             )
-            compose = build.compose_snapshot if build.compose_snapshot is not None else app.compose
-            for service in compose.get("services", {}).values():
-                inputs = [service.get("environment", {})]
-                if isinstance(service.get("build"), Mapping):
-                    inputs.append(service["build"].get("args", {}))
-                for values in inputs:
-                    if isinstance(values, Mapping):
-                        sensitive_values.extend(value for value in values.values() if isinstance(value, str))
-                    elif isinstance(values, list):
-                        sensitive_values.extend(value.split("=", 1)[1] for value in values if isinstance(value, str) and "=" in value)
-            summary = self._jenkins_adapter().get_failure_summary(number, sensitive_values=sensitive_values)
+            logs = failure_logs_payload(
+                source="jenkins_console",
+                raw_log_excerpt=diagnostic.raw_log_excerpt,
+                max_chars=excerpt_limit,
+            )
+            return f"{message}；{diagnostic.summary}", detail, diagnostic.raw_log_excerpt or None, logs
         except Exception:
             summary = "错误详情暂不可用（无法读取或解析 Jenkins 控制台日志）；请查看该 Jenkins 构建的控制台"
-        return f"{message}；{summary}"
+            detail = {
+                "build_id": build.build_id,
+                "jenkins_build_number": number,
+                "jenkins_result": result,
+                "recognized": False,
+                "summary": summary,
+            }
+            return f"{message}；{summary}", detail, None, {"source": "jenkins_console", "unavailable": True}
 
+    def _jenkins_failure_message(self, build: BuildJob, number: int, result: str | None) -> str:
+        message, _, _, _ = self._jenkins_failure_diagnostic(build, number, result)
+        return message
     def _fail(self, build: BuildJob, exc: Exception, fallback: str) -> BuildJob:
         self._guard_operation()
         current = self.builds.get_build(build.build_id)
+        summary_limit = int(getattr(self.settings, "failure_summary_max_chars", DEFAULT_SUMMARY_MAX_CHARS))
+        report = _safe_error(exc, fallback, summary_limit=summary_limit)
+        error_detail = getattr(exc, "error_detail", None)
+        raw_log_excerpt = getattr(exc, "raw_log_excerpt", None)
+        failure_logs = getattr(exc, "failure_logs", None)
+        fail_kwargs = {}
+        if isinstance(error_detail, dict):
+            fail_kwargs["error_detail"] = error_detail
+        if isinstance(raw_log_excerpt, str) and raw_log_excerpt:
+            fail_kwargs["raw_log_excerpt"] = raw_log_excerpt
+        if isinstance(failure_logs, dict):
+            fail_kwargs["failure_logs"] = failure_logs
         if current.status is BuildStatus.DEPLOYING:
             # Deployment adapters may already have created tracked resources
             # before readiness or route probing raises. Those failures must
             # follow the same immediate, build-owned teardown path.
-            report = _safe_error(exc, fallback)
-            self.repository.update_build(build.build_id, {"dynamic_check_passed": False,
+            update_fields = {"dynamic_check_passed": False,
                 "dynamic_status": "failed", "dynamic_report_text": report,
-                "teardown_required": True, "teardown_status": "pending", "updated_at": utc_now()})
-            failed = self.builds.fail(build.build_id, report)
+                "teardown_required": True, "teardown_status": "pending", "updated_at": utc_now()}
+            if fail_kwargs.get("error_detail") is not None:
+                update_fields["error_detail"] = fail_kwargs["error_detail"]
+            if fail_kwargs.get("raw_log_excerpt") is not None:
+                update_fields["raw_log_excerpt"] = fail_kwargs["raw_log_excerpt"]
+            if fail_kwargs.get("failure_logs") is not None:
+                update_fields["failure_logs"] = fail_kwargs["failure_logs"]
+            self.repository.update_build(build.build_id, update_fields)
+            failed = self.builds.fail(build.build_id, report, **fail_kwargs)
             check = self.repository.get_route_check(current.route_check_id) if current.route_check_id else None
             if check is not None and check.generation == current.route_check_generation:
                 self._guard_operation()
@@ -957,9 +1032,7 @@ class WorkerRuntime:
                 }, {"generation": check.generation, "dynamic_build_id": check.dynamic_build_id,
                     "dynamic_run_id": check.dynamic_run_id})
             return failed
-        return self.builds.fail(build.build_id, _safe_error(exc, fallback))
-
-
+        return self.builds.fail(build.build_id, report, **fail_kwargs)
 def _image_id(build_id: str, reference: str) -> str:
     return hashlib.sha256(f"{build_id}:{reference}".encode()).hexdigest()[:32]
 
@@ -968,16 +1041,17 @@ def _result(build: BuildJob) -> dict[str, str]:
     return {"build_id": build.build_id, "status": build.status.value}
 
 
-def _safe_error(exc: Exception, fallback: str) -> str:
+def _safe_error(exc: Exception, fallback: str, *, summary_limit: int = DEFAULT_SUMMARY_MAX_CHARS) -> str:
     """Only promote errors produced by adapters that deliberately redact secrets."""
 
     if isinstance(exc, (BuildInputError, DockerServiceError, GitLabError, JenkinsError, RegistrySyncError, TemplateError, ValueError)):
         message = str(exc).strip()
         if message:
-            return message[:1500] if isinstance(exc, JenkinsError) else message[:500]
+            # Jenkins diagnostics already redact; allow the configured summary ceiling.
+            # Other adapter errors stay shorter to avoid leaking noisy stack traces.
+            limit = summary_limit if isinstance(exc, JenkinsError) else min(2000, summary_limit)
+            return message[:limit]
     return fallback
 
-
-@lru_cache
 def get_worker_runtime() -> WorkerRuntime:
     return WorkerRuntime(get_settings())

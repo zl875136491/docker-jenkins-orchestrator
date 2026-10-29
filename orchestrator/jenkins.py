@@ -18,12 +18,31 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from orchestrator.adapters import AdapterError
 from orchestrator.gitlab import HttpResponse, HttpTransport, UrllibHttpTransport
-from orchestrator.jenkins_diagnostics import summarize_failure
+from orchestrator.jenkins_diagnostics import (
+    DEFAULT_EXCERPT_MAX_CHARS,
+    DEFAULT_SUMMARY_MAX_CHARS,
+    FailureDiagnostic,
+    diagnose_failure,
+    summarize_failure,
+)
 from orchestrator.naming import NamingError, registry_from_image_repository, validate_image_repository
 
 
 class JenkinsError(AdapterError):
     """A Jenkins operation failed with context safe for events and alerts."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_detail: dict | None = None,
+        raw_log_excerpt: str | None = None,
+        failure_logs: dict | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_detail = error_detail
+        self.raw_log_excerpt = raw_log_excerpt
+        self.failure_logs = failure_logs
 
 
 class JenkinsNotFoundError(JenkinsError):
@@ -203,6 +222,15 @@ class JenkinsAdapter(Protocol):
     def get_build(self, number: int) -> JenkinsBuild: ...
 
     def get_failure_summary(self, number: int, *, sensitive_values: Iterable[str] = ()) -> str: ...
+    def get_failure_diagnostic(
+        self,
+        number: int,
+        *,
+        sensitive_values: Iterable[str] = (),
+        summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+        excerpt_max_chars: int = DEFAULT_EXCERPT_MAX_CHARS,
+        window_bytes: int | None = None,
+    ) -> FailureDiagnostic: ...
 
     def get_result_artifact(self, number: int) -> JenkinsResultArtifact: ...
 
@@ -323,10 +351,10 @@ class JenkinsHttpAdapter:
             raise JenkinsError("Jenkins returned an invalid build response")
         return JenkinsBuild(number=build_number, building=building, result=result, url=url)
 
-    def get_failure_summary(self, number: int, *, sensitive_values: Iterable[str] = ()) -> str:
+    def _read_console_tail(self, number: int, *, window: int | None = None) -> tuple[str, int]:
         build_number = _positive_int(number, "number")
         path = f"{self._job_path}/{build_number}/logText/progressiveText"
-        window = 128 * 1024
+        window_bytes = int(window or getattr(self, "_console_window_bytes", 256 * 1024) or (256 * 1024))
         metadata = self._request("HEAD", f"{path}?start=0", max_bytes=0)
         if metadata.status_code not in {200, 405, 501}:
             self._raise_for_status(metadata, "console log")
@@ -334,17 +362,35 @@ class JenkinsHttpAdapter:
             size = max(0, int(metadata.header("X-Text-Size") or "0"))
         except ValueError:
             size = 0
-        start = max(0, size - window)
+        start = max(0, size - window_bytes)
         response = self._request(
-            "GET", f"{path}?start={start}", headers={"Accept": "text/plain"}, max_bytes=window * 2,
+            "GET", f"{path}?start={start}", headers={"Accept": "text/plain"}, max_bytes=window_bytes * 2,
         )
         if response.status_code != 200:
             self._raise_for_status(response, "console log")
-        return summarize_failure(
-            response.body[:window * 2].decode("utf-8", errors="replace"),
+        text = response.body[: window_bytes * 2].decode("utf-8", errors="replace")
+        return text, start
+
+    def get_failure_diagnostic(
+        self,
+        number: int,
+        *,
+        sensitive_values: Iterable[str] = (),
+        summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+        excerpt_max_chars: int = DEFAULT_EXCERPT_MAX_CHARS,
+        window_bytes: int | None = None,
+    ) -> FailureDiagnostic:
+        text, start = self._read_console_tail(number, window=window_bytes)
+        return diagnose_failure(
+            text,
             start=start,
             sensitive_values=(*sensitive_values, self._username, self._password, self._authorization),
+            summary_max_chars=summary_max_chars,
+            excerpt_max_chars=excerpt_max_chars,
         )
+
+    def get_failure_summary(self, number: int, *, sensitive_values: Iterable[str] = ()) -> str:
+        return self.get_failure_diagnostic(number, sensitive_values=sensitive_values).summary
 
     def get_result_artifact(self, number: int) -> JenkinsResultArtifact:
         """Fetch and validate the mandatory ``orchestrator-result.json`` artifact."""

@@ -290,6 +290,10 @@ class BuildJob(DomainModel):
     dynamic_report_text: str | None = None
     probe_result: dict[str, Any] | None = None
     error: str | None = None
+    # Structured failure-site fields for APPS polling (optional; keep `error` populated).
+    error_detail: dict[str, Any] | None = None
+    raw_log_excerpt: str | None = None
+    failure_logs: dict[str, Any] | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     last_polled_at: datetime | None = None

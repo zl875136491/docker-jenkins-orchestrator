@@ -27,6 +27,7 @@ from orchestrator.route_checks import (
     DYNAMIC_ROLE, RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError,
 )
 from orchestrator.route_logs import BuildLogCollector
+from orchestrator.jenkins_diagnostics import failure_logs_payload
 from orchestrator.route_probes import ProbeClient, ProbeEndpoint, validate_probe_payload
 from orchestrator.services import NotFoundError
 
@@ -298,7 +299,33 @@ class DynamicCheckService:
         build = self._save(build_id, fields, guard)
         if not passed:
             guard()
-            build = self.builds.fail(build_id, report or "动态路由检查失败")
+            container_logs = None
+            if isinstance(result, dict):
+                maybe_logs = result.get("container_logs")
+                if isinstance(maybe_logs, dict):
+                    container_logs = maybe_logs
+            detail = {
+                "build_id": build_id,
+                "source": "dynamic_route_check",
+                "recognized": True,
+                "summary": report or "动态路由检查失败",
+                "probe_final": (result or {}).get("final") if isinstance(result, dict) else None,
+            }
+            logs = failure_logs_payload(source="container_logs", container_logs=container_logs)
+            excerpt = None
+            if container_logs:
+                chunks = []
+                for name, body in list(container_logs.items())[:4]:
+                    chunks.append(f"[{name}]\n{body}")
+                excerpt = "\n\n".join(chunks)[:8000]
+                detail["log_services"] = list(container_logs.keys())
+            build = self.builds.fail(
+                build_id,
+                report or "动态路由检查失败",
+                error_detail=detail,
+                raw_log_excerpt=excerpt,
+                failure_logs=logs,
+            )
         self._sync_result(build, guard)
         return build
 
