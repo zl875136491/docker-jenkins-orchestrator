@@ -299,6 +299,8 @@ class WorkerRuntime:
                 if self._isolated(build):
                     for name in compose["services"]:
                         tracker.record("registry_image", f"{self._image_repository(app.appid)}:{build.build_id}-{name}", target="harbor")
+                # Push-model invariant: Jenkins receives environment={} only.
+                # Decrypted secrets stay in Worker memory for validating/deploying.
                 request = JenkinsBuildRequest(
                     appid=app.appid,
                     repository_url=app.repository_url,
@@ -830,6 +832,12 @@ class WorkerRuntime:
 
     @staticmethod
     def _resolve_application_environment(compose: Any, environment: Mapping[str, str]) -> dict[str, Any]:
+        """Expand Compose `${VAR}` placeholders from decrypted app environment.
+
+        Never interpolates secret values into error strings — only variable
+        names and optional Compose-authored `${VAR:?hint}` messages appear.
+        """
+
         resolved = deepcopy(compose)
         services = resolved.get("services") if isinstance(resolved, Mapping) else None
         if not isinstance(services, Mapping):
@@ -849,25 +857,41 @@ class WorkerRuntime:
             for entry in entries:
                 key, value = entry.split("=", 1)
 
-                def replace(match: re.Match[str]) -> str:
+                def replace(match: re.Match[str], *, _service=service_name, _key=key) -> str:
                     if match.group(0) == "$$":
                         return "$"
                     variable = match.group("braced") or match.group("bare")
                     operator = match.group("operator")
                     default = match.group("default") or ""
+
+                    def required_error(*, empty: bool) -> None:
+                        reason = "requires a non-empty" if empty else "references missing"
+                        message = (
+                            f"Compose service {_service} environment {_key} "
+                            f"{reason} application variable {variable}"
+                        )
+                        # Compose-authored hint only; never append decrypted values.
+                        if operator in {"?", ":?"} and default.strip():
+                            hint = default.strip()
+                            if len(hint) > 200:
+                                hint = hint[:200] + "…"
+                            message = f"{message}: {hint}"
+                        raise BuildInputError(message)
+
                     if variable not in environment:
                         if operator in {"-", ":-"}:
                             return default
+                        if operator in {"?", ":?"}:
+                            required_error(empty=False)
                         raise BuildInputError(
-                            f"Compose service {service_name} environment {key} references missing application variable {variable}"
+                            f"Compose service {_service} environment {_key} "
+                            f"references missing application variable {variable}"
                         )
                     value_from_app = environment[variable]
                     if operator in {":-", ":?"} and not value_from_app:
                         if operator == ":-":
                             return default
-                        raise BuildInputError(
-                            f"Compose service {service_name} environment {key} requires a non-empty application variable {variable}"
-                        )
+                        required_error(empty=True)
                     return value_from_app
 
                 service_environment[key] = _COMPOSE_VARIABLE.sub(replace, value)

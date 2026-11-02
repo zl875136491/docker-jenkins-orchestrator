@@ -384,6 +384,33 @@ def test_missing_application_environment_reference_fails_before_jenkins() -> Non
     assert docker_services.calls == []
 
 
+def test_required_environment_hint_does_not_leak_secret_values() -> None:
+    source = deepcopy(APP_COMPOSE)
+    source["services"]["api"]["environment"] = {
+        "PASSWORD": "${MISSING_PASSWORD:?set PASSWORD in app environment}"
+    }
+    jenkins = FakeJenkins([])
+    docker_services = FakeDockerServices(successful_deployment())
+    harness = make_harness(jenkins=jenkins, docker_services=docker_services)
+    # Seed a decoy secret via create path; missing required var must still fail
+    # with Compose hint and without leaking other environment values.
+    build = queue_build(
+        harness,
+        compose=source,
+        environment={"OTHER": "super-secret-value-must-not-leak"},
+    )
+
+    result = harness.runtime.start_build(build.build_id, task_id="start-task")
+
+    stored = harness.container.repository.get_build(build.build_id)
+    assert result == {"build_id": build.build_id, "status": "failed"}
+    assert stored is not None
+    assert "MISSING_PASSWORD" in stored.error
+    assert "set PASSWORD in app environment" in stored.error
+    assert "super-secret-value-must-not-leak" not in (stored.error or "")
+    assert jenkins.requests == []
+
+
 @pytest.mark.parametrize(
     "source_mount",
     [".:/workspace", "./:/workspace", "~/app:/workspace", {"type": "bind", "source": ".", "target": "/workspace"}],

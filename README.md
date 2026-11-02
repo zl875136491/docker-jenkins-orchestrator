@@ -52,6 +52,7 @@ See [docs/architecture.md](docs/architecture.md) for the system boundaries, API 
 - [Workspace 上传、构建与挂载](docs/workspace.md)
 - [应用访问入口 API](docs/app-access.md)
 - [API Call Flow](docs/api-call-flow.md)
+- [运行时凭据推送约定（APPS 推送模型）](docs/runtime-secrets-push.md)
 - 运行中的机器可读说明：`GET /api/v1/system-guide`
 - 完整 Markdown 使用指引：`GET /api/v1/readme`
 - Compose 设计 Markdown 提示词：`GET /api/v1/docker/compose_prompt`

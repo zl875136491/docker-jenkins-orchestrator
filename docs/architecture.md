@@ -37,7 +37,7 @@ Redis 仅用于 Celery broker：它不保存业务状态，也不作为 Celery r
 | `deployment_services` | `appid+build_id+service_name` | Docker Swarm Service ID、镜像、状态、内部端点和已发布端口 |
 | `alerts` | `appid+created_at` | 构建/部署失败及需要人工处理的告警 |
 
-环境变量不会在读 API 或事件中回显；生产 MongoDB 数据使用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存。Worker 在构建时解密应用变量，用它们展开 Compose 服务 `environment` 中的 `$NAME`、`${NAME}`、`${NAME:-default}` 和 `${NAME-default}` 引用；只有 Compose 明确声明的变量会进入对应容器。应用密钥不发送给 Jenkins，缺失的必需变量会在触发 Jenkins 前以可操作错误写入 Build。
+环境变量不会在读 API 或事件中回显；生产 MongoDB 数据使用 `ORCHESTRATOR_DATA_ENCRYPTION_KEY` 加密保存。Worker 在构建时解密应用变量，用它们展开 Compose 服务 `environment` 中的 `$NAME`、`${NAME}`、`${NAME:-default}` 和 `${NAME-default}` 引用；只有 Compose 明确声明的变量会进入对应容器。应用密钥不发送给 Jenkins，缺失的必需变量会在触发 Jenkins 前以可操作错误写入 Build。 与 APPS 的推送模型约定见 [runtime-secrets-push.md](runtime-secrets-push.md)。
 
 ## 4. 认证与 API
 
