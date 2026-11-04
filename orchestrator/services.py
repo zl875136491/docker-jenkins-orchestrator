@@ -495,6 +495,7 @@ class BuildService:
             raise BuildInputError(str(exc)) from exc
         dynamic_role = self.route_checks.roles.get(DYNAMIC_ROLE)
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref,
+            stage="queued", stage_history=["queued"],
             git_commit_sha=commit, compose_snapshot=deepcopy(app.compose), inputs_ready=False,
             route_check_id=checked.check_id, route_check_generation=checked.generation,
             require_route_snapshot=checked.require_route, static_agent_role_version=checked.static_agent_role_version,

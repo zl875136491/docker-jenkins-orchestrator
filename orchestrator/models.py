@@ -296,8 +296,9 @@ class BuildJob(DomainModel):
     failure_logs: dict[str, Any] | None = None
     failure_site: str | None = None
     # Lifecycle stage for APPS polling (mirrors BuildStatus values; updated on transitions).
-    stage: str | None = "queued"
-    stage_history: list[str] = Field(default_factory=lambda: ["queued"])
+    # Default None so legacy Mongo docs do not appear as queued after schema rollout.
+    stage: str | None = None
+    stage_history: list[str] = Field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
     last_polled_at: datetime | None = None
