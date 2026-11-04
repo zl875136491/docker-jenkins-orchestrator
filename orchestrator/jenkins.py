@@ -38,11 +38,13 @@ class JenkinsError(AdapterError):
         error_detail: dict | None = None,
         raw_log_excerpt: str | None = None,
         failure_logs: dict | None = None,
+        failure_site: str | None = None,
     ) -> None:
         super().__init__(message)
         self.error_detail = error_detail
         self.raw_log_excerpt = raw_log_excerpt
         self.failure_logs = failure_logs
+        self.failure_site = failure_site
 
 
 class JenkinsNotFoundError(JenkinsError):

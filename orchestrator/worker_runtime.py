@@ -30,6 +30,15 @@ from orchestrator.jenkins_diagnostics import (
     DEFAULT_EXCERPT_MAX_CHARS,
     DEFAULT_SUMMARY_MAX_CHARS,
     failure_logs_payload,
+    structured_failure,
+    FAILURE_SITE_PRECHECK,
+    FAILURE_SITE_VALIDATING,
+    FAILURE_SITE_TRIGGERING,
+    FAILURE_SITE_JENKINS,
+    FAILURE_SITE_POLL_TIMEOUT,
+    FAILURE_SITE_DEPLOY,
+    FAILURE_SITE_DYNAMIC_CHECK,
+    FAILURE_SITE_WORKER,
 )
 from orchestrator.models import BaseImage, BuildJob, BuildResources, BuildStatus, CleanupStatus, EventLevel, ResourceState, UserAppRecord, UserImage, utc_now
 from orchestrator.naming import NamingError, external_namespace, is_docker_repository_component, validate_image_repository
@@ -364,7 +373,23 @@ class WorkerRuntime:
             return _result(build)
         self._guard_operation()
         if build.status is not BuildStatus.DEPLOYING and attempt >= self.settings.celery_max_poll_attempts:
-            return _result(self.builds.fail(build_id, "Jenkins build polling exceeded the configured limit"))
+            detail, excerpt, logs, site = structured_failure(
+                failure_site=FAILURE_SITE_POLL_TIMEOUT,
+                summary="Jenkins build polling exceeded the configured limit",
+                build_id=build_id,
+                stage=build.status.value if build.status else None,
+                extra={"poll_attempt": attempt, "source": "poll_timeout"},
+            )
+            return _result(
+                self.builds.fail(
+                    build_id,
+                    "Jenkins build polling exceeded the configured limit",
+                    error_detail=detail,
+                    raw_log_excerpt=excerpt,
+                    failure_logs=logs,
+                    failure_site=site,
+                )
+            )
         if build.status in {BuildStatus.QUEUED, BuildStatus.VALIDATING, BuildStatus.TRIGGERING}:
             return self._start_build(build_id, task_id)
 
@@ -407,11 +432,14 @@ class WorkerRuntime:
                 fail_message, fail_detail, fail_excerpt, fail_logs = self._jenkins_failure_diagnostic(
                     build, current.number, current.result
                 )
+                if isinstance(fail_detail, dict):
+                    fail_detail = {**fail_detail, "failure_site": FAILURE_SITE_JENKINS}
                 raise JenkinsError(
                     fail_message,
                     error_detail=fail_detail,
                     raw_log_excerpt=fail_excerpt,
                     failure_logs=fail_logs,
+                    failure_site=FAILURE_SITE_JENKINS,
                 )
             return self._complete_deployment(build, current.number)
         except Exception as exc:
@@ -991,6 +1019,7 @@ class WorkerRuntime:
                 jenkins_job=getattr(self.settings, "jenkins_job_name", None),
                 result=result,
             )
+            detail["failure_site"] = FAILURE_SITE_JENKINS
             logs = failure_logs_payload(
                 source="jenkins_console",
                 raw_log_excerpt=diagnostic.raw_log_excerpt,
@@ -1005,12 +1034,38 @@ class WorkerRuntime:
                 "jenkins_result": result,
                 "recognized": False,
                 "summary": summary,
+                "failure_site": FAILURE_SITE_JENKINS,
             }
             return f"{message}；{summary}", detail, None, {"source": "jenkins_console", "unavailable": True}
 
     def _jenkins_failure_message(self, build: BuildJob, number: int, result: str | None) -> str:
         message, _, _, _ = self._jenkins_failure_diagnostic(build, number, result)
         return message
+    def _infer_failure_site(self, build: BuildJob, exc: Exception) -> str:
+        site = getattr(exc, "failure_site", None)
+        if isinstance(site, str) and site:
+            return site
+        detail = getattr(exc, "error_detail", None)
+        if isinstance(detail, dict) and detail.get("failure_site"):
+            return str(detail["failure_site"])
+        if isinstance(exc, BuildInputError):
+            if build.status in {BuildStatus.QUEUED, BuildStatus.VALIDATING}:
+                return FAILURE_SITE_PRECHECK
+            if build.status is BuildStatus.TRIGGERING:
+                return FAILURE_SITE_TRIGGERING
+            return FAILURE_SITE_VALIDATING
+        if isinstance(exc, JenkinsError):
+            return FAILURE_SITE_JENKINS
+        if build.status is BuildStatus.DEPLOYING:
+            return FAILURE_SITE_DEPLOY
+        if build.status is BuildStatus.BUILDING:
+            return FAILURE_SITE_JENKINS
+        if build.status is BuildStatus.VALIDATING:
+            return FAILURE_SITE_VALIDATING
+        if build.status is BuildStatus.TRIGGERING:
+            return FAILURE_SITE_TRIGGERING
+        return FAILURE_SITE_WORKER
+
     def _fail(self, build: BuildJob, exc: Exception, fallback: str) -> BuildJob:
         self._guard_operation()
         current = self.builds.get_build(build.build_id)
@@ -1019,9 +1074,21 @@ class WorkerRuntime:
         error_detail = getattr(exc, "error_detail", None)
         raw_log_excerpt = getattr(exc, "raw_log_excerpt", None)
         failure_logs = getattr(exc, "failure_logs", None)
-        fail_kwargs = {}
+        failure_site = self._infer_failure_site(current, exc)
+        fail_kwargs = {"failure_site": failure_site}
         if isinstance(error_detail, dict):
-            fail_kwargs["error_detail"] = error_detail
+            fail_kwargs["error_detail"] = {**error_detail, "failure_site": error_detail.get("failure_site") or failure_site}
+        else:
+            detail, _, logs, _ = structured_failure(
+                failure_site=failure_site,
+                summary=report,
+                build_id=current.build_id,
+                stage=current.status.value if current.status else None,
+                extra={"source": failure_site, "exception_type": type(exc).__name__},
+            )
+            fail_kwargs["error_detail"] = detail
+            if logs and failure_logs is None:
+                fail_kwargs["failure_logs"] = logs
         if isinstance(raw_log_excerpt, str) and raw_log_excerpt:
             fail_kwargs["raw_log_excerpt"] = raw_log_excerpt
         if isinstance(failure_logs, dict):

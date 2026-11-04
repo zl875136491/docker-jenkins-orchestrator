@@ -521,7 +521,7 @@ class BuildService:
                     snapshot = self.application_service.workspace.snapshot(appid, build.build_id)
                 except WorkspaceError as exc:
                     tracker.guard()
-                    self.fail(build.build_id, str(exc))
+                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail={"failure_site": "precheck", "summary": str(exc), "recognized": True, "build_id": build.build_id})
                     raise BuildInputError(str(exc)) from exc
                 tracker.guard()
                 self.repository.update_build(build.build_id, snapshot)
@@ -534,7 +534,7 @@ class BuildService:
         try:
             submission = self.dispatcher.dispatch_build(build.build_id)
         except Exception as exc:
-            self.fail(build.build_id, "Unable to enqueue build task")
+            self.fail(build.build_id, "Unable to enqueue build task", failure_site="precheck", error_detail={"failure_site": "precheck", "summary": "Unable to enqueue build task", "recognized": True, "build_id": build.build_id})
             raise BuildInputError("Unable to enqueue build task") from exc
         updated = self.repository.update_build(build.build_id, {"celery_task_id": submission.task_id, "updated_at": utc_now()})
         if updated is None:
@@ -560,6 +560,15 @@ class BuildService:
             fields["started_at"] = now
         if target in TERMINAL_BUILD_STATUSES:
             fields["finished_at"] = now
+        stage_value = target.value
+        if "stage" not in fields:
+            fields["stage"] = stage_value
+        history = list(build.stage_history or [])
+        if not history and build.stage:
+            history = [build.stage]
+        if not history or history[-1] != fields["stage"]:
+            history.append(fields["stage"])
+        fields["stage_history"] = history[-32:]
         updated = self.repository.transition_build(build_id, [build.status], target, fields)
         if updated is None:
             current = self.get_build(build_id)
@@ -578,19 +587,24 @@ class BuildService:
         error_detail: dict[str, Any] | None = None,
         raw_log_excerpt: str | None = None,
         failure_logs: dict[str, Any] | None = None,
+        failure_site: str | None = None,
     ) -> BuildJob:
         build = self.get_build(build_id)
         if build.status == BuildStatus.FAILED:
             return build
         if build.status in TERMINAL_BUILD_STATUSES:
             return build
-        fields: dict[str, Any] = {"error": message}
+        fields: dict[str, Any] = {"error": message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail
         if raw_log_excerpt is not None:
             fields["raw_log_excerpt"] = raw_log_excerpt
         if failure_logs is not None:
             fields["failure_logs"] = failure_logs
+        if failure_site is not None:
+            fields["failure_site"] = failure_site
+        elif isinstance(error_detail, dict) and error_detail.get("failure_site"):
+            fields["failure_site"] = str(error_detail["failure_site"])
         failed = self.transition(build_id, BuildStatus.FAILED, **fields)
         self.repository.create_alert(
             Alert(
@@ -609,5 +623,9 @@ class BuildService:
             event_details["raw_log_excerpt_preview"] = raw_log_excerpt[:500]
         if failure_logs is not None:
             event_details["failure_logs_source"] = failure_logs.get("source")
+        if failed.failure_site:
+            event_details["failure_site"] = failed.failure_site
+        if failed.stage:
+            event_details["stage"] = failed.stage
         self._event(failed.appid, failed.build_id, "build.alert", message, EventLevel.ERROR, **event_details)
         return failed

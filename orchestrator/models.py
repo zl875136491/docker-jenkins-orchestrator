@@ -294,6 +294,10 @@ class BuildJob(DomainModel):
     error_detail: dict[str, Any] | None = None
     raw_log_excerpt: str | None = None
     failure_logs: dict[str, Any] | None = None
+    failure_site: str | None = None
+    # Lifecycle stage for APPS polling (mirrors BuildStatus values; updated on transitions).
+    stage: str | None = "queued"
+    stage_history: list[str] = Field(default_factory=lambda: ["queued"])
     started_at: datetime | None = None
     finished_at: datetime | None = None
     last_polled_at: datetime | None = None

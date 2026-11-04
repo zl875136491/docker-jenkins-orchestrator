@@ -162,18 +162,36 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
 
 | 字段 | 说明 |
 | --- | --- |
-| `error_detail` | 失败现场对象：`stage` / `node` / `location` / `source_file` / `cause` / `reason` / `exit_code` / `console_line` / `build_id` / `jenkins_build_number` / `jenkins_job` / `recognized` / `summary` 等 |
+| `error_detail` | 失败现场对象：`failure_site` / `stage` / `node` / `location` / `source_file` / `cause` / `reason` / `exit_code` / `console_line` / `build_id` / `jenkins_build_number` / `jenkins_job` / `recognized` / `summary` 等 |
 | `raw_log_excerpt` | 脱敏后的关键日志摘录（Jenkins 控制台附近行，或动态失败时的容器日志拼接） |
-| `failure_logs` | 日志袋：`source`（`jenkins_console` / `container_logs`）及对应摘录 |
+| `failure_logs` | 日志袋：`source`（`jenkins_console` / `container_logs` / 其它站点名）及对应摘录 |
+| `failure_site` | 失败站点短标签：`precheck` / `validating` / `triggering` / `jenkins` / `poll_timeout` / `deploy` / `dynamic_check` / `static_check` / `worker` |
+| `stage` | 当前生命周期阶段（与 `BuildStatus` 值对齐：`queued`/`validating`/`triggering`/`building`/`deploying`/`succeeded`/`failed`/`cancelled`）。失败时为 `failed`；失败前阶段见 `stage_history` / `failure_site` |
+| `stage_history` | 短阶段轨迹（有序，去重相邻重复，最多保留 32 项），便于 APPS 轮询观察进度 |
 
 `build.alert` 事件的 `details` 会附带 `error_detail` 与 `raw_log_excerpt_preview`（截断预览）；完整摘录以 `build_info` 为准。
+
+`build.alert` 的 `details` 还会附带 `failure_site` 与 `stage`（若已填充）。
+
+### 构建阶段（stage）
+
+`BuildJob.stage` 随状态机迁移更新，取值与 `status` 相同（小写枚举值）。典型轨迹：
+
+`queued → validating → triggering → building → deploying → succeeded`
+
+失败时 `status`/`stage` 均为 `failed`，并写入 `failure_site` 标明卡在哪一环（例如 `validating` 缺环境变量、`jenkins` 构建失败、`poll_timeout`、`deploy`、`dynamic_check`）。**不会**出现伪造的 `RESOLVE_SECRET` 阶段；运行时密钥仍按推送模型在 Worker 内解密（见 [runtime-secrets-push.md](runtime-secrets-push.md)）。
+
 
 示例：
 
 ```json
 {
   "error": "Jenkins build finished with FAILURE；Jenkins #114；阶段=Build And Push；位置=Dockerfile:4，console L79；原因=连接失败：... connection refused；退出码=1",
+  "failure_site": "jenkins",
+  "stage": "failed",
+  "stage_history": ["queued", "validating", "triggering", "building", "failed"],
   "error_detail": {
+    "failure_site": "jenkins",
     "stage": "Build And Push",
     "source_file": "Dockerfile:4",
     "cause": "连接失败",

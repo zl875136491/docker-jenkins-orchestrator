@@ -98,14 +98,19 @@ def test_build_state_machine_records_events_and_alerts() -> None:
     failed = builds.fail(
         build.build_id,
         "Jenkins reported a failure",
-        error_detail={"cause": "连接失败", "jenkins_build_number": 114},
+        error_detail={"cause": "连接失败", "jenkins_build_number": 114, "failure_site": "jenkins"},
         raw_log_excerpt=">> L10: connection refused",
         failure_logs={"source": "jenkins_console"},
+        failure_site="jenkins",
     )
     assert failed.status == BuildStatus.FAILED
     assert failed.error_detail["cause"] == "连接失败"
     assert "connection refused" in (failed.raw_log_excerpt or "")
     assert failed.failure_logs["source"] == "jenkins_console"
+    assert failed.failure_site == "jenkins"
+    assert failed.stage == "failed"
+    assert "building" in (failed.stage_history or [])
+    assert (failed.stage_history or [])[-1] == "failed"
     assert repository.list_alerts("stateful")[0].message == "Jenkins reported a failure"
     assert {event.kind for event in repository.list_events("stateful")} >= {"build.queued", "build.failed"}
 

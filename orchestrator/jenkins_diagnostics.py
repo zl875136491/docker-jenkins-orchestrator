@@ -326,6 +326,59 @@ def summarize_failure(
     ).summary
 
 
+
+
+# Canonical failure_site values for BuildJob.failure_site / structured writers.
+FAILURE_SITE_PRECHECK = "precheck"
+FAILURE_SITE_VALIDATING = "validating"
+FAILURE_SITE_TRIGGERING = "triggering"
+FAILURE_SITE_JENKINS = "jenkins"
+FAILURE_SITE_POLL_TIMEOUT = "poll_timeout"
+FAILURE_SITE_DEPLOY = "deploy"
+FAILURE_SITE_STATIC_CHECK = "static_check"
+FAILURE_SITE_DYNAMIC_CHECK = "dynamic_check"
+FAILURE_SITE_WORKER = "worker"
+
+
+def structured_failure(
+    *,
+    failure_site: str,
+    summary: str,
+    build_id: str | None = None,
+    stage: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+    raw_log_excerpt: str | None = None,
+    container_logs: Mapping[str, str] | None = None,
+    log_source: str | None = None,
+    recognized: bool = True,
+) -> tuple[dict[str, Any], str | None, dict[str, Any] | None, str]:
+    """Build (error_detail, raw_log_excerpt, failure_logs, failure_site) for non-Jenkins fail paths."""
+
+    detail: dict[str, Any] = {
+        "failure_site": failure_site,
+        "summary": summary,
+        "recognized": recognized,
+    }
+    if build_id:
+        detail["build_id"] = build_id
+    if stage:
+        detail["stage"] = stage
+    if extra:
+        for key, value in extra.items():
+            if value is not None and key not in detail:
+                detail[key] = value
+    source = log_source or failure_site
+    logs = None
+    if raw_log_excerpt or container_logs:
+        logs = failure_logs_payload(
+            source=source,
+            raw_log_excerpt=raw_log_excerpt,
+            container_logs=container_logs,
+        )
+    elif failure_site:
+        logs = {"source": source}
+    return detail, raw_log_excerpt, logs, failure_site
+
 def failure_logs_payload(
     *,
     source: str,

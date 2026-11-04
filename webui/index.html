@@ -521,7 +521,12 @@
                   <p id="buildPollStatus" class="operation-status small muted" role="status" aria-live="polite">尚无构建状态查询。</p>
                   <button id="pollBuildButton" class="button button-quiet" type="button">刷新状态</button>
                 </div>
-                <pre id="buildOutput" class="json-output tall" aria-live="polite">等待构建操作</pre>
+                <div id="buildFailurePanel" class="failure-panel" hidden>
+                    <h4>失败现场</h4>
+                    <dl id="buildFailureMeta" class="failure-meta"></dl>
+                    <pre id="buildFailureExcerpt" class="json-output" hidden></pre>
+                  </div>
+                  <pre id="buildOutput" class="json-output tall" aria-live="polite">等待构建操作</pre>
                 <div id="buildTaskLegacyDetails" class="build-task-legacy-details">
                   <h3 id="historyDetailTitle">构建详情</h3>
                   <p id="historyDetailMeta" class="muted small"></p>
@@ -529,6 +534,11 @@
                   <div class="history-detail-grid">
                     <div class="history-detail-block">
                       <h4>BuildJob</h4>
+                      <div id="historyFailurePanel" class="failure-panel" hidden>
+                        <h4>失败现场</h4>
+                        <dl id="historyFailureMeta" class="failure-meta"></dl>
+                        <pre id="historyFailureExcerpt" class="json-output" hidden></pre>
+                      </div>
                       <pre id="historyDetailBuild" class="json-output tall">等待查询</pre>
                     </div>
                     <div class="history-detail-block">

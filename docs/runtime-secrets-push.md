@@ -45,5 +45,22 @@
 - [ ] 仅占位符 Compose + 推送完整 `environment` → 构建成功且容器内变量正确
 - [ ] 缺必填变量 → validating/failed，Jenkins 未被误触发
 - [ ] Jenkins 参数 / 日志 / 镜像层无密钥明文；`ENVIRONMENT_JSON={}`
-- [ ] `app_info` 不回显 environment 值
+- [ ] `app_info` 不回显 environment 值（仅 `environment_keys`）
 - [ ] 成功后 PATCH 清空 `environment`，运行中服务仍可用
+- [x] Fernet：写入后 Mongo/内部密文以 `fernet:` 前缀持久化（`SecretBox.encrypt_environment`）
+- [x] 读 API：`GET app_info` 返回 `environment_keys`，响应中无明文 environment 值 / 无 `environment_ciphertext`
+- [x] Worker 触发 Jenkins 时 `JenkinsBuildRequest.environment={}`（推送模型不把密钥送进 Job）
+- [ ] 实机烟雾：对 disposable app PATCH `SMOKE_ORCH_VAR=hello-smoke`，确认 keys 可见、值不可见、密文 `fernet:`（见 live 验收记录）
+
+### 实机烟雾命令（:8088）
+
+```bash
+# 1) 取 token 后 PATCH environment
+curl -sS -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json'   -d '{"environment":{"SMOKE_ORCH_VAR":"hello-smoke"}}'   http://10.32.12.111:8088/api/v1/jenkins/app_info/$APPID
+
+# 2) 读回：应含 environment_keys=["SMOKE_ORCH_VAR"]，且无 hello-smoke 明文
+curl -sS -H "Authorization: Bearer $TOKEN"   http://10.32.12.111:8088/api/v1/jenkins/app_info/$APPID
+
+# 3) Mongo 侧密文前缀（容器内）
+docker exec orchestrator-route-checks-mongo-1 mongosh --quiet orchestrator   --eval 'db.apps.findOne({appid:"'"$APPID"'"},{environment_ciphertext:1})'
+```

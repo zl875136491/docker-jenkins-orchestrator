@@ -27,7 +27,7 @@ from orchestrator.route_checks import (
     DYNAMIC_ROLE, RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError,
 )
 from orchestrator.route_logs import BuildLogCollector
-from orchestrator.jenkins_diagnostics import failure_logs_payload
+from orchestrator.jenkins_diagnostics import FAILURE_SITE_DYNAMIC_CHECK, failure_logs_payload
 from orchestrator.route_probes import ProbeClient, ProbeEndpoint, validate_probe_payload
 from orchestrator.services import NotFoundError
 
@@ -307,6 +307,7 @@ class DynamicCheckService:
             detail = {
                 "build_id": build_id,
                 "source": "dynamic_route_check",
+                "failure_site": FAILURE_SITE_DYNAMIC_CHECK,
                 "recognized": True,
                 "summary": report or "动态路由检查失败",
                 "probe_final": (result or {}).get("final") if isinstance(result, dict) else None,
@@ -325,6 +326,7 @@ class DynamicCheckService:
                 error_detail=detail,
                 raw_log_excerpt=excerpt,
                 failure_logs=logs,
+                failure_site=FAILURE_SITE_DYNAMIC_CHECK,
             )
         self._sync_result(build, guard)
         return build
@@ -335,7 +337,7 @@ class DynamicCheckService:
         if build.dynamic_status in {"succeeded", "failed"}:
             if build.dynamic_status == "failed" and build.status == BuildStatus.DEPLOYING:
                 guard()
-                build = self.builds.fail(build_id, report or "动态路由检查失败")
+                build = self.builds.fail(build_id, report or "动态路由检查失败", failure_site=FAILURE_SITE_DYNAMIC_CHECK, error_detail={"failure_site": FAILURE_SITE_DYNAMIC_CHECK, "summary": report or "动态路由检查失败", "recognized": True, "build_id": build_id, "source": "dynamic_route_check"})
             self._sync_result(build, guard)
             return build
         if build.status != BuildStatus.DEPLOYING:
@@ -467,7 +469,7 @@ class DynamicCheckService:
                         current = self._build(build.build_id)
                         if current.dynamic_status == "failed" and current.status == BuildStatus.DEPLOYING:
                             tracker.guard()
-                            current = self.builds.fail(build.build_id, current.dynamic_report_text or "动态路由检查失败")
+                            current = self.builds.fail(build.build_id, current.dynamic_report_text or "动态路由检查失败", failure_site=FAILURE_SITE_DYNAMIC_CHECK, error_detail={"failure_site": FAILURE_SITE_DYNAMIC_CHECK, "summary": current.dynamic_report_text or "动态路由检查失败", "recognized": True, "build_id": build.build_id, "source": "dynamic_route_check"})
                         if current.dynamic_status == "failed":
                             self._sync_result(current, tracker.guard)
                 self.teardown(build.build_id)

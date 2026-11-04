@@ -724,3 +724,30 @@ pre { height: auto; max-height: none; overflow: visible; overflow-wrap: anywhere
 @media (prefers-reduced-motion: reduce) {
   .toast { transition: none; }
 }
+
+
+.failure-panel {
+  margin: 0.75rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid #c45c5c;
+  border-radius: 8px;
+  background: #fff5f5;
+}
+.failure-panel h4 {
+  margin: 0 0 0.5rem;
+  color: #8b1e1e;
+}
+.failure-meta {
+  display: grid;
+  grid-template-columns: 8rem 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+.failure-meta dt { color: #666; font-weight: 600; }
+.failure-meta dd { margin: 0; word-break: break-word; white-space: pre-wrap; }
+.failure-panel pre {
+  max-height: 18rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}

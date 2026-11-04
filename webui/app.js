@@ -512,8 +512,71 @@
     syncNavigation();
   }
 
+
+  function isSecretLookingKey(key) {
+    return /password|passwd|secret|token|credential|api[_-]?key|private[_-]?key|authorization/i.test(String(key || ""));
+  }
+
+  function sanitizeFailureValue(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value, (k, v) => {
+        if (isSecretLookingKey(k)) return "***";
+        if (typeof v === "string" && /fernet:|Bearer\s+[A-Za-z0-9\-._~+\/=]{12,}/i.test(v)) return "***";
+        return v;
+      }, 2);
+    } catch (_err) {
+      return String(value);
+    }
+  }
+
+  function renderFailurePanel(build, metaId, excerptId, panelId) {
+    const panel = $(panelId);
+    const meta = $(metaId);
+    const excerpt = $(excerptId);
+    if (!panel || !meta || !excerpt) return;
+    const failed = String(build?.status || "").toLowerCase() === "failed";
+    const hasStructured = !!(build && (build.failure_site || build.error_detail || build.raw_log_excerpt || build.failure_logs || build.stage));
+    if (!failed || !hasStructured) {
+      panel.hidden = true;
+      meta.innerHTML = "";
+      excerpt.hidden = true;
+      excerpt.textContent = "";
+      return;
+    }
+    const rows = [
+      ["stage", build.stage || (build.error_detail && build.error_detail.stage) || ""],
+      ["failure_site", build.failure_site || (build.error_detail && build.error_detail.failure_site) || ""],
+      ["error", build.error || ""],
+      ["summary", (build.error_detail && build.error_detail.summary) || ""],
+      ["cause", (build.error_detail && build.error_detail.cause) || ""],
+      ["stage_history", Array.isArray(build.stage_history) ? build.stage_history.join(" → ") : ""],
+    ].filter(([, value]) => value);
+    meta.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${String(v).replace(/[<>&]/g, (ch) => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[ch]))}</dd>`).join("");
+    const excerptText = build.raw_log_excerpt
+      || (build.failure_logs && (build.failure_logs.raw_log_excerpt || sanitizeFailureValue(build.failure_logs.container_logs)))
+      || (build.error_detail ? sanitizeFailureValue(build.error_detail) : "");
+    if (excerptText) {
+      excerpt.hidden = false;
+      excerpt.textContent = String(excerptText).slice(0, 12000);
+    } else {
+      excerpt.hidden = true;
+      excerpt.textContent = "";
+    }
+    panel.hidden = false;
+  }
+
+  function renderBuildFailureViews(build) {
+    renderFailurePanel(build, "buildFailureMeta", "buildFailureExcerpt", "buildFailurePanel");
+    renderFailurePanel(build, "historyFailureMeta", "historyFailureExcerpt", "historyFailurePanel");
+  }
+
   function pretty(targetId, value) {
     $(targetId).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    if ((targetId === "buildOutput" || targetId === "historyDetailBuild") && value && typeof value === "object") {
+      renderBuildFailureViews(value);
+    }
   }
 
   function prettyNode(target, value) {
