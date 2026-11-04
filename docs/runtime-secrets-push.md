@@ -50,7 +50,11 @@
 - [x] Fernet：写入后 Mongo/内部密文以 `fernet:` 前缀持久化（`SecretBox.encrypt_environment`）
 - [x] 读 API：`GET app_info` 返回 `environment_keys`，响应中无明文 environment 值 / 无 `environment_ciphertext`
 - [x] Worker 触发 Jenkins 时 `JenkinsBuildRequest.environment={}`（推送模型不把密钥送进 Job）
-- [ ] 实机烟雾：对 disposable app PATCH `SMOKE_ORCH_VAR=hello-smoke`，确认 keys 可见、值不可见、密文 `fernet:`（见 live 验收记录）
+- [x] 实机烟雾（2026-11-04 Asia/Shanghai）：PATCH `e2e-dashboard-20261024` `environment.SMOKE_ORCH_VAR=hello-smoke`
+  - `GET app_info` → `environment_keys=["SMOKE_ORCH_VAR"]`，响应无 `hello-smoke` / 无 `environment_ciphertext`
+  - Mongo `orchestrator.user_apps.environment_ciphertext` 前缀 `fernet:`
+  - Worker 内 `JenkinsBuildRequest(... environment={}).as_parameters()["ENVIRONMENT_JSON"] == "{}"`；`SecretBox.encrypt_environment` → `fernet:`
+  - 烟雾后已 PATCH 清空 `environment`
 
 ### 实机烟雾命令（:8088）
 
