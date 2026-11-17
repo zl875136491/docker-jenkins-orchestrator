@@ -62,7 +62,7 @@ from orchestrator.repository import RepositoryError
 from orchestrator.build_resources import ResourceConflict
 from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFoundError
 from orchestrator.templates import TemplateError
-from orchestrator.workspaces import WorkspaceError, WorkspaceLimitError
+from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceLimitError
 from orchestrator.route_checks import RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError
 
 bearer = HTTPBearer(auto_error=False)
@@ -207,6 +207,15 @@ def create_app(
 
     api = FastAPI(title="Docker-Jenkins Orchestrator", version="0.2.0", lifespan=lifespan)
     api.state.container = container
+
+    @api.exception_handler(ComposeConfigError)
+    async def compose_config_error(_: Request, exc: ComposeConfigError) -> JSONResponse:
+        """Handle Compose configuration errors with structured error details."""
+        content = {
+            "detail": str(exc),
+            "error_detail": exc.error_detail,
+        }
+        return JSONResponse(status_code=422, content=content)
 
     @api.exception_handler(WorkspaceError)
     async def workspace_error(_: Request, exc: WorkspaceError) -> JSONResponse:

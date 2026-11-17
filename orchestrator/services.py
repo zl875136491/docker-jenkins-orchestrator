@@ -34,7 +34,7 @@ from orchestrator.secrets import SecretBox
 from orchestrator.tasks import TaskDispatcher
 from orchestrator.templates import TemplateError
 from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepositoryRef
-from orchestrator.workspaces import WorkspaceError, WorkspaceStore
+from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceStore
 from orchestrator.naming import build_namespace
 
 
@@ -522,7 +522,13 @@ class BuildService:
                     snapshot = self.application_service.workspace.snapshot(appid, build.build_id)
                 except WorkspaceError as exc:
                     tracker.guard()
-                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail={"failure_site": "precheck", "summary": str(exc), "recognized": True, "build_id": build.build_id})
+                    # Use structured error_detail from ComposeConfigError if available
+                    error_detail = getattr(exc, "error_detail", None)
+                    if not error_detail:
+                        error_detail = {"failure_site": "precheck", "summary": str(exc), "recognized": True, "build_id": build.build_id}
+                    else:
+                        error_detail = {**error_detail, "failure_site": "precheck", "build_id": build.build_id}
+                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail=error_detail)
                     raise BuildInputError(str(exc)) from exc
                 tracker.guard()
                 self.repository.update_build(build.build_id, snapshot)

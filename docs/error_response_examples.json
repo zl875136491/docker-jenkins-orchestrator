@@ -1,0 +1,300 @@
+{
+  "description": "构建错误响应示例 - 新旧格式对比",
+  "version": "2.0",
+  "date": "2026-11-17",
+  
+  "examples": {
+    "compose_config_error_git_bind_mount": {
+      "description": "Git源使用相对bind mount（Compose配置错误）",
+      "scenario": "用户在Git源Compose中配置了 ./data:/app/data",
+      "http_status": 422,
+      "v2_response": {
+        "build_id": "a5d4eea7103f42f3a92b49c9e7f6be83",
+        "appid": "APP-20261114-DDA5594C",
+        "status": "failed",
+        "failure_site": "validating",
+        "error": "Relative bind mount './data/redis' is not supported for Git-based builds. Git source files are checked out during the Jenkins build stage, not in the workspace snapshot. To include files in the container, use COPY instructions in your Dockerfile instead of bind mounts.",
+        "error_detail": {
+          "code": "COMPOSE_CONFIG_ERROR",
+          "subcode": "UNSUPPORTED_GIT_BIND_MOUNT",
+          "summary": "Relative bind mount './data/redis' is not supported for Git-based builds. Git source files are checked out during the Jenkins build stage, not in the workspace snapshot. To include files in your container, use COPY instructions in your Dockerfile instead of bind mounts.",
+          "service": "redis",
+          "config_path": "services.redis.volumes",
+          "remediation": "Replace bind mounts with Dockerfile COPY instructions. For configuration files: COPY config/ /app/config/. For data persistence: use named Docker volumes instead of bind mounts.",
+          "failure_site": "validating",
+          "build_id": "a5d4eea7103f42f3a92b49c9e7f6be83",
+          "recognized": true
+        },
+        "stage": "failed",
+        "jenkins_queue_url": null,
+        "jenkins_build_number": null,
+        "git_commit_sha": "17ef4863031e0e198597f8d82819bdfa8e26f7f7",
+        "created_at": "2026-11-17T10:15:30+08:00",
+        "updated_at": "2026-11-17T10:15:32+08:00"
+      },
+      "v1_response_legacy": {
+        "build_id": "a5d4eea7103f42f3a92b49c9e7f6be83",
+        "appid": "APP-20261114-DDA5594C",
+        "status": "failed",
+        "failure_site": "validating",
+        "error": "Workspace mount source does not exist: ./data/redis; upload it before creating the build",
+        "stage": "failed",
+        "jenkins_queue_url": null,
+        "jenkins_build_number": null,
+        "git_commit_sha": "17ef4863031e0e198597f8d82819bdfa8e26f7f7",
+        "created_at": "2026-11-17T10:15:30+08:00",
+        "updated_at": "2026-11-17T10:15:32+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": true,
+          "判断依据": "error_detail.code == 'COMPOSE_CONFIG_ERROR'",
+          "user_action": "修改Compose配置，使用Dockerfile COPY替代bind mount"
+        },
+        "v1": {
+          "is_compose_error": "无法准确判断",
+          "误导": "提示'upload it'让用户误以为需要上传workspace文件，但实际是配置问题",
+          "user_action": "用户可能尝试上传文件（错误的方向）"
+        }
+      }
+    },
+    
+    "jenkins_build_failure": {
+      "description": "Jenkins构建失败（编译错误，非配置问题）",
+      "scenario": "代码编译错误，TypeScript类型检查失败",
+      "http_status": 200,
+      "v2_response": {
+        "build_id": "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6",
+        "appid": "APP-Frontend",
+        "status": "failed",
+        "failure_site": "jenkins",
+        "error": "阶段=Build Docker image；节点=jenkins-worker-3；位置=Dockerfile:15，console L342；原因=npm ERR! code ERESOLVE: unable to resolve dependency tree；上下文=required: react@^18.0.0 / actual: react@17.0.2；退出码=1",
+        "error_detail": {
+          "stage": "Build Docker image",
+          "node": "jenkins-worker-3",
+          "location": "Dockerfile:15, console L342",
+          "source_file": "Dockerfile:15",
+          "cause": "",
+          "reason": "npm ERR! code ERESOLVE: unable to resolve dependency tree",
+          "context": [
+            "required: react@^18.0.0",
+            "actual: react@17.0.2"
+          ],
+          "exit_code": "1",
+          "console_line": 342,
+          "recognized": true,
+          "failure_site": "jenkins",
+          "build_id": "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6",
+          "jenkins_build_number": 1523,
+          "jenkins_job": "APPS-orchestrator"
+        },
+        "stage": "failed",
+        "jenkins_queue_url": "https://jenkins.example/queue/item/8234/",
+        "jenkins_build_number": 1523,
+        "git_commit_sha": "abc123def456",
+        "created_at": "2026-11-17T11:20:00+08:00",
+        "updated_at": "2026-11-17T11:25:30+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": false,
+          "判断依据": "failure_site == 'jenkins' && error_detail.code != 'COMPOSE_CONFIG_ERROR'",
+          "user_action": "查看Jenkins构建日志，修复代码/依赖问题"
+        }
+      }
+    },
+    
+    "network_dns_failure": {
+      "description": "网络DNS解析失败（基础设施问题，非配置错误）",
+      "scenario": "拉取基础镜像时DNS解析失败",
+      "http_status": 200,
+      "v2_response": {
+        "build_id": "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
+        "appid": "APP-Backend",
+        "status": "failed",
+        "failure_site": "jenkins",
+        "error": "阶段=Pull base images；位置=console L89；原因=DNS 解析失败：could not resolve host: registry.hub.docker.com",
+        "error_detail": {
+          "stage": "Pull base images",
+          "location": "console L89",
+          "cause": "DNS 解析失败",
+          "reason": "could not resolve host: registry.hub.docker.com",
+          "console_line": 89,
+          "recognized": true,
+          "failure_site": "jenkins",
+          "build_id": "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
+          "jenkins_build_number": 1524,
+          "jenkins_job": "APPS-orchestrator"
+        },
+        "stage": "failed",
+        "jenkins_queue_url": "https://jenkins.example/queue/item/8235/",
+        "jenkins_build_number": 1524,
+        "git_commit_sha": "def456abc789",
+        "created_at": "2026-11-17T12:00:00+08:00",
+        "updated_at": "2026-11-17T12:02:15+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": false,
+          "判断依据": "error_detail.cause == 'DNS 解析失败' && no 'code' field",
+          "user_action": "检查网络连接，等待基础设施恢复或联系运维"
+        }
+      }
+    },
+    
+    "workspace_source_missing_file": {
+      "description": "Workspace源文件缺失（用户操作错误，非配置问题）",
+      "scenario": "Workspace源配置了bind mount但忘记上传文件",
+      "http_status": 200,
+      "v2_response": {
+        "build_id": "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8",
+        "appid": "APP-Workspace",
+        "status": "failed",
+        "failure_site": "validating",
+        "error": "Workspace mount source does not exist: ./config; upload it before creating the build",
+        "error_detail": {
+          "failure_site": "validating",
+          "summary": "Workspace mount source does not exist: ./config; upload it before creating the build",
+          "recognized": true,
+          "build_id": "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8",
+          "exception_type": "WorkspaceError"
+        },
+        "stage": "failed",
+        "jenkins_queue_url": null,
+        "jenkins_build_number": null,
+        "git_commit_sha": null,
+        "created_at": "2026-11-17T13:00:00+08:00",
+        "updated_at": "2026-11-17T13:00:02+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": false,
+          "判断依据": "failure_site == 'validating' && exception_type == 'WorkspaceError' && no 'code' field",
+          "user_action": "上传缺失的文件到workspace: POST /api/v1/workspace/{appid}"
+        }
+      },
+      "note": "这是WorkspaceError但不是ComposeConfigError，提示'upload it'是正确的"
+    },
+    
+    "auth_failure_git": {
+      "description": "Git仓库认证失败（权限问题，非配置错误）",
+      "scenario": "Git仓库URL正确但无访问权限",
+      "http_status": 200,
+      "v2_response": {
+        "build_id": "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9",
+        "appid": "APP-Private",
+        "status": "failed",
+        "failure_site": "validating",
+        "error": "GitLab repository validation failed: authentication failed for https://git.example/private/repo.git",
+        "error_detail": {
+          "failure_site": "validating",
+          "summary": "GitLab repository validation failed: authentication failed",
+          "recognized": true,
+          "build_id": "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9",
+          "exception_type": "GitLabError"
+        },
+        "stage": "failed",
+        "jenkins_queue_url": null,
+        "jenkins_build_number": null,
+        "git_commit_sha": null,
+        "created_at": "2026-11-17T14:00:00+08:00",
+        "updated_at": "2026-11-17T14:00:03+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": false,
+          "判断依据": "exception_type == 'GitLabError' && no 'code' field",
+          "user_action": "检查Git仓库访问权限，配置SSH密钥或访问令牌"
+        }
+      }
+    },
+    
+    "deployment_port_conflict": {
+      "description": "部署阶段端口冲突（运行时问题，非配置错误）",
+      "scenario": "请求的端口已被其他服务占用",
+      "http_status": 200,
+      "v2_response": {
+        "build_id": "f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0",
+        "appid": "APP-WebServer",
+        "status": "failed",
+        "failure_site": "deploy",
+        "error": "Deployment failed: port 8080 is already allocated",
+        "error_detail": {
+          "failure_site": "deploy",
+          "summary": "Deployment failed: port 8080 is already allocated",
+          "recognized": true,
+          "build_id": "f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0",
+          "stage": "deploying",
+          "exception_type": "DockerServiceError"
+        },
+        "stage": "failed",
+        "jenkins_queue_url": "https://jenkins.example/queue/item/8236/",
+        "jenkins_build_number": 1525,
+        "git_commit_sha": "fed789cba012",
+        "created_at": "2026-11-17T15:00:00+08:00",
+        "updated_at": "2026-11-17T15:10:45+08:00"
+      },
+      "classification": {
+        "v2": {
+          "is_compose_error": false,
+          "判断依据": "failure_site == 'deploy' && no 'code' field",
+          "user_action": "修改端口映射或清理占用端口的服务"
+        }
+      }
+    }
+  },
+  
+  "client_integration_guide": {
+    "description": "APPS客户端如何集成新的错误分类",
+    
+    "step1_check_code_field": {
+      "description": "首先检查error_detail.code字段判断错误类型",
+      "python_example": "def classify_build_error(build):\n    error_detail = build.get('error_detail') or {}\n    code = error_detail.get('code')\n    \n    if code == 'COMPOSE_CONFIG_ERROR':\n        return 'compose_config_error'\n    \n    failure_site = build.get('failure_site')\n    if failure_site == 'jenkins':\n        return 'jenkins_build_error'\n    elif failure_site == 'deploy':\n        return 'deployment_error'\n    elif failure_site == 'validating':\n        return 'validation_error'\n    else:\n        return 'unknown_error'"
+    },
+    
+    "step2_extract_details": {
+      "description": "提取结构化字段用于展示",
+      "python_example": "def get_error_display_info(build):\n    error_detail = build.get('error_detail') or {}\n    \n    return {\n        'title': build.get('error', 'Build failed'),\n        'service': error_detail.get('service'),\n        'config_path': error_detail.get('config_path'),\n        'remediation': error_detail.get('remediation'),\n        'summary': error_detail.get('summary'),\n        'failure_site': build.get('failure_site'),\n    }"
+    },
+    
+    "step3_backward_compatibility": {
+      "description": "向后兼容：处理旧版本构建记录",
+      "python_example": "def is_compose_config_error_safe(build):\n    \"\"\"兼容新旧版本的判断逻辑\"\"\"\n    error_detail = build.get('error_detail')\n    \n    # 新版本：有error_detail.code字段\n    if error_detail and 'code' in error_detail:\n        return error_detail.get('code') == 'COMPOSE_CONFIG_ERROR'\n    \n    # 旧版本：无code字段，无法准确判断\n    # 返回False，避免误判\n    return False"
+    },
+    
+    "step4_ui_rendering": {
+      "description": "UI展示建议",
+      "compose_error_ui": "{\n  \"icon\": \"⚙️\",\n  \"title\": \"配置错误\",\n  \"message\": build['error'],\n  \"remediation_section\": {\n    \"title\": \"💡 修复建议\",\n    \"content\": error_detail['remediation']\n  },\n  \"details\": {\n    \"服务\": error_detail['service'],\n    \"配置路径\": error_detail['config_path']\n  },\n  \"actions\": [\n    {\"label\": \"查看文档\", \"url\": \"/docs/compose-guide\"},\n    {\"label\": \"修改配置\", \"action\": \"edit_compose\"}\n  ]\n}",
+      "jenkins_error_ui": "{\n  \"icon\": \"🔨\",\n  \"title\": \"构建失败\",\n  \"message\": build['error'],\n  \"details\": {\n    \"Jenkins构建\": f\"#{build['jenkins_build_number']}\",\n    \"阶段\": error_detail['stage'],\n    \"退出码\": error_detail.get('exit_code')\n  },\n  \"actions\": [\n    {\"label\": \"查看Jenkins日志\", \"url\": jenkins_console_url},\n    {\"label\": \"重试构建\", \"action\": \"retry_build\"}\n  ]\n}"
+    }
+  },
+  
+  "deployment_notes": {
+    "field_availability": "新字段（error_detail.code, subcode, remediation等）仅在部署后的新构建中出现",
+    "database_compatibility": "新字段为可选，旧版本服务仍可读取构建记录",
+    "api_compatibility": "旧字段（error, failure_site, recognized）继续填充，保持向后兼容",
+    "rollback_impact": "回退后，Git源bind mount会重新出现误导性错误消息（'upload it before creating'）",
+    "testing_strategy": "部署到预发布环境后，触发各类错误场景验证error_detail正确填充"
+  },
+  
+  "api_endpoints": {
+    "get_build": {
+      "method": "GET",
+      "url": "/api/v1/jenkins/builds/{build_id}",
+      "response_fields": {
+        "error": "用户可读的错误摘要（向后兼容）",
+        "error_detail": "结构化错误详情（新增）",
+        "failure_site": "失败阶段",
+        "jenkins_queue_url": "Jenkins队列URL（未触发时为null）",
+        "jenkins_build_number": "Jenkins构建号（未触发时为null）"
+      }
+    },
+    
+    "create_build": {
+      "method": "POST",
+      "url": "/api/v1/jenkins/{appid}/builds",
+      "sync_validation": "同步检查Compose配置，立即返回422如果有配置错误",
+      "async_validation": "复杂的验证（如Git源bind mount检查）在异步validating阶段执行"
+    }
+  }
+}

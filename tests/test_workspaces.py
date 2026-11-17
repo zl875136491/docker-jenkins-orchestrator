@@ -11,7 +11,7 @@ from main import create_app
 from orchestrator.config import Settings
 from orchestrator.models import BuildCreate, UserAppCreate
 from orchestrator.worker_runtime import WorkerRuntime
-from orchestrator.workspaces import WorkspaceError, WorkspaceLimitError, WorkspaceStore
+from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceLimitError, WorkspaceStore
 from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab, successful_deployment
 from orchestrator.jenkins import JenkinsBuild, JenkinsQueueItem, JenkinsResultArtifact
 from tests.route_check_fixtures import TEST_COMMIT_SHA, PassingDynamicChecks, prepare_static_pass
@@ -270,3 +270,167 @@ def test_workspace_download_rejects_expired_token(client):
     token = jwt.encode({"scope": "workspace-download", "appid": "APP-One", "build_id": build.build_id, "exp": 1}, container.settings.jwt_secret)
     response = client.get(f"/api/v1/workspace/APP-One/builds/{build.build_id}/archive", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
+
+
+def test_git_source_bind_mount_raises_compose_config_error(client):
+    """Git sources cannot use relative bind mounts because files are checked out by Jenkins."""
+    compose = {
+        "x-orchestrator-build-source": "git",
+        "services": {
+            "web": {
+                "image": "nginx",
+                "volumes": ["./data:/app/data"]
+            }
+        }
+    }
+    register(client, "APP-GitBind", compose)
+    container = client.app.state.container
+    prepare_static_pass(container, "APP-GitBind")
+    build = container.builds.queue_build("APP-GitBind", BuildCreate())
+    
+    with pytest.raises(ComposeConfigError) as exc_info:
+        container.workspace.resolve_compose("APP-GitBind", build.build_id, compose)
+    
+    error = exc_info.value
+    assert error.code == "COMPOSE_CONFIG_ERROR"
+    assert error.subcode == "UNSUPPORTED_GIT_BIND_MOUNT"
+    assert error.service == "web"
+    assert "config_path" in error.error_detail
+    assert "remediation" in error.error_detail
+    assert "COPY" in str(error)
+    assert "Dockerfile" in str(error)
+
+
+def test_git_source_bind_mount_error_via_api_returns_422_with_structured_detail(client):
+    """API endpoints return 422 with structured error_detail for Compose config errors."""
+    compose = {
+        "x-orchestrator-build-source": "git",
+        "services": {
+            "api": {
+                "build": ".",
+                "volumes": ["./config:/app/config:ro"]
+            }
+        }
+    }
+    
+    response = client.post("/api/v1/jenkins/app_create", json={
+        "appid": "APP-API",
+        "name": "Test API",
+        "repository_url": "https://git.example/api.git",
+        "compose": compose,
+    })
+    assert response.status_code == 201
+    
+    # Trigger build which will hit validation
+    response = client.post("/api/v1/jenkins/APP-API/builds")
+    assert response.status_code == 201
+    build_id = response.json()["build_id"]
+    
+    # The build should fail during validation with structured error
+    container = client.app.state.container
+    runtime = WorkerRuntime(container.settings)
+    result = runtime.start_build(build_id, "task")
+    
+    assert result["status"] == "failed"
+    build = container.builds.get_build(build_id)
+    assert build.status.value == "failed"
+    assert build.failure_site == "validating"
+    assert build.error_detail is not None
+    assert build.error_detail.get("code") == "COMPOSE_CONFIG_ERROR"
+    assert build.error_detail.get("subcode") == "UNSUPPORTED_GIT_BIND_MOUNT"
+    assert build.error_detail.get("service") == "api"
+    assert "COPY" in build.error_detail.get("remediation", "")
+
+
+def test_workspace_source_bind_mount_checks_existence(client):
+    """Workspace sources validate that bind mount paths exist and are non-empty."""
+    compose = {
+        "x-orchestrator-build-source": "workspace",
+        "services": {
+            "web": {
+                "image": "nginx",
+                "volumes": ["./static:/usr/share/nginx/html"]
+            }
+        }
+    }
+    register(client, "APP-WorkspaceBind", compose)
+    container = client.app.state.container
+    prepare_static_pass(container, "APP-WorkspaceBind")
+    build = container.builds.queue_build("APP-WorkspaceBind", BuildCreate())
+    
+    # Missing path should raise WorkspaceError (not ComposeConfigError)
+    with pytest.raises(WorkspaceError, match="does not exist"):
+        container.workspace.resolve_compose("APP-WorkspaceBind", build.build_id, compose)
+    
+    # Upload the required file
+    client.post("/workspace/APP-WorkspaceBind", files={"files": ("static/index.html", b"<html></html>")})
+    container.workspace.snapshot("APP-WorkspaceBind", build.build_id)
+    
+    # Now it should succeed
+    resolved = container.workspace.resolve_compose("APP-WorkspaceBind", build.build_id, compose)
+    assert "/snapshots/" in resolved["services"]["web"]["volumes"][0]
+
+
+def test_named_volumes_allowed_for_both_git_and_workspace_sources(client):
+    """Named volumes work for both Git and workspace sources."""
+    for source_type in ("git", "workspace"):
+        compose = {
+            "x-orchestrator-build-source": source_type,
+            "services": {
+                "db": {
+                    "image": "postgres:16",
+                    "volumes": ["pgdata:/var/lib/postgresql/data"]
+                }
+            },
+            "volumes": {
+                "pgdata": {}
+            }
+        }
+        appid = f"APP-{source_type.capitalize()}Vol"
+        register(client, appid, compose)
+        container = client.app.state.container
+        prepare_static_pass(container, appid)
+        build = container.builds.queue_build(appid, BuildCreate())
+        
+        if source_type == "workspace":
+            # Need at least one file for workspace source
+            client.post(f"/workspace/{appid}", files={"files": ("dummy.txt", b"test")})
+            container.workspace.snapshot(appid, build.build_id)
+        
+        # Named volumes should work for both sources
+        resolved = container.workspace.resolve_compose(appid, build.build_id, compose)
+        assert resolved["services"]["db"]["volumes"] == ["pgdata:/var/lib/postgresql/data"]
+
+
+def test_error_detail_sanitization_no_secrets_in_compose_errors(client):
+    """ComposeConfigError should not leak secrets or sensitive paths."""
+    compose = {
+        "x-orchestrator-build-source": "git",
+        "services": {
+            "app": {
+                "image": "myapp",
+                "volumes": ["./secret-data:/app/data"],
+                "environment": {
+                    "SECRET_KEY": "super-secret-value"
+                }
+            }
+        }
+    }
+    register(client, "APP-Secret", compose)
+    container = client.app.state.container
+    prepare_static_pass(container, "APP-Secret")
+    build = container.builds.queue_build("APP-Secret", BuildCreate())
+    
+    with pytest.raises(ComposeConfigError) as exc_info:
+        container.workspace.resolve_compose("APP-Secret", build.build_id, compose)
+    
+    error_str = str(exc_info.value)
+    error_detail = exc_info.value.error_detail
+    
+    # Should not contain environment secrets
+    assert "super-secret-value" not in error_str
+    assert "super-secret-value" not in str(error_detail)
+    
+    # Should not contain absolute host paths
+    assert "/srv/workspaces" not in error_str
+    assert "/srv/workspaces" not in str(error_detail)
