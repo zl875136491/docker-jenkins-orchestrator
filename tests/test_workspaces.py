@@ -162,7 +162,8 @@ def test_upload_rejects_symlinks_conflicts_and_limits(tmp_path):
 
 
 def test_build_snapshot_freezes_uploads_and_compose_and_download_is_build_scoped(client):
-    register(client)
+    # Use workspace source to test bind mounts (Git source now rejects them)
+    register(client, "APP-One", {"x-orchestrator-build-source": "workspace", "services": {"web": {"image": "python:3.12", "volumes": [".:/workspace"]}}})
     assert client.post("/workspace/APP-One", files={"files": ("main.py", b"version1")}).status_code == 201
     container = client.app.state.container
     prepare_static_pass(container, "APP-One")
@@ -191,18 +192,24 @@ def test_build_snapshot_freezes_uploads_and_compose_and_download_is_build_scoped
 
 
 def test_workspace_resolves_files_long_mounts_and_rejects_missing_traversal_and_cross_app(client):
-    register(client)
+    # Use workspace source for bind mount testing (Git source rejects bind mounts)
+    register(client, "APP-One", {"x-orchestrator-build-source": "workspace", "services": {"web": {"image": "nginx"}}})
     client.post("/workspace/APP-One", files={"files": ("config/app.json", b"{}")})
     container = client.app.state.container
     prepare_static_pass(container, "APP-One")
     build = container.builds.queue_build("APP-One", BuildCreate())
-    source = {"services": {"web": {"image": "nginx", "volumes": [
+    source = {"x-orchestrator-build-source": "workspace", "services": {"web": {"image": "nginx", "volumes": [
         {"type": "bind", "source": "./config/app.json", "target": "/app.json", "read_only": True}, "data:/data"]}}}
     original = deepcopy(source)
     result = container.workspace.resolve_compose("APP-One", build.build_id, source)
     assert result["services"]["web"]["volumes"][0]["source"].endswith("/files/config/app.json")
     assert result["services"]["web"]["volumes"][0]["read_only"] is True
     assert source == original
+    # Test Git source rejects bind mount
+    git_source = {"services": {"web": {"image": "nginx", "volumes": ["./config:/app/config"]}}}
+    with pytest.raises(ComposeConfigError, match="not supported for Git-based builds"):
+        container.workspace.resolve_compose("APP-One", build.build_id, git_source)
+    # Test workspace source rejects missing/escape paths
     for mount in ("../escape:/data", "./missing:/data", "/srv/workspaces/other/files:/data"):
         source["services"]["web"]["volumes"] = [mount]
         with pytest.raises(WorkspaceError):
@@ -303,6 +310,8 @@ def test_git_source_bind_mount_raises_compose_config_error(client):
 
 def test_git_source_bind_mount_error_via_api_returns_422_with_structured_detail(client):
     """API endpoints return 422 with structured error_detail for Compose config errors."""
+    from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab
+    
     compose = {
         "x-orchestrator-build-source": "git",
         "services": {
@@ -321,18 +330,32 @@ def test_git_source_bind_mount_error_via_api_returns_422_with_structured_detail(
     })
     assert response.status_code == 201
     
-    # Trigger build which will hit validation
-    response = client.post("/api/v1/jenkins/APP-API/builds")
-    assert response.status_code == 201
-    build_id = response.json()["build_id"]
-    
-    # The build should fail during validation with structured error
+    # Queue build and run validation
     container = client.app.state.container
-    runtime = WorkerRuntime(container.settings)
-    result = runtime.start_build(build_id, "task")
+    prepare_static_pass(container, "APP-API")
+    build = container.builds.queue_build("APP-API", BuildCreate())
+    
+    # Run worker validation which will trigger ComposeConfigError
+    jenkins = FakeJenkins([], build=None)
+    gitlab = FakeGitLab("a" * 40)
+    docker = FakeDockerServices(None)
+    runtime = WorkerRuntime(
+        container.settings, 
+        repository=container.repository,
+        build_service=container.builds,
+        catalog=container.catalog,
+        jenkins=jenkins,
+        gitlab=gitlab,
+        docker_services=docker,
+        poll_scheduler=lambda *args: None,
+        route_checks=container.route_checks,
+        dynamic_checks=None
+    )
+    
+    result = runtime.start_build(build.build_id, "task")
     
     assert result["status"] == "failed"
-    build = container.builds.get_build(build_id)
+    build = container.builds.get_build(build.build_id)
     assert build.status.value == "failed"
     assert build.failure_site == "validating"
     assert build.error_detail is not None
@@ -362,18 +385,18 @@ def test_workspace_source_bind_mount_checks_existence(client):
     with pytest.raises(WorkspaceError, match="does not exist"):
         container.workspace.resolve_compose("APP-WorkspaceBind", build.build_id, compose)
     
-    # Upload the required file
+    # Upload the required file and create a new build to avoid snapshot conflict
     client.post("/workspace/APP-WorkspaceBind", files={"files": ("static/index.html", b"<html></html>")})
-    container.workspace.snapshot("APP-WorkspaceBind", build.build_id)
+    build2 = container.builds.queue_build("APP-WorkspaceBind", BuildCreate())
     
     # Now it should succeed
-    resolved = container.workspace.resolve_compose("APP-WorkspaceBind", build.build_id, compose)
+    resolved = container.workspace.resolve_compose("APP-WorkspaceBind", build2.build_id, compose)
     assert "/snapshots/" in resolved["services"]["web"]["volumes"][0]
 
 
 def test_named_volumes_allowed_for_both_git_and_workspace_sources(client):
     """Named volumes work for both Git and workspace sources."""
-    for source_type in ("git", "workspace"):
+    for idx, source_type in enumerate(("git", "workspace")):
         compose = {
             "x-orchestrator-build-source": source_type,
             "services": {
@@ -386,7 +409,7 @@ def test_named_volumes_allowed_for_both_git_and_workspace_sources(client):
                 "pgdata": {}
             }
         }
-        appid = f"APP-{source_type.capitalize()}Vol"
+        appid = f"APP-{source_type.capitalize()}Vol{idx}"  # Unique appid to avoid conflicts
         register(client, appid, compose)
         container = client.app.state.container
         prepare_static_pass(container, appid)
@@ -395,9 +418,8 @@ def test_named_volumes_allowed_for_both_git_and_workspace_sources(client):
         if source_type == "workspace":
             # Need at least one file for workspace source
             client.post(f"/workspace/{appid}", files={"files": ("dummy.txt", b"test")})
-            container.workspace.snapshot(appid, build.build_id)
         
-        # Named volumes should work for both sources
+        # Named volumes should work for both sources (no snapshot needed for git source)
         resolved = container.workspace.resolve_compose(appid, build.build_id, compose)
         assert resolved["services"]["db"]["volumes"] == ["pgdata:/var/lib/postgresql/data"]
 
