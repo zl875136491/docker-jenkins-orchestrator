@@ -19,11 +19,61 @@ from orchestrator.naming import external_namespace, validate_appid
 
 
 class WorkspaceError(ValueError):
+    """Base class for workspace-related errors."""
     pass
 
 
 class WorkspaceLimitError(WorkspaceError):
+    """Raised when workspace storage or file count limits are exceeded."""
     pass
+
+
+class ComposeConfigError(WorkspaceError):
+    """Raised for invalid or unsupported Compose configuration.
+    
+    Attributes:
+        code: Machine-readable error code (e.g., 'COMPOSE_CONFIG_ERROR')
+        subcode: Specific error subcode (e.g., 'UNSUPPORTED_BIND_MOUNT')
+        service: Service name if error is service-specific
+        config_path: Configuration path that caused the error
+        remediation: User-facing guidance for fixing the issue
+        error_detail: Complete structured error detail for API consumers
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "COMPOSE_CONFIG_ERROR",
+        subcode: str | None = None,
+        service: str | None = None,
+        config_path: str | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
+        self.service = service
+        self.config_path = config_path
+        self.remediation = remediation
+        
+        # Build structured error_detail for API consumers
+        self.error_detail = {
+            "code": code,
+            "summary": message,
+            "recognized": True,
+        }
+        if subcode:
+            self.error_detail["subcode"] = subcode
+        if service:
+            self.error_detail["service"] = service
+        if config_path:
+            self.error_detail["config_path"] = config_path
+        if remediation:
+            self.error_detail["remediation"] = remediation
+        
+        # Set failure_site for worker_runtime._fail
+        self.failure_site = "validating"
 
 
 class WorkspaceStore:
@@ -220,12 +270,12 @@ class WorkspaceStore:
 
     def resolve_compose(self, appid: str, build_id: str, compose: Mapping[str, Any]) -> dict[str, Any]:
         result = deepcopy(dict(compose))
-        self.build_source(result)
+        source_type = self.build_source(result)
         root = self.snapshot_path(appid, build_id) / "files"
         for definition in result.get("volumes", {}).values() if isinstance(result.get("volumes"), Mapping) else ():
             if isinstance(definition, Mapping) and isinstance(definition.get("name"), str):
                 self._reject_managed_absolute(definition["name"])
-        for service in result.get("services", {}).values():
+        for service_name, service in result.get("services", {}).items():
             mounts = service.get("volumes")
             if not isinstance(mounts, list):
                 continue
@@ -236,7 +286,7 @@ class WorkspaceStore:
                     if len(parts) in (2, 3):
                         source = parts[0]
                         if source.startswith("."):
-                            parts[0] = self._resolve_source(root, source)
+                            parts[0] = self._resolve_source(root, source, build_source=source_type, service_name=service_name)
                             mount = ":".join(parts)
                         else:
                             self._reject_managed_absolute(source)
@@ -245,7 +295,7 @@ class WorkspaceStore:
                     source = mount.get("source")
                     if isinstance(source, str):
                         if mount.get("type") == "bind" and not source.startswith("/"):
-                            mount["source"] = self._resolve_source(root, source)
+                            mount["source"] = self._resolve_source(root, source, build_source=source_type, service_name=service_name)
                         else:
                             self._reject_managed_absolute(source)
                 resolved.append(mount)
@@ -294,13 +344,56 @@ class WorkspaceStore:
         if source.startswith("/") and Path(os.path.normpath(source)).is_relative_to(self.host_root):
             raise WorkspaceError("Use relative workspace mounts; direct managed workspace paths are forbidden")
 
-    def _resolve_source(self, root: Path, source: str) -> str:
+    def _resolve_source(self, root: Path, source: str, *, build_source: str = "git", service_name: str | None = None) -> str:
+        """Resolve and validate a relative bind mount source path.
+        
+        For workspace sources: validates that the path exists and is non-empty.
+        For git sources: rejects bind mounts as unsupported (files don't exist until Jenkins checkout).
+        
+        Args:
+            root: The workspace snapshot root directory
+            source: The relative mount source path from the Compose file
+            build_source: Either "git" or "workspace" (from x-orchestrator-build-source)
+            service_name: The service name for error reporting
+        
+        Returns:
+            The absolute host path to use as the bind mount source
+            
+        Raises:
+            ComposeConfigError: For Git sources using bind mounts (unsupported)
+            WorkspaceError: For workspace sources with missing/invalid paths
+        """
         relative = self.relative_path(source, allow_root=True)
+        
+        # Git sources cannot use bind mounts because files don't exist until Jenkins checkout
+        if build_source == "git":
+            error_msg = (
+                f"Relative bind mount '{source}' is not supported for Git-based builds. "
+                f"Git source files are checked out during the Jenkins build stage, not in the workspace snapshot. "
+                f"To include files in the container, use COPY instructions in your Dockerfile instead of bind mounts."
+            )
+            raise ComposeConfigError(
+                error_msg,
+                code="COMPOSE_CONFIG_ERROR",
+                subcode="UNSUPPORTED_GIT_BIND_MOUNT",
+                service=service_name,
+                config_path=f"services.{service_name}.volumes" if service_name else "volumes",
+                remediation=(
+                    "Replace bind mounts with Dockerfile COPY instructions. "
+                    "For configuration files: COPY config/ /app/config/. "
+                    "For data persistence: use named Docker volumes instead of bind mounts."
+                ),
+            )
+        
+        # For workspace sources, validate the path exists and is non-empty
         path = self._safe_path(root, relative)
         if not path.exists():
-            raise WorkspaceError(f"Workspace mount source does not exist: {source}; upload it before creating the build")
+            error_msg = f"Workspace mount source does not exist: {source}; upload it before creating the build"
+            raise WorkspaceError(error_msg)
         if not path.is_dir() and not path.is_file():
             raise WorkspaceError("Workspace mount source must be a file or directory")
         if path.is_dir() and not any(path.iterdir()):
-            raise WorkspaceError(f"Workspace mount source is empty: {source}; upload files before creating the build")
+            error_msg = f"Workspace mount source is empty: {source}; upload files before creating the build"
+            raise WorkspaceError(error_msg)
+        
         return str(self.host_root / path.relative_to(self.root))
