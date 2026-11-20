@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from orchestrator.docker_services import DockerServiceError, DockerSwarmAdapter
+
 
 # Reuse the same pattern from worker_runtime.py for consistency
 _COMPOSE_VARIABLE = re.compile(
@@ -71,8 +73,12 @@ class ComposeEnvironmentValidator:
             if raw_environment is None:
                 continue
             
-            # Parse environment entries (supports list and dict forms)
-            entries = ComposeEnvironmentValidator._parse_environment(raw_environment)
+            # Parse environment using DockerSwarmAdapter (same validation as worker)
+            try:
+                entries = DockerSwarmAdapter._environment(raw_environment)
+            except DockerServiceError:
+                # Invalid environment format - skip this service (will fail in worker)
+                continue
             
             for entry in entries:
                 if "=" not in entry:
@@ -98,16 +104,6 @@ class ComposeEnvironmentValidator:
                     ))
         
         return references
-    
-    @staticmethod
-    def _parse_environment(raw: Any) -> list[str]:
-        """Parse environment from list or dict form into KEY=VALUE list."""
-        if isinstance(raw, list):
-            return [str(item) for item in raw if isinstance(item, str)]
-        elif isinstance(raw, dict):
-            return [f"{k}={v}" for k, v in raw.items() if isinstance(v, str)]
-        else:
-            return []
     
     @staticmethod
     def validate(
@@ -137,53 +133,46 @@ class ComposeEnvironmentValidator:
             
             refs_for_var = by_name[ref.name]
             
-            # Determine if this variable is required
-            # Required if ANY reference lacks default or uses :? operator
-            any_required = any(
-                not r.has_default and r.operator not in {"-", ":-"}
-                for r in refs_for_var
-            )
-            any_empty_required = any(
-                r.operator in {":?", ":-"}
-                for r in refs_for_var
-            )
+            # Check per-reference: different operators have different requirements
+            value = environment.get(ref.name)
+            is_missing = ref.name not in environment or value is None
+            is_empty = value == ""
             
-            # Check each reference to determine failure reason
-            failure_reason: str | None = None
-            if ref.name not in environment:
-                # Variable not configured at all
-                if any_required:
-                    failure_reason = "missing"
-            else:
-                # Variable configured but may be empty
-                value = environment[ref.name]
-                if not value and any_empty_required:
-                    failure_reason = "empty"
+            # Collect failures per reference location
+            failed_locations = []
+            reason = None
             
-            if failure_reason:
-                # Collect all locations where this variable is referenced
-                locations = [
-                    {
+            for r in refs_for_var:
+                ref_failed = False
+                ref_reason = None
+                
+                if is_missing:
+                    # Missing: fails unless has default (- or :-)
+                    if not r.has_default:
+                        ref_failed = True
+                        ref_reason = "missing"
+                elif is_empty:
+                    # Empty: only fails with :? operator
+                    # :- and - allow empty and use default
+                    if r.operator == ":?":
+                        ref_failed = True
+                        ref_reason = "empty"
+                
+                if ref_failed:
+                    failed_locations.append({
                         "service": r.service,
                         "environment_key": r.environment_key,
                         "config_path": r.config_path,
-                    }
-                    for r in refs_for_var
-                ]
-                
-                # Use operator from first reference that triggered the requirement
-                operator = next(
-                    (r.operator for r in refs_for_var
-                     if (failure_reason == "missing" and not r.has_default)
-                     or (failure_reason == "empty" and r.operator in {":?", ":-"})),
-                    None
-                )
-                
+                    })
+                    if reason is None:
+                        reason = ref_reason
+            
+            if failed_locations:
                 missing.append(MissingVariable(
                     name=ref.name,
-                    reason=failure_reason,
-                    locations=locations,
-                    operator=operator,
+                    reason=reason or "missing",
+                    locations=failed_locations,
+                    operator=refs_for_var[0].operator,
                 ))
         
         return missing

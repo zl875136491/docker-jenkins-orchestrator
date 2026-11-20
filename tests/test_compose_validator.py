@@ -368,23 +368,24 @@ def test_validate_handles_null_environment():
     assert missing == []
 
 
-def test_validate_handles_non_string_environment_values():
-    """Skip non-string environment values gracefully."""
+def test_validate_handles_invalid_environment_gracefully():
+    """DockerSwarmAdapter._environment rejects invalid formats, validator skips those services."""
     compose = {
         "services": {
-            "app": {
-                "environment": [
-                    "VALID=${VALID}",
-                    123,  # Invalid: number
-                    None,  # Invalid: null
-                ]
+            "valid": {
+                "environment": ["VAR=${VAR}"]  # Valid
+            },
+            "invalid": {
+                "environment": 123  # Invalid format - not list or dict
             }
         }
     }
     environment = {}
     
+    # Validator should extract from valid service, skip invalid
     missing = ComposeEnvironmentValidator.validate(compose, environment)
     
-    # Should only extract VALID
     assert len(missing) == 1
-    assert missing[0].name == "VALID"
+    assert missing[0].name == "VAR"
+    assert len(missing[0].locations) == 1
+    assert missing[0].locations[0]["service"] == "valid"
