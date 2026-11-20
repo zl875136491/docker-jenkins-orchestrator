@@ -66,14 +66,16 @@
 | 标准 | `${VAR}` | 失败 | 通过 |
 | 必需非空 | `${VAR:?hint}` | 失败 | 失败 |
 | 必需存在 | `${VAR?hint}` | 失败 | 通过 |
-| 默认值 | `${VAR:-default}` | 通过 | 通过（用default） |
-| 仅缺失默认 | `${VAR-default}` | 通过 | 通过（用空值） |
+| 默认值（空时） | `${VAR:-default}` | 通过 | 通过（用default） |
+| 默认值（缺失时） | `${VAR-default}` | 通过 | 通过（保留空） |
 | 转义 | `$$` | - | - |
 | 裸语法 | `$VAR` | 失败 | 通过 |
 
 **关键区别**：
-- `:-` 在空值时使用默认值（不报错）
-- `:?` 在空值时失败（报错）
+- `:-` 在缺失或空值时使用默认值
+- `-` 仅在缺失时使用默认值（空值保留空）
+- `:?` 在缺失或空值时失败
+- `?` 仅在缺失时失败（空值通过）
 
 ## 验证范围
 
@@ -113,38 +115,40 @@
 | error_detail.missing_variables | 不存在 | 新增 |
 
 **时序变化**（不兼容）：
-- 旧版本：HTTP 202 → Jenkins失败
-- 新版本：HTTP 422（同步拒绝）
+- 旧版本：HTTP 202 → worker validating阶段失败（Jenkins未调用）
+- 新版本：HTTP 422（同步门禁拒绝）
+
+**注意**：旧路径中Jenkins根本未调用，失败发生在worker precheck/validating阶段。
 
 APPS需同时处理两种结果。
 
-## 实际案例
+## 模拟案例
 
-APP-20261118-27C5BCB7 scm-test3（SHA ec114ef）：
+基于APP-20261118-27C5BCB7 scm-test3（SHA ec114ef）的Compose配置，模拟包含6个`:?`必填变量的场景：
 
-**旧版本**：
+**旧版本**（假设无同步门禁）：
 ```
-构建1 → 失败：BOOTSTRAP_ADMIN_PASSWORD_HASH
-构建2 → 失败：BUSINESS_MEILI_MASTER_KEY
+构建1 → HTTP 202 → worker失败：BOOTSTRAP_ADMIN_PASSWORD_HASH
+构建2 → HTTP 202 → worker失败：BUSINESS_MEILI_MASTER_KEY
 ...（需多次试错）
 ```
 
-**新版本**：
+**新版本**（实际行为）：
 ```json
 POST /build_create → HTTP 422
 {
   "missing_variables": [
-    {"name": "MONGO_URI", ...},
-    {"name": "MEILI_MASTER_KEY", ...},
-    {"name": "BUSINESS_MEILI_MASTER_KEY", ...},
-    {"name": "SESSION_SECRET", ...},
-    {"name": "BOOTSTRAP_ADMIN_PASSWORD_HASH", ...},
-    {"name": "EXT_APP_FERNET_KEY", ...}
+    {"name": "MONGO_URI", "reason": "missing"},
+    {"name": "MEILI_MASTER_KEY", "reason": "missing"},
+    {"name": "BUSINESS_MEILI_MASTER_KEY", "reason": "missing"},
+    {"name": "SESSION_SECRET", "reason": "missing"},
+    {"name": "BOOTSTRAP_ADMIN_PASSWORD_HASH", "reason": "missing"},
+    {"name": "EXT_APP_FERNET_KEY", "reason": "missing"}
   ]
 }
 ```
 
-用户一次性配置6个变量后成功。
+**注意**：6个变量都是Compose配置定义的必填项（使用`:?`），不是真实生产缺失记录。模拟演示批量报告能力。
 
 ## 修复历史
 
@@ -160,15 +164,24 @@ POST /build_create → HTTP 422
 ## 测试证据
 
 ```bash
-$ pytest tests/test_compose_validator.py tests/test_workspaces.py -v
-======================== 52 passed, 1 warning in 3.68s ========================
+$ pytest tests/test_compose_validator.py tests/test_workspaces.py tests/test_build_create_http_integration.py -v
+======================== 61 passed, 8 warnings in 4.57s ========================
 ```
 
+**测试分类**：
+- **单元测试** (18): test_compose_validator.py - validator逻辑
+- **回归测试** (34): test_workspaces.py - 现有功能保持
+- **HTTP集成测试** (9): test_build_create_http_integration.py - 真实POST /build_create
+
 **核心用例**：
-- 空值+`:-`通过（使用默认值）
-- 空值+`:?`失败（要求非空）
-- 同变量混合`:-`与`:?`：仅`:?`位置失败
-- DockerSwarmAdapter._environment解析（与worker一致）
+- ✅ 空值+`:-`通过（使用默认值）
+- ✅ 空值+`:?`失败（要求非空）
+- ✅ 同变量混合`:-`与`:?`：仅`:?`位置失败
+- ✅ DockerSwarmAdapter._environment解析（与worker一致）
+- ✅ HTTP 422返回complete error_detail + missing_variables
+- ✅ 构建记录未创建 + dispatcher未调用
+- ✅ 静态gate优先级保持
+- ✅ 无secret泄露
 
 ## 限制
 
