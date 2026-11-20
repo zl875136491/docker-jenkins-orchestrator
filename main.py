@@ -657,6 +657,11 @@ def create_app(
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         except BuildInputError as exc:
+            # Return structured error_detail if available
+            error_detail = getattr(exc, "error_detail", None)
+            if error_detail:
+                content = {"detail": str(exc), "error_detail": error_detail}
+                return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content)
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except OSError as exc:
             raise HTTPException(status_code=503, detail="Unable to snapshot workspace storage") from exc

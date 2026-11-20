@@ -35,6 +35,7 @@ from orchestrator.tasks import TaskDispatcher
 from orchestrator.templates import TemplateError
 from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepositoryRef
 from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceStore
+from orchestrator.compose_validator import ComposeEnvironmentValidator, format_validation_error
 from orchestrator.naming import build_namespace
 
 
@@ -43,7 +44,11 @@ class NotFoundError(LookupError):
 
 
 class BuildInputError(ValueError):
-    pass
+    """Base class for build input validation errors."""
+    
+    def __init__(self, message: str, *, error_detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_detail = error_detail
 
 
 class InvalidBuildTransition(ValueError):
@@ -484,6 +489,16 @@ class BuildService:
             isinstance(name, str) and isinstance(service, Mapping) for name, service in services.items()
         ):
             raise BuildInputError("A user-provided Docker Compose document with services is required before creating a build")
+        
+        # Batch validate environment variables BEFORE creating build record
+        application_environment = self.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+        missing_vars = ComposeEnvironmentValidator.validate(app.compose, application_environment)
+        if missing_vars:
+            error_detail = format_validation_error(missing_vars)
+            error_detail["failure_site"] = "precheck"
+            summary = error_detail.get("summary", "Compose配置缺失必需的环境变量")
+            raise BuildInputError(summary, error_detail=error_detail)
+        
         from orchestrator.route_checks import BUILD_GATE_ERROR, DYNAMIC_ROLE, RouteCheckInputError
 
         if not app.require_route or self.route_checks is None:
