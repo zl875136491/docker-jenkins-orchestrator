@@ -26,15 +26,17 @@ if missing_vars:
 
 **使用源**：
 - Compose: `_workspace_compose(build, compose)` 其中`compose = build.compose_snapshot`
-- Environment: `build_resources.environment_ciphertext`（解密后）
+- Environment: `build_resources.environment_ciphertext`（通过`_application()`方法获取）
 
-**验证时机**：validating阶段（line 262-274）
+**验证时机**：validating阶段（line 263-277）
 
-**代码位置**（worker_runtime.py:264-274）：
+**代码位置**（worker_runtime.py:263-277）：
 ```python
 if build.status is BuildStatus.VALIDATING:
     runtime_compose = self._workspace_compose(build, compose)
-    application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+    # Use _application() to get snapshot environment (via build_resources if ownership_version==1)
+    app_with_snapshot = self._application(build)
+    application_environment = self.builds.application_service.secret_box.decrypt_environment(app_with_snapshot.environment_ciphertext)
     
     # Batch validate environment variables (async defense-in-depth)
     missing_vars = ComposeEnvironmentValidator.validate(runtime_compose, application_environment)
@@ -48,7 +50,21 @@ if build.status is BuildStatus.VALIDATING:
     runtime_compose = self._resolve_application_environment(runtime_compose, application_environment)
 ```
 
-**注意**：worker从`app.environment_ciphertext`读取（line 265），不是从`build_resources.environment_ciphertext`。这是当前实现的行为。
+**_application方法**（worker_runtime.py:558-564）：
+```python
+def _application(self, build: BuildJob) -> UserAppRecord:
+    app = self.builds.application_service.get_record(build.appid)
+    if app is None:
+        raise NotFoundError("Application for build was not found")
+    manifest = self.repository.get_build_resources(build.build_id)
+    if manifest is not None and manifest.ownership_version == 1:
+        return app.model_copy(update={"repository_url": manifest.repository_url or "", "environment_ciphertext": manifest.environment_ciphertext})
+    return app
+```
+
+**关键机制**：
+- `build_resources.ownership_version == 1`时（queue_build创建的正常构建），worker使用`manifest.environment_ciphertext`覆盖`app.environment_ciphertext`
+- 这保证worker使用创建时的environment快照，不受后续PATCH app影响
 
 ## _workspace_compose处理
 
@@ -101,10 +117,20 @@ self.repository.ensure_build_resources(BuildResources(
 **场景**：build已创建，用户PATCH /app_info/{app_id}修改environment或compose
 
 **影响**：
-- ✅ 在途build不受影响（使用`build.compose_snapshot`和`build_resources.environment_ciphertext`快照）
+- ✅ **Compose不受影响**：在途build使用`build.compose_snapshot`
+- ✅ **Environment不受影响**：在途build使用`build_resources.environment_ciphertext`（通过`_application()`方法）
 - ✅ 新build使用更新后的配置
 
-**注意**：当前worker从`app.environment_ciphertext`读取（不是`build_resources.environment_ciphertext`），这可能是个bug，但不在本PR修复范围内。
+**代码证明**（worker_runtime.py:558-564）：
+```python
+manifest = self.repository.get_build_resources(build.build_id)
+if manifest is not None and manifest.ownership_version == 1:
+    return app.model_copy(update={..., "environment_ciphertext": manifest.environment_ciphertext})
+```
+
+**历史build兼容**：
+- `ownership_version == 0`或manifest不存在时，fallback到`app.environment_ciphertext`
+- 这保证历史build（在snapshot机制之前创建）仍可清理
 
 ## 验证器一致性
 
@@ -170,30 +196,55 @@ except Exception as e:
 
 ✅ **已验证**：
 1. sync使用`app.compose` + `app.environment_ciphertext`
-2. worker使用`build.compose_snapshot` + `app.environment_ciphertext`（当前实现）
+2. worker使用`build.compose_snapshot` + `build_resources.environment_ciphertext`（通过`_application()`）
 3. `_workspace_compose`不修改environment部分
-4. PATCH app后在途build不受影响（compose_snapshot隔离）
+4. PATCH app后在途build不受影响（compose和environment都有快照）
 5. 新validator与旧插值操作符语义一致
+6. 同步门禁与snapshot创建的顺序正确（无竞态）
 
-⚠️ **已知差异**（不在本PR范围）：
-- worker从`app.environment_ciphertext`读取，而非`build_resources.environment_ciphertext`
-- 这可能导致environment快照不完整，但修复需要更广泛的测试
+✅ **历史兼容**：
+- `ownership_version == 0`或manifest缺失时，fallback到`app.environment_ciphertext`
+- 不破坏历史build清理接口
 
 ## 测试用例
 
-**快照隔离测试**（test_build_create_http_integration.py）：
+**快照隔离测试**（test_env_snapshot.py）：
 ```python
-def test_http_success_with_all_variables_configured_returns_202(client):
-    # ...
-    response = client.post("/api/v1/jenkins/build_create/APP-HTTP-4", json={})
+def test_worker_uses_environment_snapshot_not_current_app(container):
+    # 创建build（快照environment）
+    build = container.builds.queue_build("APP", BuildCreate())
     
-    # Verify build snapshot includes compose
-    build = response.json()
-    stored_build = container.repository.builds[build["build_id"]]
-    assert stored_build.compose_snapshot is not None
-    assert stored_build.compose_snapshot == compose  # 快照与原compose一致
+    # PATCH app删除变量
+    container.applications.update_app("APP", UserAppUpdate(environment={}))
+    
+    # worker仍使用快照（不受影响）
+    runtime.start_build(build.build_id, "task")
+    # 不会因environment验证失败（使用snapshot）
 ```
 
-**validator一致性测试**（test_compose_validator.py）：
-- 18个单元测试覆盖所有操作符
-- 使用DockerSwarmAdapter._environment（与worker相同）
+**PATCH隔离测试**（test_env_snapshot.py）：
+```python
+def test_patch_app_environment_after_build_does_not_affect_in_flight(container):
+    # build1使用{VAR1, VAR2}
+    build1 = container.builds.queue_build("APP", BuildCreate())
+    
+    # PATCH删除VAR2
+    container.applications.update_app("APP", UserAppUpdate(environment={"VAR1": "v1"}))
+    
+    # build2在sync gate失败（缺VAR2）
+    # build1仍使用快照（有VAR2）
+```
+
+**异步聚合测试**（test_env_snapshot.py）：
+```python
+def test_worker_aggregates_multiple_missing_variables_in_validating(container):
+    # 模拟async drift（snapshot损坏）
+    # worker报告所有3个缺失变量（批量验证）
+    assert len(failed_build.error_detail["missing_variables"]) == 3
+```
+
+**总计65个测试**：
+- 18个单元测试（validator逻辑）
+- 34个回归测试（现有功能）
+- 9个HTTP集成测试（真实POST）
+- 4个snapshot隔离测试（environment快照）

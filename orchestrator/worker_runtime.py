@@ -262,7 +262,9 @@ class WorkerRuntime:
 
             if build.status is BuildStatus.VALIDATING:
                 runtime_compose = self._workspace_compose(build, compose)
-                application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+                # Use _application() to get snapshot environment (via build_resources if ownership_version==1)
+                app_with_snapshot = self._application(build)
+                application_environment = self.builds.application_service.secret_box.decrypt_environment(app_with_snapshot.environment_ciphertext)
                 
                 # Batch validate environment variables (async defense-in-depth)
                 missing_vars = ComposeEnvironmentValidator.validate(runtime_compose, application_environment)
