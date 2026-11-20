@@ -46,6 +46,7 @@ from orchestrator.registry import DockerRegistrySynchronizer, RegistrySyncError
 from orchestrator.services import BuildInputError, BuildService, NotFoundError
 from orchestrator.templates import TemplateCatalog, TemplateError
 from orchestrator.workspaces import WorkspaceStore
+from orchestrator.compose_validator import ComposeEnvironmentValidator, format_validation_error
 from orchestrator.build_resources import build_lease, ResourceConflict
 
 
@@ -261,7 +262,19 @@ class WorkerRuntime:
 
             if build.status is BuildStatus.VALIDATING:
                 runtime_compose = self._workspace_compose(build, compose)
-                application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+                # Use _application() to get snapshot environment (via build_resources if ownership_version==1)
+                app_with_snapshot = self._application(build)
+                application_environment = self.builds.application_service.secret_box.decrypt_environment(app_with_snapshot.environment_ciphertext)
+                
+                # Batch validate environment variables (async defense-in-depth)
+                missing_vars = ComposeEnvironmentValidator.validate(runtime_compose, application_environment)
+                if missing_vars:
+                    error_detail = format_validation_error(missing_vars)
+                    error_detail["failure_site"] = "validating"
+                    error_detail["build_id"] = build_id
+                    summary = error_detail.get("summary", "Compose配置缺失必需的环境变量")
+                    raise BuildInputError(summary, error_detail=error_detail)
+                
                 runtime_compose = self._resolve_application_environment(runtime_compose, application_environment)
                 self._validate_source_compose(runtime_compose)
                 if self._isolated(build):
