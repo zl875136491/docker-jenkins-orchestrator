@@ -147,9 +147,22 @@ def test_patch_app_environment_after_build_does_not_affect_in_flight(container):
     try:
         build2 = container.builds.queue_build("APP-SNAPSHOT-2", BuildCreate())
         assert False, "Second build should fail on sync gate due to missing VAR2"
-    except Exception as e:
+    except BuildInputError as e:
         # Expected: sync gate catches missing VAR2
-        assert "VAR2" in str(e)
+        # Check error_detail for VAR2
+        assert e.error_detail is not None
+        missing_vars = e.error_detail.get("missing_variables", [])
+        if isinstance(missing_vars, list):
+            var_names = []
+            for v in missing_vars:
+                if isinstance(v, dict):
+                    var_names.append(v.get("name") or v.get("variable", ""))
+                elif isinstance(v, str):
+                    var_names.append(v)
+            assert "VAR2" in var_names, f"Expected VAR2 in missing variables, got {var_names}"
+        else:
+            # Fallback to summary
+            assert "VAR2" in str(e.error_detail.get("summary", "")), f"Expected VAR2 in summary"
     
     # First build should still work with snapshot
     jenkins = FakeJenkins([], build=None)
