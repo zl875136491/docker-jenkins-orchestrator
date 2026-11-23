@@ -67,19 +67,24 @@ def sanitize_error_message(message: str) -> str:
         else:
             return "构建失败，请联系平台排查"
     
-    # 不包含敏感信息，但如果是英文原始异常，也转换为中文
-    if message and not any('\u4e00' <= c <= '\u9fff' for c in message):
-        # 英文消息，提供通用中文摘要
-        if "unable to enqueue" in message.lower():
-            return "构建任务排队失败，请联系平台排查"
-        elif "validation" in message.lower() or "invalid" in message.lower():
-            return "构建配置验证失败，请联系平台排查"
-        elif "timeout" in message.lower():
-            return "构建超时，请联系平台排查"
-        else:
-            return "构建失败，请联系平台排查"
+    # 不包含敏感信息
+    # 如果已经是中文，直接返回
+    if message and any('\u4e00' <= c <= '\u9fff' for c in message):
+        return message
     
-    return message
+    # 如果是简短的英文技术术语/摘要（<100字符且不包含完整URI格式），保留原文
+    if len(message) < 100 and "://" not in message:
+        return message
+    
+    # 长英文消息或包含URI格式，提供通用中文摘要
+    if "unable to enqueue" in message.lower():
+        return "构建任务排队失败，请联系平台排查"
+    elif "validation" in message.lower() or "invalid" in message.lower():
+        return "构建配置验证失败，请联系平台排查"
+    elif "timeout" in message.lower():
+        return "构建超时，请联系平台排查"
+    else:
+        return "构建失败，请联系平台排查"
 
 
 def classify_error(
@@ -229,6 +234,13 @@ def enrich_error_detail(
     """
     if error_detail is None:
         error_detail = {}
+    
+    # 如果没有summary且有exception，使用sanitize后的异常消息
+    if ("summary" not in error_detail or not error_detail["summary"]) and exception:
+        error_detail["summary"] = sanitize_error_message(str(exception))
+    elif "summary" in error_detail and error_detail["summary"]:
+        # 清理已有的summary
+        error_detail["summary"] = sanitize_error_message(error_detail["summary"])
     
     # 如果已有分类字段，直接返回（不覆盖已有分类）
     if "category" in error_detail and "responsible_party" in error_detail:

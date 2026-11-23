@@ -71,16 +71,16 @@ def test_classify_external_stateful_endpoint_without_code_is_unknown():
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
-def test_classify_buildinputerror_without_code_is_config_unknown():
-    """BuildInputError without explicit code/subcode is configuration but unknown responsible party."""
+def test_classify_buildinputerror_without_code_is_unknown_unknown():
+    """BuildInputError without explicit code/subcode → unknown_error/unknown (保守)."""
     exc = BuildInputError("Some configuration error")
     
     result = classify_error(exception=exc)
     
-    assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
-    assert result["user_action_required"] is True
+    assert result["user_action_required"] is False
 
 
 def test_classify_compose_config_error():
@@ -100,13 +100,13 @@ def test_classify_compose_config_error():
 
 
 def test_classify_build_gate_error_without_code_is_unknown():
-    """Build gate error without explicit code is conservatively classified."""
+    """Build gate error without explicit code is conservatively classified as unknown."""
     exc = BuildInputError("未进行路由静态检查, 无法交付构建任务")
     
     result = classify_error(exception=exc)
     
-    # Without explicit code/subcode, conservatively classified
-    assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
+    # Without explicit code/subcode, conservatively classified as unknown
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
@@ -218,16 +218,16 @@ def test_enrich_error_detail_handles_none():
     assert enriched["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
-def test_classify_other_buildinputerror_is_config_unknown():
-    """Other BuildInputError defaults to configuration but unknown responsible party."""
+def test_classify_other_buildinputerror_is_unknown_unknown():
+    """Other BuildInputError defaults to unknown_error/unknown (保守)."""
     exc = BuildInputError("Invalid configuration parameter")
     
     result = classify_error(exception=exc)
     
-    assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
-    assert result["user_action_required"] is True
+    assert result["user_action_required"] is False
 
 
 def test_classify_docker_error_non_deploy_is_also_unknown():
