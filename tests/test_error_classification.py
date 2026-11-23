@@ -194,21 +194,23 @@ def test_enrich_error_detail_adds_classification():
     assert enriched["user_action_required"] is True
 
 
-def test_enrich_error_detail_preserves_existing_classification():
-    """enrich_error_detail does not overwrite existing classification fields."""
+def test_enrich_error_detail_覆盖不可信分类():
+    """enrich_error_detail强制覆盖来路不明的分类字段（新安全要求）"""
     error_detail = {
-        "code": "CUSTOM_ERROR",
-        "category": "custom_category",
-        "responsible_party": "custom_party",
+        "code": "CUSTOM_ERROR",  # 未知code
+        "category": "custom_category",  # 不可信
+        "responsible_party": "custom_party",  # 不可信
         "retryable": True,
     }
     
     enriched = enrich_error_detail(error_detail)
     
-    # Should preserve existing fields
-    assert enriched["category"] == "custom_category"
-    assert enriched["responsible_party"] == "custom_party"
-    assert enriched["retryable"] is True
+    # 必须覆盖为安全分类（不信任已有值）
+    assert enriched["category"] == "unknown_error"
+    assert enriched["responsible_party"] == "unknown"
+    # summary和remediation从安全模板生成
+    assert "构建失败" in enriched["summary"]
+    assert "排查" in enriched["remediation"]
 
 
 def test_enrich_error_detail_handles_none():
