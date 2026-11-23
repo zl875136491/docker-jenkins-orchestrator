@@ -178,14 +178,15 @@ def test_enrich_error_detail_adds_classification():
     error_detail = {
         "code": "COMPOSE_CONFIG_ERROR",
         "subcode": "MISSING_ENVIRONMENT_VARIABLES",
-        "summary": "Missing variables",
+        "summary": "Missing variables",  # 旧summary会被模板覆盖
     }
     
     enriched = enrich_error_detail(error_detail)
     
     assert enriched["code"] == "COMPOSE_CONFIG_ERROR"
     assert enriched["subcode"] == "MISSING_ENVIRONMENT_VARIABLES"
-    assert enriched["summary"] == "Missing variables"
+    # summary从模板生成，不保留原始"Missing variables"
+    assert "环境变量" in enriched["summary"]
     assert enriched["category"] == ErrorCategory.CONFIGURATION_ERROR
     assert enriched["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
     assert enriched["retryable"] is False
