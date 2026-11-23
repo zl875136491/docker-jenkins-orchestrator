@@ -29,7 +29,7 @@ class ResponsibleParty(str, Enum):
 
 
 def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    """验证并清理metadata，只保留安全的白名单字段，不能夹带secret"""
+    """验证并清理metadata，保留完整结构但验证类型和格式，不能夹带secret"""
     if not isinstance(metadata, dict):
         return {}
     
@@ -41,19 +41,61 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         if isinstance(var, str) and var and var.replace("_", "").isalnum():
             safe["endpoint_variable"] = var
     
-    # missing_variables: 只提取variable/name字段（合法标识符）
+    # missing_variables: 保留完整结构 name/reason/operator/locations
+    # 契约: name(str), reason(missing|empty), operator(允许列表), locations([{service, environment_key, config_path}])
     if "missing_variables" in metadata:
         missing = metadata["missing_variables"]
         if isinstance(missing, list):
             safe_vars = []
-            for item in missing[:10]:  # 限制数量
+            for item in missing[:20]:  # 限制数量
                 if isinstance(item, dict):
-                    # Try both 'variable' and 'name' keys
-                    var = item.get("variable") or item.get("name", "")
-                    if isinstance(var, str) and var and var.replace("_", "").isalnum():
-                        safe_vars.append(var)
+                    safe_item = {}
+                    # name: 必须是合法标识符
+                    name = item.get("name", "")
+                    if isinstance(name, str) and name and name.replace("_", "").isalnum():
+                        safe_item["name"] = name
+                    else:
+                        continue  # 无效name，跳过整个item
+                    
+                    # reason: 允许值 missing|empty
+                    reason = item.get("reason", "missing")
+                    if reason in ("missing", "empty"):
+                        safe_item["reason"] = reason
+                    
+                    # operator: 保留允许的值（None或操作符）
+                    if "operator" in item:
+                        operator = item["operator"]
+                        if operator is None or isinstance(operator, str):
+                            safe_item["operator"] = operator
+                    
+                    # locations: 验证数组，只保留合法字段
+                    if "locations" in item and isinstance(item["locations"], list):
+                        safe_locations = []
+                        for loc in item["locations"][:10]:  # 限制location数量
+                            if isinstance(loc, dict):
+                                safe_loc = {}
+                                # service: 合法服务名
+                                if "service" in loc and isinstance(loc["service"], str):
+                                    safe_loc["service"] = loc["service"]
+                                # environment_key: 合法标识符
+                                if "environment_key" in loc and isinstance(loc["environment_key"], str):
+                                    if loc["environment_key"].replace("_", "").isalnum():
+                                        safe_loc["environment_key"] = loc["environment_key"]
+                                # config_path: 路径格式
+                                if "config_path" in loc and isinstance(loc["config_path"], str):
+                                    if len(loc["config_path"]) < 200:
+                                        safe_loc["config_path"] = loc["config_path"]
+                                # 至少有一个字段才保留
+                                if safe_loc:
+                                    safe_locations.append(safe_loc)
+                        if safe_locations:
+                            safe_item["locations"] = safe_locations
+                    
+                    safe_vars.append(safe_item)
                 elif isinstance(item, str) and item and item.replace("_", "").isalnum():
-                    safe_vars.append(item)
+                    # 兼容旧格式：纯字符串变量名
+                    safe_vars.append({"name": item, "reason": "missing"})
+            
             if safe_vars:
                 safe["missing_variables"] = safe_vars
     
@@ -62,6 +104,15 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         path = metadata["config_path"]
         if isinstance(path, str) and len(path) < 200:
             safe["config_path"] = path
+    
+    # check_scope, failure_site, stage, source: 保留已有上下文字段
+    for field in ("check_scope", "failure_site", "stage", "source", "service"):
+        if field in metadata and isinstance(metadata[field], str) and len(metadata[field]) < 100:
+            safe[field] = metadata[field]
+    
+    # exception_type: 保留类型名（但不信任）
+    if "exception_type" in metadata and isinstance(metadata["exception_type"], str):
+        safe["exception_type"] = metadata["exception_type"]
     
     return safe
 
@@ -83,9 +134,18 @@ def get_safe_summary_from_template(code: str | None, subcode: str | None, metada
     # 明确code/subcode对应的安全模板
     if code == "COMPOSE_CONFIG_ERROR":
         if subcode == "MISSING_ENVIRONMENT_VARIABLES":
-            var_names = metadata.get("missing_variables", [])
-            if var_names:
-                return f"缺少必需的环境变量：{', '.join(var_names[:5])}"
+            missing_vars = metadata.get("missing_variables", [])
+            if missing_vars:
+                # 从完整结构中提取name字段
+                var_names = []
+                for item in missing_vars[:5]:
+                    if isinstance(item, dict):
+                        var_names.append(item.get("name", ""))
+                    elif isinstance(item, str):
+                        var_names.append(item)
+                var_names = [v for v in var_names if v]
+                if var_names:
+                    return f"缺少必需的环境变量：{', '.join(var_names)}"
             return "缺少必需的环境变量"
         elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
             var = metadata.get("endpoint_variable", "")
@@ -110,14 +170,25 @@ def get_safe_remediation_from_template(code: str | None, subcode: str | None, me
     
     if code == "COMPOSE_CONFIG_ERROR":
         if subcode == "MISSING_ENVIRONMENT_VARIABLES":
-            var_names = metadata.get("missing_variables", [])
-            if var_names:
-                return f"在应用配置或构建参数中补充：{', '.join(var_names[:5])}"
+            missing_vars = metadata.get("missing_variables", [])
+            if missing_vars:
+                # 从完整结构中提取name字段
+                var_names = []
+                for item in missing_vars[:5]:
+                    if isinstance(item, dict):
+                        var_names.append(item.get("name", ""))
+                    elif isinstance(item, str):
+                        var_names.append(item)
+                var_names = [v for v in var_names if v]
+                if var_names:
+                    return f"在应用配置或构建参数中补充：{', '.join(var_names)}"
             return "补充缺失的环境变量"
         elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
             var = metadata.get("endpoint_variable", "")
-            service_hint = var.replace("_URL", "").replace("_URI", "").replace("_HOST", "").lower()
-            return f"在同一构建的 services 中定义 {service_hint} 服务，使用服务名连接。例如：{var}=postgres://db:5432/mydb"
+            if var:
+                service_hint = var.replace("_URL", "").replace("_URI", "").replace("_HOST", "").lower()
+                return f"在同一构建的 services 中定义 {service_hint} 服务，使用服务名连接。例如：{var}=postgres://db:5432/mydb"
+            return "在同一构建的 services 中定义对应服务，使用服务名连接"
         elif subcode == "INVALID_STATEFUL_ENDPOINT":
             return "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接"
         elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
@@ -313,27 +384,19 @@ def enrich_error_detail(
             result
         )
     else:
-        # 无code/subcode
-        # 仅对已知安全的中文消息（BUILD_GATE_ERROR等）可以保留
-        # 长度限制防止泄漏详细信息
-        safe_chinese_messages = {
+        # 无code/subcode：仅允许精确匹配的受控平台常量消息表
+        # 任何任意异常消息不能因短/中文/不含关键词而原样公开
+        SAFE_PLATFORM_MESSAGES = {
             "未进行路由静态检查, 无法交付构建任务",
             "Route check service is not configured",
         }
         if exception:
             exc_msg = str(exception)
-            # 只保留已知安全的消息
-            if exc_msg in safe_chinese_messages:
+            # 只保留精确匹配的受控平台常量
+            if exc_msg in SAFE_PLATFORM_MESSAGES:
                 result["summary"] = exc_msg
-            elif exc_msg and any('\u4e00' <= c <= '\u9fff' for c in exc_msg) and len(exc_msg) < 50:
-                # 短中文消息且不含常见secret模式
-                # 检查中文关键词和符号
-                if not re.search(r'[:：=]|密码|秘密|令牌|凭据|password|secret|token|key|credential', exc_msg, re.IGNORECASE):
-                    result["summary"] = exc_msg
-                else:
-                    result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
             else:
-                # 英文或可能不安全，使用action_guidance
+                # 其他任意消息，使用固定模板
                 result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
         else:
             result["summary"] = result.get("action_guidance", "构建失败，请联系平台排查")
