@@ -48,7 +48,8 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         missing = metadata["missing_variables"]
         if isinstance(missing, list):
             safe_vars = []
-            for item in missing[:20]:  # 限制数量
+            # 不截断：用户目标是全部
+            for item in missing:
                 if isinstance(item, dict):
                     safe_item = {}
                     # name: 必须是合法标识符
@@ -74,7 +75,8 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
                     # locations: 验证数组，只保留合法字段（service, environment_key, config_path）
                     if "locations" in item and isinstance(item["locations"], list):
                         safe_locations = []
-                        for loc in item["locations"][:10]:  # 限制location数量
+                        # 不截断：用户目标是全部位置
+                        for loc in item["locations"]:
                             if isinstance(loc, dict):
                                 # 只保留白名单字段，删除所有未知字段
                                 safe_loc = {}
@@ -306,13 +308,13 @@ def classify_error(
             # DockerServiceError可能是基础设施或应用运行时错误
             # 仅exception类型和failure_site不足以证明责任方
             # （可能是Docker API不可达/平台资源不足）
-            # 保守分类为未知
+            # 保守分类为未知，不要求用户操作
             return {
                 "category": ErrorCategory.UNKNOWN_ERROR,
                 "responsible_party": ResponsibleParty.UNKNOWN,
                 "retryable": False,
-                "user_action_required": True,
-                "action_guidance": "查看错误详情判断失败原因，或联系平台排查",
+                "user_action_required": False,
+                "action_guidance": "构建失败，请联系平台排查",
             }
     
     # 使用failure_site判断（次优）
@@ -364,15 +366,14 @@ def enrich_error_detail(
         summary=error_detail.get("summary"),
     )
     
-    # 合并分类字段（不覆盖已有字段）
+    # 强制覆盖所有分类字段（不信任来路不明的已有值）
     result = {**error_detail}
     for key, value in classification.items():
-        if key not in result:
-            # 将枚举值转换为字符串（.value）
-            if isinstance(value, (ErrorCategory, ResponsibleParty)):
-                result[key] = value.value
-            else:
-                result[key] = value
+        # 将枚举值转换为字符串（.value）
+        if isinstance(value, (ErrorCategory, ResponsibleParty)):
+            result[key] = value.value
+        else:
+            result[key] = value
     
     # 确保summary和remediation字段存在且安全（从模板生成）
     # 不信任任何传入的summary/remediation/error字段
@@ -391,6 +392,7 @@ def enrich_error_detail(
     else:
         # 无code/subcode：仅允许精确匹配的受控平台常量消息表
         # 任何任意异常消息不能因短/中文/不含关键词而原样公开
+        # 不能使用任意已有action_guidance作模板（可能含注入）
         SAFE_PLATFORM_MESSAGES = {
             "未进行路由静态检查, 无法交付构建任务",
             "Route check service is not configured",
@@ -401,17 +403,18 @@ def enrich_error_detail(
             if exc_msg in SAFE_PLATFORM_MESSAGES:
                 result["summary"] = exc_msg
             else:
-                # 其他任意消息，使用固定模板
-                result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
+                # 其他任意消息，使用固定中文模板（不信任action_guidance）
+                result["summary"] = "构建失败，请联系平台排查"
         else:
-            result["summary"] = result.get("action_guidance", "构建失败，请联系平台排查")
+            result["summary"] = "构建失败，请联系平台排查"
         result["remediation"] = "联系平台排查具体原因"
     
-    # 确保code和subcode字段存在（即使为None）
-    if "code" not in result:
-        result["code"] = None
-    if "subcode" not in result:
-        result["subcode"] = None
+    # 确保code和subcode字段存在且不为null
+    # code/subcode缺失时必须明确设置，不允许null
+    if not result.get("code"):
+        result["code"] = "UNKNOWN_CODE"
+    if not result.get("subcode"):
+        result["subcode"] = "UNKNOWN_SUBCODE"
     
     # 确保recognized字段存在
     if "recognized" not in result:

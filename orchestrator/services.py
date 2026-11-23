@@ -630,13 +630,24 @@ class BuildService:
         # 使用安全规范化后的summary，忽略传入的message参数
         safe_message = error_detail.get("summary", "构建失败，请联系平台排查")
         
+        # 清理raw_log_excerpt和failure_logs，不直通原始异常日志
+        # 原始自由日志不应放公共字段
+        safe_raw_log = None  # 未知原文设null，不回显
+        safe_failure_logs = None
+        if failure_logs is not None and isinstance(failure_logs, dict):
+            # 只保留source，使用安全summary
+            safe_failure_logs = {
+                "source": failure_logs.get("source", "unknown"),
+                "summary": safe_message,  # 使用安全summary，不用原始summary
+            }
+        
         fields: dict[str, Any] = {"error": safe_message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail
-        if raw_log_excerpt is not None:
-            fields["raw_log_excerpt"] = raw_log_excerpt
-        if failure_logs is not None:
-            fields["failure_logs"] = failure_logs
+        if safe_raw_log is not None:
+            fields["raw_log_excerpt"] = safe_raw_log
+        if safe_failure_logs is not None:
+            fields["failure_logs"] = safe_failure_logs
         if failure_site is not None:
             fields["failure_site"] = failure_site
         elif isinstance(error_detail, dict) and error_detail.get("failure_site"):
