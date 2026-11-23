@@ -169,7 +169,8 @@ def test_classify_unknown_error():
     assert result["category"] == ErrorCategory.UNKNOWN_ERROR
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
-    assert result["user_action_required"] is True
+    # 未知错误不要求用户操作（无法判定责任方）
+    assert result["user_action_required"] is False
     assert "联系平台排查" in result["action_guidance"]
 
 
