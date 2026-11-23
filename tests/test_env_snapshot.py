@@ -13,6 +13,7 @@ import pytest
 from orchestrator.config import Settings
 from orchestrator.container import create_container
 from orchestrator.models import BuildCreate, UserAppCreate, UserAppUpdate
+from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
 from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab
 from tests.route_check_fixtures import prepare_static_pass
