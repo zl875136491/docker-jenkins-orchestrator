@@ -121,7 +121,7 @@ def get_safe_remediation_from_template(code: str | None, subcode: str | None, me
         elif subcode == "INVALID_STATEFUL_ENDPOINT":
             return "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接"
         elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
-            return "移除Compose中的Git仓库目录绑定，使用构建时拷贝或环境变量配置"
+            return "移除Compose中的Git仓库目录绑定，在Dockerfile中使用COPY指令或使用命名卷"
     
     return "联系平台排查具体原因"
 
