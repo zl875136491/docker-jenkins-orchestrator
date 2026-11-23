@@ -507,7 +507,9 @@ class BuildService:
         if missing_vars:
             error_detail = format_validation_error(missing_vars)
             error_detail["failure_site"] = "precheck"
-            summary = error_detail.get("summary", "Compose配置缺失必需的环境变量")
+            # summary will be generated from template in enrich_error_detail
+            # Use a placeholder that will be replaced
+            summary = "Compose配置缺失必需的环境变量"
             raise BuildInputError(summary, error_detail=error_detail)
         dynamic_role = self.route_checks.roles.get(DYNAMIC_ROLE)
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref,

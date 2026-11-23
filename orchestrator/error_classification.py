@@ -28,6 +28,44 @@ class ResponsibleParty(str, Enum):
     UNKNOWN = "unknown"  # 未知（需排查）
 
 
+def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """验证并清理metadata，只保留安全的白名单字段，不能夹带secret"""
+    if not isinstance(metadata, dict):
+        return {}
+    
+    safe = {}
+    
+    # endpoint_variable: 必须是合法标识符
+    if "endpoint_variable" in metadata:
+        var = metadata["endpoint_variable"]
+        if isinstance(var, str) and var and var.replace("_", "").isalnum():
+            safe["endpoint_variable"] = var
+    
+    # missing_variables: 只提取variable/name字段（合法标识符）
+    if "missing_variables" in metadata:
+        missing = metadata["missing_variables"]
+        if isinstance(missing, list):
+            safe_vars = []
+            for item in missing[:10]:  # 限制数量
+                if isinstance(item, dict):
+                    # Try both 'variable' and 'name' keys
+                    var = item.get("variable") or item.get("name", "")
+                    if isinstance(var, str) and var and var.replace("_", "").isalnum():
+                        safe_vars.append(var)
+                elif isinstance(item, str) and item and item.replace("_", "").isalnum():
+                    safe_vars.append(item)
+            if safe_vars:
+                safe["missing_variables"] = safe_vars
+    
+    # config_path: 只保留路径格式（不含值）
+    if "config_path" in metadata:
+        path = metadata["config_path"]
+        if isinstance(path, str) and len(path) < 200:
+            safe["config_path"] = path
+    
+    return safe
+
+
 def get_safe_summary_from_template(code: str | None, subcode: str | None, metadata: dict[str, Any] | None = None) -> str:
     """
     从code/subcode生成安全的中文摘要（仅使用明确白名单元数据）
@@ -40,28 +78,16 @@ def get_safe_summary_from_template(code: str | None, subcode: str | None, metada
     Returns:
         安全的中文错误摘要
     """
-    if metadata is None:
-        metadata = {}
+    metadata = _sanitize_metadata(metadata or {})
     
     # 明确code/subcode对应的安全模板
     if code == "COMPOSE_CONFIG_ERROR":
         if subcode == "MISSING_ENVIRONMENT_VARIABLES":
-            # 白名单元数据：missing_variables列表（可能是dict或str）
-            missing = metadata.get("missing_variables", [])
-            if missing:
-                # 提取变量名（可能是dict或str）
-                var_names = []
-                for item in missing[:5]:
-                    if isinstance(item, dict):
-                        var_names.append(item.get("variable", ""))
-                    else:
-                        var_names.append(str(item))
-                var_names = [v for v in var_names if v]
-                if var_names:
-                    return f"缺少必需的环境变量：{', '.join(var_names)}"
+            var_names = metadata.get("missing_variables", [])
+            if var_names:
+                return f"缺少必需的环境变量：{', '.join(var_names[:5])}"
             return "缺少必需的环境变量"
         elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
-            # 白名单元数据：endpoint_variable（变量名）
             var = metadata.get("endpoint_variable", "")
             if var:
                 return f"环境变量 {var} 指向外部有状态端点，无法保证构建隔离"
@@ -76,6 +102,28 @@ def get_safe_summary_from_template(code: str | None, subcode: str | None, metada
     
     # 未知或无模板，返回通用中文摘要
     return "构建失败，请联系平台排查"
+
+
+def get_safe_remediation_from_template(code: str | None, subcode: str | None, metadata: dict[str, Any] | None = None) -> str:
+    """从code/subcode生成安全的remediation"""
+    metadata = _sanitize_metadata(metadata or {})
+    
+    if code == "COMPOSE_CONFIG_ERROR":
+        if subcode == "MISSING_ENVIRONMENT_VARIABLES":
+            var_names = metadata.get("missing_variables", [])
+            if var_names:
+                return f"在应用配置或构建参数中补充：{', '.join(var_names[:5])}"
+            return "补充缺失的环境变量"
+        elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
+            var = metadata.get("endpoint_variable", "")
+            service_hint = var.replace("_URL", "").replace("_URI", "").replace("_HOST", "").lower()
+            return f"在同一构建的 services 中定义 {service_hint} 服务，使用服务名连接。例如：{var}=postgres://db:5432/mydb"
+        elif subcode == "INVALID_STATEFUL_ENDPOINT":
+            return "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接"
+        elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
+            return "移除Compose中的Git仓库目录绑定，使用构建时拷贝或环境变量配置"
+    
+    return "联系平台排查具体原因"
 
 
 def classify_error(
@@ -250,30 +298,45 @@ def enrich_error_detail(
             else:
                 result[key] = value
     
-    # 确保summary字段存在且安全（从模板生成）
+    # 确保summary和remediation字段存在且安全（从模板生成）
     # 不信任任何传入的summary/remediation/error字段
-    if "summary" not in result or not result["summary"]:
-        # 如果有明确code/subcode，从模板生成
-        if result.get("code") and result.get("subcode"):
-            result["summary"] = get_safe_summary_from_template(
-                result["code"],
-                result["subcode"],
-                result  # 传入整个result作为metadata（包含白名单字段）
-            )
-        else:
-            # 未知错误，使用action_guidance或通用模板
-            result["summary"] = result.get("action_guidance", "构建失败，请联系平台排查")
+    if result.get("code") and result.get("subcode"):
+        # 从模板生成summary和remediation
+        result["summary"] = get_safe_summary_from_template(
+            result["code"],
+            result["subcode"],
+            result  # 传入整个result作为metadata（包含白名单字段）
+        )
+        result["remediation"] = get_safe_remediation_from_template(
+            result["code"],
+            result["subcode"],
+            result
+        )
     else:
-        # 已有summary，但不能信任，从模板重新生成
-        if result.get("code") and result.get("subcode"):
-            result["summary"] = get_safe_summary_from_template(
-                result["code"],
-                result["subcode"],
-                result
-            )
+        # 无code/subcode
+        # 仅对已知安全的中文消息（BUILD_GATE_ERROR等）可以保留
+        # 长度限制防止泄漏详细信息
+        safe_chinese_messages = {
+            "未进行路由静态检查, 无法交付构建任务",
+            "Route check service is not configured",
+        }
+        if exception:
+            exc_msg = str(exception)
+            # 只保留已知安全的消息
+            if exc_msg in safe_chinese_messages:
+                result["summary"] = exc_msg
+            elif exc_msg and any('\u4e00' <= c <= '\u9fff' for c in exc_msg) and len(exc_msg) < 50:
+                # 短中文消息且不含常见secret模式
+                if not re.search(r'[:=]|password|secret|token|key|credential', exc_msg, re.IGNORECASE):
+                    result["summary"] = exc_msg
+                else:
+                    result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
+            else:
+                # 英文或可能不安全，使用action_guidance
+                result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
         else:
-            # 无code/subcode，覆盖为安全模板
             result["summary"] = result.get("action_guidance", "构建失败，请联系平台排查")
+        result["remediation"] = "联系平台排查具体原因"
     
     # 确保code和subcode字段存在（即使为None）
     if "code" not in result:
@@ -290,18 +353,18 @@ def enrich_error_detail(
     
     # 清理不安全的字段：只保留白名单字段
     # 安全白名单字段：code, subcode, category, responsible_party, retryable, user_action_required,
-    #                 action_guidance, summary, recognized, failure_site, build_id,
-    #                 endpoint_variable, missing_variables, config_path（合法元数据）
+    #                 action_guidance, summary, remediation（从模板生成）, recognized, failure_site, build_id,
+    #                 endpoint_variable, missing_variables（已验证）, config_path, check_scope（合法元数据）
     safe_fields = {
         "code", "subcode", "category", "responsible_party", "retryable",
-        "user_action_required", "action_guidance", "summary", "recognized",
+        "user_action_required", "action_guidance", "summary", "remediation", "recognized",
         "failure_site", "build_id", "stage", "source",
-        # 白名单元数据
-        "endpoint_variable", "missing_variables", "config_path",
+        # 白名单元数据（已通过_sanitize_metadata验证或为合法技术字段）
+        "endpoint_variable", "missing_variables", "config_path", "check_scope",
         "exception_type",  # 保留但不信任
     }
     
-    # 移除不在白名单的字段（如remediation, error, detail等可能含secret）
+    # 移除不在白名单的字段（如error, detail等可能含secret）
     result = {k: v for k, v in result.items() if k in safe_fields}
     
     return result

@@ -236,7 +236,7 @@ def create_app(
         else:
             error_detail = enrich_error_detail({}, exception=exc)
         
-        # 使用error_detail的安全summary（从模板生成）
+        # 使用error_detail的安全summary（从模板生成，包含变量名）
         safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
         
         content = {
@@ -692,7 +692,7 @@ def create_app(
             else:
                 error_detail = enrich_error_detail({}, exception=exc)
             
-            # 使用error_detail的安全summary（从模板生成）
+            # 使用error_detail的安全summary（从模板生成，包含变量名）
             safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
             
             content = {"detail": safe_detail, "error_detail": error_detail}
