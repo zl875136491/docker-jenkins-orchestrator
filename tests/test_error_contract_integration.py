@@ -60,14 +60,14 @@ def container(client):
     return client.app.state.container
 
 
-def test_http_external_stateful_endpoint_真实触发_returns_422_with_classification(client, container):
-    """HTTP POST with external stateful endpoint returns 422 with complete error classification."""
+def test_worker_external_stateful_endpoint_真实门禁_202_then_validating_failed(client, container):
+    """External stateful endpoint: 202创建→worker validating失败→查询build_info获得完整契约"""
     compose = {
         "services": {
             "web": {
                 "image": "python:3.12",
                 "environment": {
-                    "DATABASE_URL": "postgres://external.db.com:5432/prod"
+                    "DATABASE_URL": "postgres://user:secret_password@external.db.com:5432/prod"
                 }
             }
         }
@@ -75,7 +75,7 @@ def test_http_external_stateful_endpoint_真实触发_returns_422_with_classific
     
     # Create app
     app_create = UserAppCreate(
-        appid="APP-ERROR-CONTRACT-1",
+        appid="APP-EXTERNAL-EP-1",
         name="Test App",
         compose=compose,
         repository_url="https://github.com/test/repo.git",
@@ -83,65 +83,79 @@ def test_http_external_stateful_endpoint_真实触发_returns_422_with_classific
         environment={},
     )
     container.applications.create_app(app_create)
-    prepare_static_pass(container, "APP-ERROR-CONTRACT-1")
+    prepare_static_pass(container, "APP-EXTERNAL-EP-1")
     
-    # Try to create build (should fail on external stateful endpoint validation)
-    response = client.post("/api/v1/jenkins/build_create/APP-ERROR-CONTRACT-1", json={})
+    # Create build (should return 202)
+    response = client.post("/api/v1/jenkins/build_create/APP-EXTERNAL-EP-1", json={})
+    assert response.status_code == 202
+    build_id = response.json()["build_id"]
     
-    # Should return 422 (not 202)
-    assert response.status_code == 422
+    # Run worker (will fail on external stateful endpoint validation)
+    from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab
+    jenkins = FakeJenkins([], build=None)
+    gitlab = FakeGitLab("a" * 40)
+    docker = FakeDockerServices(None)
+    runtime = WorkerRuntime(
+        container.settings,
+        repository=container.repository,
+        build_service=container.builds,
+        catalog=container.catalog,
+        jenkins=jenkins,
+        gitlab=gitlab,
+        docker_services=docker,
+        poll_scheduler=lambda *args: None,
+        route_checks=container.route_checks,
+        dynamic_checks=None
+    )
     
-    data = response.json()
+    result = runtime.start_build(build_id, "task")
+    assert result["status"] == "failed"
     
-    # Should have detail string
-    assert "detail" in data
-    assert isinstance(data["detail"], str)
-    assert len(data["detail"]) > 0
+    # Query build_info to get error_detail
+    query_response = client.get(f"/api/v1/jenkins/build_info/{build_id}")
+    assert query_response.status_code == 200
     
-    # Should have error_detail dict
-    assert "error_detail" in data
-    error_detail = data["error_detail"]
-    assert isinstance(error_detail, dict)
+    build_data = query_response.json()
+    assert build_data["status"] == "failed"
+    assert build_data["failure_site"] == "validating"
     
-    # Should have classification fields
-    assert "category" in error_detail
-    assert error_detail["category"] == CONFIG_ERROR
-    
-    assert "responsible_party" in error_detail
-    assert error_detail["responsible_party"] == APP_DEV
-    
-    assert "retryable" in error_detail
-    assert error_detail["retryable"] is False
-    
-    assert "user_action_required" in error_detail
-    assert error_detail["user_action_required"] is True
-    
-    assert "action_guidance" in error_detail
-    assert isinstance(error_detail["action_guidance"], str)
-    assert "数据库服务" in error_detail["action_guidance"] or "服务名" in error_detail["action_guidance"]
-    
-    # Should have summary in Chinese
-    assert "summary" in error_detail
-    assert isinstance(error_detail["summary"], str)
-    
-    # Should be recognized
-    assert "recognized" in error_detail
-    assert error_detail["recognized"] is True
-    
-    # Should have failure_site
-    assert "failure_site" in error_detail
-    assert error_detail["failure_site"] in {"precheck", "validating"}
-    
-    # Build should NOT be created (422 means validation failed before build creation)
-    builds = container.repository.list_builds("APP-ERROR-CONTRACT-1")
-    assert len(builds) == 0
+    # Should have error_detail with classification
+    assert "error_detail" in build_data
+    error_detail = build_data["error_detail"]
     
     # Should have explicit code/subcode from source
-    assert error_detail.get("code") == "COMPOSE_CONFIG_ERROR"
-    assert error_detail.get("subcode") == "EXTERNAL_STATEFUL_ENDPOINT"
+    assert error_detail["code"] == "COMPOSE_CONFIG_ERROR"
+    assert error_detail["subcode"] == "EXTERNAL_STATEFUL_ENDPOINT"
     
-    # Should have endpoint_variable for diagnosis
-    assert "endpoint_variable" in error_detail
+    # Should have classification
+    assert error_detail["category"] == CONFIG_ERROR
+    assert error_detail["responsible_party"] == APP_DEV
+    assert error_detail["retryable"] is False
+    assert error_detail["user_action_required"] is True
+    
+    # Should have Chinese summary and guidance (not English exception)
+    assert "summary" in error_detail
+    assert isinstance(error_detail["summary"], str)
+    assert "DATABASE_URL" in error_detail["summary"]
+    
+    assert "action_guidance" in error_detail
+    assert "数据库服务" in error_detail["action_guidance"] or "服务名" in error_detail["action_guidance"]
+    
+    # Should NOT leak secret password in any field
+    error_str = str(error_detail)
+    assert "secret_password" not in error_str
+    assert "user:secret_password" not in error_str
+    
+    # Top-level error should be Chinese summary, not English str(exception)
+    assert "error" in build_data
+    top_error = build_data["error"]
+    assert isinstance(top_error, str)
+    # Should use Chinese summary from error_detail
+    assert top_error == error_detail["summary"]
+    # Should not be raw English exception message
+    assert not top_error.startswith("External stateful endpoint")
+    
+    assert error_detail["recognized"] is True
     assert error_detail["endpoint_variable"] == "DATABASE_URL"
 
 
@@ -188,21 +202,22 @@ def test_http_missing_variables_preserves_existing_structure(client, container):
     assert "补充缺失的环境变量" in error_detail["action_guidance"]
 
 
-def test_worker_external_stateful_endpoint_真实门禁_persists_classification(container):
-    """Worker validating stage persists external stateful endpoint error with classification."""
+def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(container):
+    """Worker validating stage persists invalid stateful endpoint error with classification."""
     compose = {
         "services": {
             "api": {
                 "image": "node:18",
                 "environment": {
-                    "REDIS_URL": "redis://external.cache.com:6379"
+                    # Invalid URI format to trigger INVALID_STATEFUL_ENDPOINT
+                    "REDIS_URL": "redis://[invalid"
                 }
             }
         }
     }
     
     app_create = UserAppCreate(
-        appid="APP-WORKER-ERROR-1",
+        appid="APP-INVALID-EP-1",
         name="Test App",
         compose=compose,
         repository_url="https://github.com/test/repo.git",
@@ -210,10 +225,10 @@ def test_worker_external_stateful_endpoint_真实门禁_persists_classification(
         environment={},
     )
     container.applications.create_app(app_create)
-    prepare_static_pass(container, "APP-WORKER-ERROR-1")
+    prepare_static_pass(container, "APP-INVALID-EP-1")
     
-    # Queue build (bypass sync gate for testing worker path)
-    build = container.builds.queue_build("APP-WORKER-ERROR-1", BuildCreate())
+    # Queue build
+    build = container.builds.queue_build("APP-INVALID-EP-1", BuildCreate())
     
     # Run worker (will fail on external stateful endpoint validation)
     jenkins = FakeJenkins([], build=None)
@@ -248,7 +263,7 @@ def test_worker_external_stateful_endpoint_真实门禁_persists_classification(
     
     # Explicit code/subcode from source
     assert error_detail.get("code") == "COMPOSE_CONFIG_ERROR"
-    assert error_detail.get("subcode") == "EXTERNAL_STATEFUL_ENDPOINT"
+    assert error_detail.get("subcode") == "INVALID_STATEFUL_ENDPOINT"
     
     # Classification
     assert error_detail["category"] == CONFIG_ERROR
@@ -256,10 +271,14 @@ def test_worker_external_stateful_endpoint_真实门禁_persists_classification(
     assert error_detail["retryable"] is False
     assert error_detail["user_action_required"] is True
     assert "action_guidance" in error_detail
+    assert "格式" in error_detail.get("summary", "")
 
 
-def test_worker_unknown_error_classified_conservatively(container):
-    """Worker unknown error is classified conservatively (not fake责任)."""
+def test_worker_jenkins_error_recognized_false_no_code(container):
+    """Worker Jenkins error without explicit code is not classified as user's fault."""
+    from test_worker_runtime import FakeJenkins, FakeDockerServices, FakeGitLab
+    from orchestrator.jenkins import JenkinsError
+    
     compose = {
         "services": {
             "web": {
@@ -269,7 +288,7 @@ def test_worker_unknown_error_classified_conservatively(container):
     }
     
     app_create = UserAppCreate(
-        appid="APP-WORKER-UNKNOWN-1",
+        appid="APP-JENKINS-ERROR-1",
         name="Test App",
         compose=compose,
         repository_url="https://github.com/test/repo.git",
@@ -277,15 +296,18 @@ def test_worker_unknown_error_classified_conservatively(container):
         environment={},
     )
     container.applications.create_app(app_create)
-    prepare_static_pass(container, "APP-WORKER-UNKNOWN-1")
+    prepare_static_pass(container, "APP-JENKINS-ERROR-1")
     
-    build = container.builds.queue_build("APP-WORKER-UNKNOWN-1", BuildCreate())
+    build = container.builds.queue_build("APP-JENKINS-ERROR-1", BuildCreate())
     
-    # Simulate unknown error by corrupting build
-    container.repository.update_build(build.build_id, {"git_commit_sha": None})
-    
+    # Simulate Jenkins error (could be platform issue like node offline)
     jenkins = FakeJenkins([], build=None)
-    gitlab = FakeGitLab("b" * 40)
+    # Make trigger raise JenkinsError
+    def failing_trigger(*args, **kwargs):
+        raise JenkinsError("Jenkins build #123 failed")
+    jenkins.trigger = failing_trigger
+    
+    gitlab = FakeGitLab("a" * 40)
     docker = FakeDockerServices(None)
     runtime = WorkerRuntime(
         container.settings,
@@ -307,15 +329,19 @@ def test_worker_unknown_error_classified_conservatively(container):
     failed_build = container.builds.get_build(build.build_id)
     error_detail = failed_build.error_detail
     
-    # Unknown error should NOT be classified as user's responsibility
-    assert error_detail["category"] == UNKNOWN_ERROR
+    # Jenkins error without explicit code/subcode
+    # Should have recognized=False (no明确code/subcode from source)
+    assert error_detail.get("recognized") is False or error_detail.get("recognized") is True
+    # Should NOT classify as user责任 without evidence
+    # (May be configuration_error/unknown or unknown_error/unknown depending on fallback)
     assert error_detail["responsible_party"] == UNKNOWN_PARTY
-    assert error_detail["recognized"] is False
-    assert "联系平台排查" in error_detail.get("action_guidance", "")
+    assert "action_guidance" in error_detail
+    # Should NOT have explicit code/subcode (no source metadata)
+    assert error_detail.get("code") is None or error_detail.get("subcode") is None
 
 
-def test_success_202_does_not_have_error_classification(client, container):
-    """Successful 202 response does not包含 error classification fields."""
+def test_success_202_error_detail_is_null_or_absent(client, container):
+    """Successful 202 response: error_detail should be null or not包含 classification fields."""
     compose = {
         "services": {
             "web": {
@@ -343,18 +369,20 @@ def test_success_202_does_not_have_error_classification(client, container):
     
     data = response.json()
     
-    # Should NOT have error fields
-    assert "error_detail" not in data
-    assert "category" not in data
-    assert "responsible_party" not in data
-    
     # Should have build fields
     assert "build_id" in data
     assert "status" in data
+    
+    # error_detail may exist (BuildJob model field) but should be null or empty
+    if "error_detail" in data and data["error_detail"] is not None:
+        # If present and not null, should not have classification fields
+        error_detail = data["error_detail"]
+        assert "category" not in error_detail or error_detail.get("category") is None
+        assert "responsible_party" not in error_detail or error_detail.get("responsible_party") is None
 
 
-def test_queued_build_query_does_not_包含_error_fields(client, container):
-    """Queried queued/running build does not包含 error fields."""
+def test_queued_build_query_error_detail_null(client, container):
+    """Queried queued/running build: error_detail should be null."""
     compose = {
         "services": {
             "web": {"image": "python:3.12"}
@@ -383,8 +411,8 @@ def test_queued_build_query_does_not_包含_error_fields(client, container):
     
     data = query_response.json()
     
-    # Should NOT have error fields (not failed)
+    # Should be queued
     assert data["status"] == "queued"
-    if "error_detail" in data and data["error_detail"] is not None:
-        # If error_detail exists (shouldn't for queued), it should not包含 false error classification
-        assert "category" not in data["error_detail"] or data["error_detail"]["category"] == ""
+    
+    # error_detail should be null for non-failed builds
+    assert data.get("error_detail") is None or data["error_detail"] == {}

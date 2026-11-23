@@ -246,9 +246,10 @@ class DockerSwarmAdapter:
         private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
         stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
         endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?)_(?:HOST|URL|URI|DSN|ENDPOINT)$")
-        configurations = [dict(environment)]
-        configurations.extend(dict(value.split("=", 1) for value in self._environment(service.get("environment"))) for service in services.values())
-        for values in configurations:
+        # Build configurations list with service names for better error messages
+        configurations = [(None, dict(environment))]  # (service_name, config_dict)
+        configurations.extend((name, dict(value.split("=", 1) for value in self._environment(service.get("environment")))) for name, service in services.items())
+        for service_name, values in configurations:
             for key, raw in values.items():
                 value = str(raw)
                 value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}",

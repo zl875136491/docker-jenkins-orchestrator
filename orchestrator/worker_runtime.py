@@ -1101,6 +1101,9 @@ class WorkerRuntime:
         fail_kwargs = {"failure_site": failure_site, "exception": exc}
         if isinstance(error_detail, dict):
             fail_kwargs["error_detail"] = {**error_detail, "failure_site": error_detail.get("failure_site") or failure_site}
+            # Use Chinese summary from error_detail as top-level error message if available
+            if "summary" in error_detail and error_detail["summary"]:
+                report = error_detail["summary"]
         else:
             detail, _, logs, _ = structured_failure(
                 failure_site=failure_site,
