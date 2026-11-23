@@ -378,8 +378,10 @@ def test_missing_application_environment_reference_fails_before_jenkins() -> Non
     stored = harness.container.repository.get_build(build.build_id)
     assert result == {"build_id": build.build_id, "status": "failed"}
     assert stored is not None
-    assert "MISSING_PASSWORD" in stored.error
-    assert "missing application variable" in stored.error
+    # 新安全契约：使用中文模板，变量名在error_detail中
+    assert "MISSING_PASSWORD" in str(stored.error_detail.get("missing_variables", []))
+    assert stored.error_detail["category"] == "configuration_error"
+    assert stored.error_detail["recognized"] is True
     assert jenkins.requests == []
     assert docker_services.calls == []
 
