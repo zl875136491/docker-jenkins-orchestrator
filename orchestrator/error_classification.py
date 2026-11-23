@@ -285,6 +285,9 @@ def enrich_error_detail(
     if "recognized" not in result:
         result["recognized"] = False
     
+    # 生成summary前需要先过滤字段，但summary生成需要missing_variables
+    # 所以在生成summary后再过滤
+    
     # 清理不安全的字段：只保留白名单字段
     # 安全白名单字段：code, subcode, category, responsible_party, retryable, user_action_required,
     #                 action_guidance, summary, recognized, failure_site, build_id,
