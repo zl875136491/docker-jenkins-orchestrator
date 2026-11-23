@@ -233,6 +233,10 @@ def enrich_error_detail(
     result = {**error_detail}
     for key, value in classification.items():
         if key not in result:
-            result[key] = value
+            # 将枚举值转换为字符串（.value）
+            if isinstance(value, (ErrorCategory, ResponsibleParty)):
+                result[key] = value.value
+            else:
+                result[key] = value
     
     return result
