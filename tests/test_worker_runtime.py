@@ -387,6 +387,7 @@ def test_missing_application_environment_reference_fails_before_jenkins() -> Non
 
 
 def test_required_environment_hint_does_not_leak_secret_values() -> None:
+    """现在同步gate在queue_build就拒绝，不到runtime（旧假设已废弃）"""
     source = deepcopy(APP_COMPOSE)
     source["services"]["api"]["environment"] = {
         "PASSWORD": "${MISSING_PASSWORD:?set PASSWORD in app environment}"
@@ -394,13 +395,18 @@ def test_required_environment_hint_does_not_leak_secret_values() -> None:
     jenkins = FakeJenkins([])
     docker_services = FakeDockerServices(successful_deployment())
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
-    # Seed a decoy secret via create path; missing required var must still fail
-    # with Compose hint and without leaking other environment values.
-    build = queue_build(
-        harness,
-        compose=source,
-        environment={"OTHER": "super-secret-value-must-not-leak"},
-    )
+    # 同步gate现在提前拒绝，不再到runtime
+    with pytest.raises(BuildInputError) as exc_info:
+        build = queue_build(
+            harness,
+            compose=source,
+            environment={"OTHER": "super-secret-value-must-not-leak"},
+        )
+    
+    # 验证不泄漏secret
+    error_str = str(exc_info.value.error_detail)
+    assert "super-secret-value-must-not-leak" not in error_str
+    return  # 旧假设已废弃，不再执行runtime部分
 
     result = harness.runtime.start_build(build.build_id, task_id="start-task")
 
