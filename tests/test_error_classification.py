@@ -245,4 +245,5 @@ def test_classify_docker_error_non_deploy_is_also_unknown():
     assert result["category"] == ErrorCategory.UNKNOWN_ERROR
     assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
-    assert result["user_action_required"] is True
+    # 未知错误不要求用户操作（新安全要求）
+    assert result["user_action_required"] is False
