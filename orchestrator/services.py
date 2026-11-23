@@ -37,6 +37,7 @@ from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepo
 from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceStore
 from orchestrator.compose_validator import ComposeEnvironmentValidator, format_validation_error
 from orchestrator.naming import build_namespace
+from orchestrator.error_classification import enrich_error_detail
 
 
 class NotFoundError(LookupError):
@@ -543,7 +544,7 @@ class BuildService:
                         error_detail = {"failure_site": "precheck", "summary": str(exc), "recognized": True, "build_id": build.build_id}
                     else:
                         error_detail = {**error_detail, "failure_site": "precheck", "build_id": build.build_id}
-                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail=error_detail)
+                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail=error_detail, exception=exc)
                     raise BuildInputError(str(exc)) from exc
                 tracker.guard()
                 self.repository.update_build(build.build_id, snapshot)
@@ -556,7 +557,7 @@ class BuildService:
         try:
             submission = self.dispatcher.dispatch_build(build.build_id)
         except Exception as exc:
-            self.fail(build.build_id, "Unable to enqueue build task", failure_site="precheck", error_detail={"failure_site": "precheck", "summary": "Unable to enqueue build task", "recognized": True, "build_id": build.build_id})
+            self.fail(build.build_id, "Unable to enqueue build task", failure_site="precheck", error_detail={"failure_site": "precheck", "summary": "Unable to enqueue build task", "recognized": True, "build_id": build.build_id}, exception=exc)
             raise BuildInputError("Unable to enqueue build task") from exc
         updated = self.repository.update_build(build.build_id, {"celery_task_id": submission.task_id, "updated_at": utc_now()})
         if updated is None:
@@ -610,12 +611,18 @@ class BuildService:
         raw_log_excerpt: str | None = None,
         failure_logs: dict[str, Any] | None = None,
         failure_site: str | None = None,
+        exception: Exception | None = None,
     ) -> BuildJob:
         build = self.get_build(build_id)
         if build.status == BuildStatus.FAILED:
             return build
         if build.status in TERMINAL_BUILD_STATUSES:
             return build
+        
+        # Enrich error_detail with classification fields
+        if error_detail is not None:
+            error_detail = enrich_error_detail(error_detail, exception=exception)
+        
         fields: dict[str, Any] = {"error": message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail

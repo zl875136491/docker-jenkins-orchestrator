@@ -1088,7 +1088,7 @@ class WorkerRuntime:
         raw_log_excerpt = getattr(exc, "raw_log_excerpt", None)
         failure_logs = getattr(exc, "failure_logs", None)
         failure_site = self._infer_failure_site(current, exc)
-        fail_kwargs = {"failure_site": failure_site}
+        fail_kwargs = {"failure_site": failure_site, "exception": exc}
         if isinstance(error_detail, dict):
             fail_kwargs["error_detail"] = {**error_detail, "failure_site": error_detail.get("failure_site") or failure_site}
         else:

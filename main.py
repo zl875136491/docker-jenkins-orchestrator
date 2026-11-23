@@ -64,6 +64,7 @@ from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFo
 from orchestrator.templates import TemplateError
 from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceLimitError
 from orchestrator.route_checks import RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError
+from orchestrator.error_classification import enrich_error_detail
 
 bearer = HTTPBearer(auto_error=False)
 _CHECK_PRIVATE_FIELDS = {"repository_url", "static_role_snapshot", "dynamic_role_snapshot", "static_run_token"}
@@ -211,9 +212,20 @@ def create_app(
     @api.exception_handler(ComposeConfigError)
     async def compose_config_error(_: Request, exc: ComposeConfigError) -> JSONResponse:
         """Handle Compose configuration errors with structured error details."""
+        error_detail = enrich_error_detail(exc.error_detail, exception=exc)
         content = {
             "detail": str(exc),
-            "error_detail": exc.error_detail,
+            "error_detail": error_detail,
+        }
+        return JSONResponse(status_code=422, content=content)
+    
+    @api.exception_handler(BuildInputError)
+    async def build_input_error(_: Request, exc: BuildInputError) -> JSONResponse:
+        """Handle build input errors with structured error details."""
+        error_detail = enrich_error_detail(exc.error_detail, exception=exc)
+        content = {
+            "detail": str(exc),
+            "error_detail": error_detail,
         }
         return JSONResponse(status_code=422, content=content)
 
