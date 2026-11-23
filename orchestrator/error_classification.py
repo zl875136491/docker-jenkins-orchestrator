@@ -332,8 +332,8 @@ def classify_error(
         "category": ErrorCategory.UNKNOWN_ERROR,
         "responsible_party": ResponsibleParty.UNKNOWN,
         "retryable": False,
-        "user_action_required": True,
-        "action_guidance": "联系平台排查具体错误原因",
+        "user_action_required": False,  # 未知错误不要求用户操作
+        "action_guidance": "构建失败，请联系平台排查",
     }
 
 
