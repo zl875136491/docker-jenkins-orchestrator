@@ -43,6 +43,7 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     
     # missing_variables: 保留完整结构 name/reason/operator/locations
     # 契约: name(str), reason(missing|empty), operator(允许列表), locations([{service, environment_key, config_path}])
+    # 白名单：只保留这4个顶层字段，删除任何未知字段（如value等）
     if "missing_variables" in metadata:
         missing = metadata["missing_variables"]
         if isinstance(missing, list):
@@ -62,20 +63,23 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
                     if reason in ("missing", "empty"):
                         safe_item["reason"] = reason
                     
-                    # operator: 保留允许的值（None或操作符）
+                    # operator: 保留允许的值（None或操作符字符串）
                     if "operator" in item:
                         operator = item["operator"]
-                        if operator is None or isinstance(operator, str):
+                        if operator is None:
+                            safe_item["operator"] = None
+                        elif isinstance(operator, str) and len(operator) < 10:
                             safe_item["operator"] = operator
                     
-                    # locations: 验证数组，只保留合法字段
+                    # locations: 验证数组，只保留合法字段（service, environment_key, config_path）
                     if "locations" in item and isinstance(item["locations"], list):
                         safe_locations = []
                         for loc in item["locations"][:10]:  # 限制location数量
                             if isinstance(loc, dict):
+                                # 只保留白名单字段，删除所有未知字段
                                 safe_loc = {}
                                 # service: 合法服务名
-                                if "service" in loc and isinstance(loc["service"], str):
+                                if "service" in loc and isinstance(loc["service"], str) and len(loc["service"]) < 100:
                                     safe_loc["service"] = loc["service"]
                                 # environment_key: 合法标识符
                                 if "environment_key" in loc and isinstance(loc["environment_key"], str):
@@ -91,6 +95,8 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
                         if safe_locations:
                             safe_item["locations"] = safe_locations
                     
+                    # 只保留白名单的4个字段：name, reason, operator, locations
+                    # 删除任何其他字段如value, hint等
                     safe_vars.append(safe_item)
                 elif isinstance(item, str) and item and item.replace("_", "").isalnum():
                     # 兼容旧格式：纯字符串变量名
@@ -345,9 +351,8 @@ def enrich_error_detail(
     if error_detail is None:
         error_detail = {}
     
-    # 如果已有分类字段，直接返回（不覆盖已有分类）
-    if "category" in error_detail and "responsible_party" in error_detail:
-        return error_detail
+    # 不能提前返回：即使已有分类字段，也必须安全规范化summary/remediation
+    # 已有的category/responsible_party可能来自不可信源，summary也可能含secret
     
     # 提取现有字段用于分类
     classification = classify_error(
@@ -415,10 +420,10 @@ def enrich_error_detail(
     # 生成summary前需要先过滤字段，但summary生成需要missing_variables
     # 所以在生成summary后再过滤
     
-    # 清理不安全的字段：只保留白名单字段
+    # 深层清理不安全的字段：只保留白名单字段
     # 安全白名单字段：code, subcode, category, responsible_party, retryable, user_action_required,
     #                 action_guidance, summary, remediation（从模板生成）, recognized, failure_site, build_id,
-    #                 endpoint_variable, missing_variables（已验证）, config_path, check_scope, service（合法元数据）
+    #                 endpoint_variable, missing_variables（需深层验证）, config_path, check_scope, service（合法元数据）
     safe_fields = {
         "code", "subcode", "category", "responsible_party", "retryable",
         "user_action_required", "action_guidance", "summary", "remediation", "recognized",
@@ -430,5 +435,10 @@ def enrich_error_detail(
     
     # 移除不在白名单的字段（如error, detail等可能含secret）
     result = {k: v for k, v in result.items() if k in safe_fields}
+    
+    # 对missing_variables做深层白名单过滤（删除value等未知字段）
+    if "missing_variables" in result:
+        result = dict(result)  # 确保是可变dict
+        result["missing_variables"] = _sanitize_metadata({"missing_variables": result["missing_variables"]}).get("missing_variables", [])
     
     return result

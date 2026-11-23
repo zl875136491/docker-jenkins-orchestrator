@@ -624,8 +624,13 @@ class BuildService:
         # Enrich error_detail with classification fields
         if error_detail is not None:
             error_detail = enrich_error_detail(error_detail, exception=exception)
+        else:
+            error_detail = enrich_error_detail({}, exception=exception)
         
-        fields: dict[str, Any] = {"error": message, "stage": "failed"}
+        # 使用安全规范化后的summary，忽略传入的message参数
+        safe_message = error_detail.get("summary", "构建失败，请联系平台排查")
+        
+        fields: dict[str, Any] = {"error": safe_message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail
         if raw_log_excerpt is not None:
@@ -643,7 +648,7 @@ class BuildService:
                 appid=failed.appid,
                 build_id=failed.build_id,
                 severity="error",
-                message=message,
+                message=safe_message,  # 使用安全message
             )
         )
         event_details: dict[str, Any] = {}
