@@ -46,11 +46,12 @@ def test_classify_unsupported_git_bind_mount():
     assert "COPY" in result["action_guidance"] or "命名卷" in result["action_guidance"]
 
 
-def test_classify_external_stateful_endpoint_via_exception():
-    """External stateful endpoint error from DockerServiceError is configuration error."""
-    exc = DockerServiceError("External stateful endpoint MONGO_URI cannot be proven build-private; use a service in this build")
-    
-    result = classify_error(exception=exc)
+def test_classify_external_stateful_endpoint_via_code():
+    """External stateful endpoint with explicit code/subcode is configuration error."""
+    result = classify_error(
+        error_code="COMPOSE_CONFIG_ERROR",
+        error_subcode="EXTERNAL_STATEFUL_ENDPOINT",
+    )
     
     assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
     assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
@@ -59,14 +60,25 @@ def test_classify_external_stateful_endpoint_via_exception():
     assert "数据库服务" in result["action_guidance"]
 
 
-def test_classify_external_stateful_endpoint_via_buildinputerror():
-    """External stateful endpoint error can also be BuildInputError."""
-    exc = BuildInputError("External stateful endpoint REDIS_URL cannot be proven build-private; use a service in this build")
+def test_classify_external_stateful_endpoint_without_code_is_unknown():
+    """DockerServiceError without explicit code/subcode is conservatively classified as unknown."""
+    exc = DockerServiceError("External stateful endpoint MONGO_URI cannot be proven build-private")
+    
+    result = classify_error(exception=exc)
+    
+    # Without explicit code/subcode, conservatively classified as unknown
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
+
+
+def test_classify_buildinputerror_without_code_is_config_unknown():
+    """BuildInputError without explicit code/subcode is configuration but unknown responsible party."""
+    exc = BuildInputError("Some configuration error")
     
     result = classify_error(exception=exc)
     
     assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
-    assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
     assert result["user_action_required"] is True
 
@@ -87,52 +99,52 @@ def test_classify_compose_config_error():
     assert result["user_action_required"] is True
 
 
-def test_classify_build_gate_error():
-    """Build gate error (未进行路由静态检查) is configuration error."""
+def test_classify_build_gate_error_without_code_is_unknown():
+    """Build gate error without explicit code is conservatively classified."""
     exc = BuildInputError("未进行路由静态检查, 无法交付构建任务")
     
     result = classify_error(exception=exc)
     
+    # Without explicit code/subcode, conservatively classified
     assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
-    assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
-    assert result["retryable"] is False
-    assert result["user_action_required"] is True
-    assert "静态路由检查" in result["action_guidance"]
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
-def test_classify_jenkins_triggering_error():
-    """Jenkins triggering error is infrastructure error (platform responsibility)."""
+def test_classify_jenkins_error_is_conservatively_unknown():
+    """Jenkins errors are conservatively classified as unknown (may be node offline/platform credentials)."""
     exc = JenkinsError("Failed to trigger Jenkins build")
     
     result = classify_error(exception=exc, failure_site="triggering")
     
-    assert result["category"] == ErrorCategory.INFRASTRUCTURE_ERROR
-    assert result["responsible_party"] == ResponsibleParty.PLATFORM
-    assert result["retryable"] is True
-    assert result["user_action_required"] is False
+    # Conservatively classified - could be platform issue
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
+    assert result["retryable"] is False
+    assert result["user_action_required"] is True
 
 
-def test_classify_jenkins_build_failure():
-    """Jenkins build failure (failure_site=jenkins) is application build error."""
+def test_classify_jenkins_build_failure_also_unknown():
+    """Jenkins build failure without explicit diagnosis is conservatively unknown."""
     exc = JenkinsError("Jenkins build #123 failed")
     
     result = classify_error(exception=exc, failure_site="jenkins")
     
-    assert result["category"] == ErrorCategory.APPLICATION_BUILD_ERROR
-    assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
+    # Conservatively classified - need to check logs
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
     assert result["user_action_required"] is True
-    assert "构建日志" in result["action_guidance"]
 
 
-def test_classify_docker_deploy_error():
-    """DockerServiceError during deploy is application runtime error."""
+def test_classify_docker_deploy_error_is_conservatively_unknown():
+    """DockerServiceError during deploy is conservatively unknown (may be Docker API/platform resources)."""
     exc = DockerServiceError("Service failed to start")
     
     result = classify_error(exception=exc, failure_site="deploy")
     
-    assert result["category"] == ErrorCategory.APPLICATION_RUNTIME_ERROR
-    assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
+    # Conservatively classified - could be Docker API unreachable or platform resource shortage
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
     assert result["user_action_required"] is True
 
@@ -206,25 +218,26 @@ def test_enrich_error_detail_handles_none():
     assert enriched["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
-def test_classify_other_buildinputerror():
-    """Other BuildInputError (not specific patterns) defaults to configuration error."""
+def test_classify_other_buildinputerror_is_config_unknown():
+    """Other BuildInputError defaults to configuration but unknown responsible party."""
     exc = BuildInputError("Invalid configuration parameter")
     
     result = classify_error(exception=exc)
     
     assert result["category"] == ErrorCategory.CONFIGURATION_ERROR
-    assert result["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
     assert result["retryable"] is False
     assert result["user_action_required"] is True
 
 
-def test_classify_docker_error_non_deploy():
-    """DockerServiceError outside deploy is infrastructure error."""
+def test_classify_docker_error_non_deploy_is_also_unknown():
+    """DockerServiceError outside deploy is also conservatively unknown."""
     exc = DockerServiceError("Docker daemon not responding")
     
     result = classify_error(exception=exc, failure_site="validating")
     
-    assert result["category"] == ErrorCategory.INFRASTRUCTURE_ERROR
-    assert result["responsible_party"] == ResponsibleParty.PLATFORM
-    assert result["retryable"] is True
-    assert result["user_action_required"] is False
+    # Conservatively classified - could be platform issue or config issue
+    assert result["category"] == ErrorCategory.UNKNOWN_ERROR
+    assert result["responsible_party"] == ResponsibleParty.UNKNOWN
+    assert result["retryable"] is False
+    assert result["user_action_required"] is True

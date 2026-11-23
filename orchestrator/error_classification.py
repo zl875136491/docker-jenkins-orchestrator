@@ -72,6 +72,22 @@ def classify_error(
                 "user_action_required": True,
                 "action_guidance": "修改Compose配置，使用Dockerfile COPY或命名卷",
             }
+        elif error_subcode == "EXTERNAL_STATEFUL_ENDPOINT":
+            return {
+                "category": ErrorCategory.CONFIGURATION_ERROR,
+                "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "在同一构建中定义数据库服务，使用服务名连接",
+            }
+        elif error_subcode == "INVALID_STATEFUL_ENDPOINT":
+            return {
+                "category": ErrorCategory.CONFIGURATION_ERROR,
+                "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "检查数据库连接字符串格式",
+            }
     
     # 使用异常类型判断
     if exception is not None:
@@ -87,97 +103,41 @@ def classify_error(
             }
         
         if isinstance(exception, BuildInputError):
-            # BuildInputError可能是配置错误，需要进一步判断
-            msg = str(exception).lower()
-            
-            # 外部stateful endpoint
-            if "external stateful endpoint" in msg and "cannot be proven build-private" in msg:
-                return {
-                    "category": ErrorCategory.CONFIGURATION_ERROR,
-                    "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
-                    "retryable": False,
-                    "user_action_required": True,
-                    "action_guidance": "在同一构建中定义数据库服务，使用服务名连接，不使用外部URI",
-                }
-            
-            # 路由检查未通过
-            if "未进行路由静态检查" in msg or "build gate" in msg.lower():
-                return {
-                    "category": ErrorCategory.CONFIGURATION_ERROR,
-                    "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
-                    "retryable": False,
-                    "user_action_required": True,
-                    "action_guidance": "先通过静态路由检查后再创建构建",
-                }
-            
-            # 其他BuildInputError默认为配置错误
+            # BuildInputError大多数是配置错误，但不要仅凭英文消息判断
+            # 应该在源头设置明确的code/subcode
+            # 这里仅作为fallback，保守分类
             return {
                 "category": ErrorCategory.CONFIGURATION_ERROR,
-                "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
+                "responsible_party": ResponsibleParty.UNKNOWN,
                 "retryable": False,
                 "user_action_required": True,
-                "action_guidance": "检查并修复配置错误后重试",
+                "action_guidance": "查看错误详情修复配置后重试，或联系平台排查",
             }
         
         if isinstance(exception, JenkinsError):
             # Jenkins错误可能是基础设施或应用构建失败
-            # 需要根据failure_site和具体内容判断
-            if failure_site == "triggering":
-                return {
-                    "category": ErrorCategory.INFRASTRUCTURE_ERROR,
-                    "responsible_party": ResponsibleParty.PLATFORM,
-                    "retryable": True,
-                    "user_action_required": False,
-                    "action_guidance": "稍后重试，如持续失败请联系平台排查",
-                }
-            elif failure_site == "jenkins":
-                # Jenkins构建失败，大多数是应用代码问题
-                return {
-                    "category": ErrorCategory.APPLICATION_BUILD_ERROR,
-                    "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
-                    "retryable": False,
-                    "user_action_required": True,
-                    "action_guidance": "查看构建日志，修复代码或构建配置后重试",
-                }
-            else:
-                return {
-                    "category": ErrorCategory.INFRASTRUCTURE_ERROR,
-                    "responsible_party": ResponsibleParty.PLATFORM,
-                    "retryable": True,
-                    "user_action_required": False,
-                    "action_guidance": "稍后重试，如持续失败请联系平台排查",
-                }
+            # 仅failure_site不足以证明责任方（可能是节点离线/推镜像/平台凭据等）
+            # 保守分类为未知，需要查看日志判断
+            return {
+                "category": ErrorCategory.UNKNOWN_ERROR,
+                "responsible_party": ResponsibleParty.UNKNOWN,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "查看构建日志判断失败原因，或联系平台排查",
+            }
         
         if isinstance(exception, DockerServiceError):
-            msg = str(exception).lower()
-            
-            # 外部stateful endpoint（特定DockerServiceError）
-            if "external stateful endpoint" in msg:
-                return {
-                    "category": ErrorCategory.CONFIGURATION_ERROR,
-                    "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
-                    "retryable": False,
-                    "user_action_required": True,
-                    "action_guidance": "在同一构建中定义数据库服务，使用服务名连接",
-                }
-            
-            # 其他DockerServiceError可能是基础设施或应用运行时错误
-            if failure_site == "deploy":
-                return {
-                    "category": ErrorCategory.APPLICATION_RUNTIME_ERROR,
-                    "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
-                    "retryable": False,
-                    "user_action_required": True,
-                    "action_guidance": "查看服务日志，修复应用运行时问题",
-                }
-            else:
-                return {
-                    "category": ErrorCategory.INFRASTRUCTURE_ERROR,
-                    "responsible_party": ResponsibleParty.PLATFORM,
-                    "retryable": True,
-                    "user_action_required": False,
-                    "action_guidance": "稍后重试，如持续失败请联系平台排查",
-                }
+            # DockerServiceError可能是基础设施或应用运行时错误
+            # 仅exception类型和failure_site不足以证明责任方
+            # （可能是Docker API不可达/平台资源不足）
+            # 保守分类为未知
+            return {
+                "category": ErrorCategory.UNKNOWN_ERROR,
+                "responsible_party": ResponsibleParty.UNKNOWN,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "查看错误详情判断失败原因，或联系平台排查",
+            }
     
     # 使用failure_site判断（次优）
     if failure_site == "poll_timeout":

@@ -278,10 +278,20 @@ class WorkerRuntime:
                 runtime_compose = self._resolve_application_environment(runtime_compose, application_environment)
                 self._validate_source_compose(runtime_compose)
                 if self._isolated(build):
-                    self._docker_validation_adapter().validate_build_compose(
-                        runtime_compose,
-                        environment=application_environment,
-                    )
+                    try:
+                        self._docker_validation_adapter().validate_build_compose(
+                            runtime_compose,
+                            environment=application_environment,
+                        )
+                    except DockerServiceError as exc:
+                        # DockerServiceError可能携带error_detail（如external stateful endpoint）
+                        # 确保error_detail被保留并enriched
+                        error_detail = getattr(exc, "error_detail", None)
+                        if error_detail:
+                            error_detail["failure_site"] = "validating"
+                            error_detail["build_id"] = build_id
+                            raise BuildInputError(str(exc), error_detail=error_detail) from exc
+                        raise
                     if any(len(f"{build.build_id}-{name}") > 128 for name in compose["services"]):
                         raise BuildInputError("Build-exclusive image tags must fit Docker's 128-character limit")
                 build_source = self.workspace.build_source(compose)

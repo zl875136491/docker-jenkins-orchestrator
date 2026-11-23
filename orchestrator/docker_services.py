@@ -277,9 +277,30 @@ class DockerSwarmAdapter:
                         raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
                     host = parsed.hostname if parsed.scheme and "://" in value else urlsplit("//" + value).hostname
                 except ValueError:
-                    raise DockerServiceError(f"Stateful endpoint configuration {key} is invalid") from None
+                    error_detail = {
+                        "code": "COMPOSE_CONFIG_ERROR",
+                        "subcode": "INVALID_STATEFUL_ENDPOINT",
+                        "summary": f"环境变量 {key} 配置的有状态端点格式无效",
+                        "remediation": "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接",
+                        "recognized": True,
+                        "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
+                    }
+                    exc = DockerServiceError(f"Stateful endpoint configuration {key} is invalid")
+                    exc.error_detail = error_detail
+                    raise exc from None
                 if host not in private_hosts:
-                    raise DockerServiceError(f"External stateful endpoint {key} cannot be proven build-private; use a service in this build")
+                    error_detail = {
+                        "code": "COMPOSE_CONFIG_ERROR",
+                        "subcode": "EXTERNAL_STATEFUL_ENDPOINT",
+                        "summary": f"环境变量 {key} 指向外部有状态端点，无法保证构建隔离",
+                        "remediation": f"在同一构建的 services 中定义 {key.replace('_URL', '').replace('_URI', '').lower()} 服务，使用服务名而非外部 URI 连接。例如：DATABASE_URL=postgres://db:5432/mydb",
+                        "recognized": True,
+                        "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
+                        "endpoint_variable": key,
+                    }
+                    exc = DockerServiceError(f"External stateful endpoint {key} cannot be proven build-private; use a service in this build")
+                    exc.error_detail = error_detail
+                    raise exc
 
     def _assert_tracked_identity(self, kind: str, name: str, obj: Any) -> None:
         if self._tracker is None:
