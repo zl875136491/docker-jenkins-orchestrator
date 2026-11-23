@@ -218,9 +218,8 @@ def create_app(
         else:
             error_detail = enrich_error_detail({}, exception=exc)
         
-        # 使用安全的中文summary而不是str(exc)
-        from orchestrator.error_classification import sanitize_error_message
-        safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+        # 使用error_detail的安全summary（从模板生成）
+        safe_detail = error_detail.get("summary", "构建配置错误，请联系平台排查")
         
         content = {
             "detail": safe_detail,
@@ -237,9 +236,8 @@ def create_app(
         else:
             error_detail = enrich_error_detail({}, exception=exc)
         
-        # 使用安全的中文summary而不是str(exc)
-        from orchestrator.error_classification import sanitize_error_message
-        safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+        # 使用error_detail的安全summary（从模板生成）
+        safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
         
         content = {
             "detail": safe_detail,
@@ -694,9 +692,8 @@ def create_app(
             else:
                 error_detail = enrich_error_detail({}, exception=exc)
             
-            # 使用安全的中文summary而不是str(exc)
-            from orchestrator.error_classification import sanitize_error_message
-            safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+            # 使用error_detail的安全summary（从模板生成）
+            safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
             
             content = {"detail": safe_detail, "error_detail": error_detail}
             return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content)

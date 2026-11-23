@@ -1162,27 +1162,22 @@ def _safe_error(exc: Exception, fallback: str, *, summary_limit: int = DEFAULT_S
     """
     获取异常的安全摘要（不泄露密码、凭据等）
     
-    优先使用error_detail中的summary（已清理），否则使用sanitize后的str(exc)或fallback
+    仅使用固定中文模板，不信任exc.error_detail.summary或str(exc)
     """
-    from orchestrator.error_classification import sanitize_error_message
+    from orchestrator.error_classification import get_safe_summary_from_template
     
-    # 优先使用error_detail中的summary（已清理）
+    # 检查是否有明确的code/subcode（已识别错误）
     error_detail = getattr(exc, "error_detail", None)
-    if error_detail and isinstance(error_detail, dict) and error_detail.get("summary"):
-        return error_detail["summary"][:summary_limit]
+    if error_detail and isinstance(error_detail, dict):
+        code = error_detail.get("code")
+        subcode = error_detail.get("subcode")
+        if code and subcode:
+            # 从模板生成安全summary
+            safe_summary = get_safe_summary_from_template(code, subcode, error_detail)
+            return safe_summary[:summary_limit]
     
-    # 对于已知类型的异常，清理str(exc)
-    if isinstance(exc, (BuildInputError, DockerServiceError, GitLabError, JenkinsError, RegistrySyncError, TemplateError, ValueError)):
-        message = str(exc).strip()
-        if message:
-            safe_message = sanitize_error_message(message)
-            # Jenkins diagnostics already redact; allow the configured summary ceiling.
-            # Other adapter errors stay shorter to avoid leaking noisy stack traces.
-            limit = summary_limit if isinstance(exc, JenkinsError) else min(2000, summary_limit)
-            return safe_message[:limit]
-    
-    # Fallback for unknown exception types
-    return sanitize_error_message(fallback)
+    # 未识别错误，使用固定中文模板（不返回str(exc)）
+    return fallback[:summary_limit]
 
 def get_worker_runtime() -> WorkerRuntime:
     return WorkerRuntime(get_settings())
