@@ -659,20 +659,22 @@ class BuildService:
                 appid=failed.appid,
                 build_id=failed.build_id,
                 severity="error",
-                message=safe_message,  # 使用安全message
+                message=safe_message,  # 使用安全message（与build.error一致）
             )
         )
+        # 事件details深层白名单，不泄漏raw日志
         event_details: dict[str, Any] = {}
         if error_detail is not None:
             event_details["error_detail"] = error_detail
-        if raw_log_excerpt is not None:
-            # Keep event payload bounded; full excerpt lives on build_info.
-            event_details["raw_log_excerpt_preview"] = raw_log_excerpt[:500]
-        if failure_logs is not None:
-            event_details["failure_logs_source"] = failure_logs.get("source")
+        # raw_log_excerpt不放事件（已在build_info清理为null）
+        # event_details不包含raw_log_excerpt_preview
+        if safe_failure_logs is not None:
+            # 只保留受控source，不用原始summary
+            event_details["failure_logs_source"] = safe_failure_logs.get("source")
         if failed.failure_site:
             event_details["failure_site"] = failed.failure_site
         if failed.stage:
             event_details["stage"] = failed.stage
-        self._event(failed.appid, failed.build_id, "build.alert", message, EventLevel.ERROR, **event_details)
+        # 事件message也使用安全summary（不用原始message参数）
+        self._event(failed.appid, failed.build_id, "build.alert", safe_message, EventLevel.ERROR, **event_details)
         return failed

@@ -417,8 +417,16 @@ def enrich_error_detail(
         result["subcode"] = "UNKNOWN_SUBCODE"
     
     # 确保recognized字段存在且正确
-    # 只有明确的code/subcode才算recognized
-    if result.get("code") not in (None, "UNKNOWN_CODE") and result.get("subcode") not in (None, "UNKNOWN_SUBCODE"):
+    # 只有白名单组合才算recognized（不能仅判断code/subcode非UNKNOWN占位）
+    RECOGNIZED_COMBINATIONS = {
+        ("COMPOSE_CONFIG_ERROR", "MISSING_ENVIRONMENT_VARIABLES"),
+        ("COMPOSE_CONFIG_ERROR", "EXTERNAL_STATEFUL_ENDPOINT"),
+        ("COMPOSE_CONFIG_ERROR", "INVALID_STATEFUL_ENDPOINT"),
+        ("COMPOSE_CONFIG_ERROR", "UNSUPPORTED_GIT_BIND_MOUNT"),
+    }
+    code = result.get("code")
+    subcode = result.get("subcode")
+    if (code, subcode) in RECOGNIZED_COMBINATIONS:
         result["recognized"] = True
     else:
         result["recognized"] = False
