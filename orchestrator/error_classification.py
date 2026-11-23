@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import Enum
 from typing import Any
 
@@ -25,6 +26,60 @@ class ResponsibleParty(str, Enum):
     APPLICATION_DEVELOPER = "application_developer"  # 应用开发者（需修改代码/配置）
     PLATFORM = "platform"  # 平台（需平台处理）
     UNKNOWN = "unknown"  # 未知（需排查）
+
+
+def sanitize_error_message(message: str) -> str:
+    """
+    清理错误消息中的敏感信息（密码、凭据、URI等）
+    
+    Returns:
+        安全的中文错误摘要
+    """
+    if not message or not isinstance(message, str):
+        return "构建失败，请联系平台排查"
+    
+    # Pattern: 匹配常见URI格式中的密码部分
+    # mongodb://user:password@host/db
+    # postgres://user:password@host:port/db
+    uri_password_pattern = re.compile(
+        r'://([^:/@]+):([^@]+)@',  # ://username:password@
+        re.IGNORECASE
+    )
+    
+    # Pattern: 匹配可能的密码字符串
+    sensitive_token_pattern = re.compile(
+        r'\b(FAKE_[A-Z_]*\d+|[A-Za-z]*[Pp]assword\d*|[Ss]ecret[A-Za-z0-9_]*|[Tt]oken[A-Za-z0-9_]*)\b',
+        re.IGNORECASE
+    )
+    
+    # 检查是否包含URI或敏感信息
+    has_uri_password = uri_password_pattern.search(message)
+    has_sensitive_token = sensitive_token_pattern.search(message)
+    
+    if has_uri_password or has_sensitive_token:
+        # 包含敏感信息，返回通用中文摘要
+        if "external" in message.lower() or "stateful" in message.lower():
+            return "构建配置包含外部端点，请检查数据库连接配置"
+        elif "docker" in message.lower() or "deploy" in message.lower():
+            return "部署失败，请联系平台排查"
+        elif "jenkins" in message.lower() or "build" in message.lower():
+            return "构建任务失败，请联系平台排查"
+        else:
+            return "构建失败，请联系平台排查"
+    
+    # 不包含敏感信息，但如果是英文原始异常，也转换为中文
+    if message and not any('\u4e00' <= c <= '\u9fff' for c in message):
+        # 英文消息，提供通用中文摘要
+        if "unable to enqueue" in message.lower():
+            return "构建任务排队失败，请联系平台排查"
+        elif "validation" in message.lower() or "invalid" in message.lower():
+            return "构建配置验证失败，请联系平台排查"
+        elif "timeout" in message.lower():
+            return "构建超时，请联系平台排查"
+        else:
+            return "构建失败，请联系平台排查"
+    
+    return message
 
 
 def classify_error(
@@ -103,15 +158,15 @@ def classify_error(
             }
         
         if isinstance(exception, BuildInputError):
-            # BuildInputError大多数是配置错误，但不要仅凭英文消息判断
-            # 应该在源头设置明确的code/subcode
-            # 这里仅作为fallback，保守分类
+            # BuildInputError without explicit code/subcode → unknown_error/unknown
+            # Only BuildInputError with explicit code/subcode (from typed source) is configuration_error
+            # 这里是fallback，保守分类为unknown
             return {
-                "category": ErrorCategory.CONFIGURATION_ERROR,
+                "category": ErrorCategory.UNKNOWN_ERROR,
                 "responsible_party": ResponsibleParty.UNKNOWN,
                 "retryable": False,
-                "user_action_required": True,
-                "action_guidance": "查看错误详情修复配置后重试，或联系平台排查",
+                "user_action_required": False,
+                "action_guidance": "构建输入验证失败，请联系平台排查具体原因",
             }
         
         if isinstance(exception, JenkinsError):
@@ -198,5 +253,21 @@ def enrich_error_detail(
                 result[key] = value.value
             else:
                 result[key] = value
+    
+    # 确保summary字段存在且安全（最终检查）
+    if "summary" not in result or not result["summary"]:
+        result["summary"] = result.get("action_guidance", "构建失败，请联系平台排查")
+    else:
+        result["summary"] = sanitize_error_message(result["summary"])
+    
+    # 确保code和subcode字段存在（即使为None）
+    if "code" not in result:
+        result["code"] = None
+    if "subcode" not in result:
+        result["subcode"] = None
+    
+    # 确保recognized字段存在
+    if "recognized" not in result:
+        result["recognized"] = False
     
     return result

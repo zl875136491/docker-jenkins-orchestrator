@@ -1159,16 +1159,30 @@ def _result(build: BuildJob) -> dict[str, str]:
 
 
 def _safe_error(exc: Exception, fallback: str, *, summary_limit: int = DEFAULT_SUMMARY_MAX_CHARS) -> str:
-    """Only promote errors produced by adapters that deliberately redact secrets."""
-
+    """
+    获取异常的安全摘要（不泄露密码、凭据等）
+    
+    优先使用error_detail中的summary（已清理），否则使用sanitize后的str(exc)或fallback
+    """
+    from orchestrator.error_classification import sanitize_error_message
+    
+    # 优先使用error_detail中的summary（已清理）
+    error_detail = getattr(exc, "error_detail", None)
+    if error_detail and isinstance(error_detail, dict) and error_detail.get("summary"):
+        return error_detail["summary"][:summary_limit]
+    
+    # 对于已知类型的异常，清理str(exc)
     if isinstance(exc, (BuildInputError, DockerServiceError, GitLabError, JenkinsError, RegistrySyncError, TemplateError, ValueError)):
         message = str(exc).strip()
         if message:
+            safe_message = sanitize_error_message(message)
             # Jenkins diagnostics already redact; allow the configured summary ceiling.
             # Other adapter errors stay shorter to avoid leaking noisy stack traces.
             limit = summary_limit if isinstance(exc, JenkinsError) else min(2000, summary_limit)
-            return message[:limit]
-    return fallback
+            return safe_message[:limit]
+    
+    # Fallback for unknown exception types
+    return sanitize_error_message(fallback)
 
 def get_worker_runtime() -> WorkerRuntime:
     return WorkerRuntime(get_settings())

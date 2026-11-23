@@ -212,9 +212,18 @@ def create_app(
     @api.exception_handler(ComposeConfigError)
     async def compose_config_error(_: Request, exc: ComposeConfigError) -> JSONResponse:
         """Handle Compose configuration errors with structured error details."""
-        error_detail = enrich_error_detail(exc.error_detail, exception=exc)
+        error_detail = getattr(exc, "error_detail", None)
+        if error_detail:
+            error_detail = enrich_error_detail(error_detail, exception=exc)
+        else:
+            error_detail = enrich_error_detail({}, exception=exc)
+        
+        # 使用安全的中文summary而不是str(exc)
+        from orchestrator.error_classification import sanitize_error_message
+        safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+        
         content = {
-            "detail": str(exc),
+            "detail": safe_detail,
             "error_detail": error_detail,
         }
         return JSONResponse(status_code=422, content=content)
@@ -222,9 +231,18 @@ def create_app(
     @api.exception_handler(BuildInputError)
     async def build_input_error(_: Request, exc: BuildInputError) -> JSONResponse:
         """Handle build input errors with structured error details."""
-        error_detail = enrich_error_detail(exc.error_detail, exception=exc)
+        error_detail = getattr(exc, "error_detail", None)
+        if error_detail:
+            error_detail = enrich_error_detail(error_detail, exception=exc)
+        else:
+            error_detail = enrich_error_detail({}, exception=exc)
+        
+        # 使用安全的中文summary而不是str(exc)
+        from orchestrator.error_classification import sanitize_error_message
+        safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+        
         content = {
-            "detail": str(exc),
+            "detail": safe_detail,
             "error_detail": error_detail,
         }
         return JSONResponse(status_code=422, content=content)
@@ -670,8 +688,17 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         except BuildInputError as exc:
             # Return structured error_detail with classification
-            error_detail = enrich_error_detail(getattr(exc, "error_detail", None), exception=exc)
-            content = {"detail": str(exc), "error_detail": error_detail}
+            error_detail = getattr(exc, "error_detail", None)
+            if error_detail:
+                error_detail = enrich_error_detail(error_detail, exception=exc)
+            else:
+                error_detail = enrich_error_detail({}, exception=exc)
+            
+            # 使用安全的中文summary而不是str(exc)
+            from orchestrator.error_classification import sanitize_error_message
+            safe_detail = error_detail.get("summary") or sanitize_error_message(str(exc))
+            
+            content = {"detail": safe_detail, "error_detail": error_detail}
             return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content)
         except OSError as exc:
             raise HTTPException(status_code=503, detail="Unable to snapshot workspace storage") from exc
