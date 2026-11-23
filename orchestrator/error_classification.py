@@ -416,8 +416,11 @@ def enrich_error_detail(
     if not result.get("subcode"):
         result["subcode"] = "UNKNOWN_SUBCODE"
     
-    # 确保recognized字段存在
-    if "recognized" not in result:
+    # 确保recognized字段存在且正确
+    # 只有明确的code/subcode才算recognized
+    if result.get("code") not in (None, "UNKNOWN_CODE") and result.get("subcode") not in (None, "UNKNOWN_SUBCODE"):
+        result["recognized"] = True
+    else:
         result["recognized"] = False
     
     # 生成summary前需要先过滤字段，但summary生成需要missing_variables

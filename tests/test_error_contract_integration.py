@@ -337,7 +337,8 @@ def test_worker_jenkins_error_recognized_false_no_code(container):
     assert error_detail["responsible_party"] == UNKNOWN_PARTY
     assert "action_guidance" in error_detail
     # Should NOT have explicit code/subcode (no source metadata)
-    assert error_detail.get("code") is None or error_detail.get("subcode") is None
+    # code/subcode缺失时设为UNKNOWN_CODE/UNKNOWN_SUBCODE（不为null）
+    assert error_detail.get("code") in (None, "UNKNOWN_CODE") or error_detail.get("subcode") in (None, "UNKNOWN_SUBCODE")
 
 
 def test_success_202_error_detail_is_null_or_absent(client, container):
