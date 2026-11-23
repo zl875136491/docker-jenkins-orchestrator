@@ -46,11 +46,19 @@ def get_safe_summary_from_template(code: str | None, subcode: str | None, metada
     # 明确code/subcode对应的安全模板
     if code == "COMPOSE_CONFIG_ERROR":
         if subcode == "MISSING_ENVIRONMENT_VARIABLES":
-            # 白名单元数据：missing_variables列表（变量名）
+            # 白名单元数据：missing_variables列表（可能是dict或str）
             missing = metadata.get("missing_variables", [])
             if missing:
-                # 只使用变量名（已验证为合法标识符）
-                return f"缺少必需的环境变量：{', '.join(missing[:5])}"
+                # 提取变量名（可能是dict或str）
+                var_names = []
+                for item in missing[:5]:
+                    if isinstance(item, dict):
+                        var_names.append(item.get("variable", ""))
+                    else:
+                        var_names.append(str(item))
+                var_names = [v for v in var_names if v]
+                if var_names:
+                    return f"缺少必需的环境变量：{', '.join(var_names)}"
             return "缺少必需的环境变量"
         elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
             # 白名单元数据：endpoint_variable（变量名）
