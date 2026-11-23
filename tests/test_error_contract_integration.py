@@ -60,7 +60,7 @@ def container(client):
     return client.app.state.container
 
 
-def test_http_external_stateful_endpoint_returns_422_with_classification(client, container):
+def test_http_external_stateful_endpoint_真实触发_returns_422_with_classification(client, container):
     """HTTP POST with external stateful endpoint returns 422 with complete error classification."""
     compose = {
         "services": {
@@ -132,9 +132,17 @@ def test_http_external_stateful_endpoint_returns_422_with_classification(client,
     assert "failure_site" in error_detail
     assert error_detail["failure_site"] in {"precheck", "validating"}
     
-    # Build should NOT be created
+    # Build should NOT be created (422 means validation failed before build creation)
     builds = container.repository.list_builds("APP-ERROR-CONTRACT-1")
     assert len(builds) == 0
+    
+    # Should have explicit code/subcode from source
+    assert error_detail.get("code") == "COMPOSE_CONFIG_ERROR"
+    assert error_detail.get("subcode") == "EXTERNAL_STATEFUL_ENDPOINT"
+    
+    # Should have endpoint_variable for diagnosis
+    assert "endpoint_variable" in error_detail
+    assert error_detail["endpoint_variable"] == "DATABASE_URL"
 
 
 def test_http_missing_variables_preserves_existing_structure(client, container):
@@ -180,7 +188,7 @@ def test_http_missing_variables_preserves_existing_structure(client, container):
     assert "补充缺失的环境变量" in error_detail["action_guidance"]
 
 
-def test_worker_external_stateful_endpoint_persists_classification(container):
+def test_worker_external_stateful_endpoint_真实门禁_persists_classification(container):
     """Worker validating stage persists external stateful endpoint error with classification."""
     compose = {
         "services": {
@@ -234,12 +242,17 @@ def test_worker_external_stateful_endpoint_persists_classification(container):
     assert failed_build.status.value == "failed"
     assert failed_build.failure_site == "validating"
     
-    # Should have error_detail with classification
+    # Should have error_detail with explicit code/subcode and classification
     assert failed_build.error_detail is not None
     error_detail = failed_build.error_detail
     
-    assert error_detail["category"] == ErrorCategory.CONFIGURATION_ERROR
-    assert error_detail["responsible_party"] == ResponsibleParty.APPLICATION_DEVELOPER
+    # Explicit code/subcode from source
+    assert error_detail.get("code") == "COMPOSE_CONFIG_ERROR"
+    assert error_detail.get("subcode") == "EXTERNAL_STATEFUL_ENDPOINT"
+    
+    # Classification
+    assert error_detail["category"] == CONFIG_ERROR
+    assert error_detail["responsible_party"] == APP_DEV
     assert error_detail["retryable"] is False
     assert error_detail["user_action_required"] is True
     assert "action_guidance" in error_detail
