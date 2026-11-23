@@ -327,7 +327,8 @@ def enrich_error_detail(
                 result["summary"] = exc_msg
             elif exc_msg and any('\u4e00' <= c <= '\u9fff' for c in exc_msg) and len(exc_msg) < 50:
                 # 短中文消息且不含常见secret模式
-                if not re.search(r'[:=]|password|secret|token|key|credential', exc_msg, re.IGNORECASE):
+                # 检查中文关键词和符号
+                if not re.search(r'[:：=]|密码|秘密|令牌|凭据|password|secret|token|key|credential', exc_msg, re.IGNORECASE):
                     result["summary"] = exc_msg
                 else:
                     result["summary"] = result.get("action_guidance", "构建输入验证失败，请联系平台排查")
@@ -354,13 +355,13 @@ def enrich_error_detail(
     # 清理不安全的字段：只保留白名单字段
     # 安全白名单字段：code, subcode, category, responsible_party, retryable, user_action_required,
     #                 action_guidance, summary, remediation（从模板生成）, recognized, failure_site, build_id,
-    #                 endpoint_variable, missing_variables（已验证）, config_path, check_scope（合法元数据）
+    #                 endpoint_variable, missing_variables（已验证）, config_path, check_scope, service（合法元数据）
     safe_fields = {
         "code", "subcode", "category", "responsible_party", "retryable",
         "user_action_required", "action_guidance", "summary", "remediation", "recognized",
         "failure_site", "build_id", "stage", "source",
         # 白名单元数据（已通过_sanitize_metadata验证或为合法技术字段）
-        "endpoint_variable", "missing_variables", "config_path", "check_scope",
+        "endpoint_variable", "missing_variables", "config_path", "check_scope", "service",
         "exception_type",  # 保留但不信任
     }
     
