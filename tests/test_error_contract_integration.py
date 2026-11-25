@@ -202,14 +202,14 @@ def test_http_missing_variables_preserves_existing_structure(client, container):
     assert "补充缺失的环境变量" in error_detail["action_guidance"]
 
 
-def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(container):
-    """Worker validating stage persists invalid stateful endpoint error with classification."""
+def test_worker_invalid_stateful_endpoint_now_non_blocking_info_warning(container):
+    """新行为：格式无效端点生成info warning不阻断"""
     compose = {
         "services": {
             "api": {
                 "image": "node:18",
                 "environment": {
-                    # Invalid URI format to trigger INVALID_STATEFUL_ENDPOINT
+                    # Invalid URI format - 新行为：只生成info warning
                     "REDIS_URL": "redis://[invalid"
                 }
             }
@@ -230,7 +230,7 @@ def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(c
     # Queue build
     build = container.builds.queue_build("APP-INVALID-EP-1", BuildCreate())
     
-    # Run worker (will fail on external stateful endpoint validation)
+    # Run worker（新行为：格式无效也不阻断）
     jenkins = FakeJenkins([], build=None)
     gitlab = FakeGitLab("a" * 40)
     docker = FakeDockerServices(None)
@@ -249,9 +249,6 @@ def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(c
     
     result = runtime.start_build(build.build_id, "task")
     
-    # 新行为：格式无效的端点也只生成info级别warning，不阻断
-    # 会继续到后续阶段（可能因其他原因失败）
-    
     # Check persisted build
     built = container.builds.get_build(build.build_id)
     # 新行为：不应该因为INVALID_STATEFUL_ENDPOINT失败
@@ -266,13 +263,7 @@ def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(c
             assert "code" in w
             assert "severity" in w
             assert "blocking" in w
-    
-    # Classification
-    assert error_detail["category"] == CONFIG_ERROR
-    assert error_detail["responsible_party"] == APP_DEV
-    assert error_detail["retryable"] is False
-    assert error_detail["user_action_required"] is True
-    assert "action_guidance" in error_detail
+            assert w["blocking"] is False
     assert "格式" in error_detail.get("summary", "")
 
 
