@@ -239,21 +239,54 @@ class DockerSwarmAdapter:
                     allowed = getattr(self, "_allowed_bind_root", self.workspace_host_root)
                     if allowed is None or not Path(source).is_relative_to(allowed) or ".." in Path(source).parts:
                         raise DockerServiceError("Absolute bind mounts must belong to the build workspace")
-        self._validate_private_backends(compose, environment or {})
+        warnings = self._validate_private_backends(compose, environment or {})
+        return warnings
 
-    def _validate_private_backends(self, compose: Mapping[str, Any], environment: Mapping[str, str]) -> None:
+    def _validate_private_backends(self, compose: Mapping[str, Any], environment: Mapping[str, str]) -> list[dict[str, Any]]:
+        """Detect external stateful endpoints and return as non-blocking warnings.
+        
+        No longer blocks builds for external databases - returns warnings instead.
+        Broken URI formats still cause INVALID_STATEFUL_ENDPOINT errors.
+        """
+        warnings = []
         services = self._compose_services(compose)
         private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
         stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
-        endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?)_(?:HOST|URL|URI|DSN|ENDPOINT)$")
-        configurations = [dict(environment)]
-        configurations.extend(dict(value.split("=", 1) for value in self._environment(service.get("environment"))) for service in services.values())
-        for values in configurations:
+        # Match endpoint variables: *_HOST, *_URL, *_URI, *_DSN, *_ENDPOINT, *_SERVER, *_ADDRESS
+        # Heuristic pattern covers common database/storage/messaging endpoints without hardcoding all vendor names
+        endpoint_key = re.compile(r"_(?:HOST|URL|URI|DSN|ENDPOINT|SERVER|ADDRESS)(?:_\w+)?$|^(?:HOST|URL|URI|DSN|ENDPOINT|SERVER)$", re.IGNORECASE)
+        # Only scan actual service environment declarations (real Compose references), not runtime environment
+        configurations = [(name, dict(value.split("=", 1) for value in self._environment(service.get("environment")))) for name, service in services.items()]
+        
+        # Aggregate warnings by (key, locations) to avoid duplicates
+        warning_map: dict[str, dict[str, Any]] = {}
+        
+        for service_name, values in configurations:
             for key, raw in values.items():
                 value = str(raw)
-                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}",
-                               lambda match: str(environment.get(match.group(1), values.get(match.group(1), match.group(2) or "${" + match.group(1) + "}"))), value)
+                # Resolve ${VAR:-default} with Compose semantics:
+                # Only use actual values from environment, not templates from values
+                def resolve_var(match):
+                    var_name = match.group(1)
+                    separator = match.group(2)  # ":-", "-", or None
+                    default_val = match.group(3) if match.group(3) is not None else ""
+                    
+                    # Only check environment for actual values, never values (which may contain templates)
+                    if var_name in environment:
+                        env_val = environment[var_name]
+                        # ${VAR:-default} treats empty as unset, ${VAR-default} doesn't
+                        if separator == ":-" and env_val == "":
+                            return default_val
+                        return str(env_val)
+                    # Variable not in environment
+                    if separator:  # Has default
+                        return default_val
+                    # No default and not in environment - leave unresolved
+                    return match.group(0)
+                
+                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}", resolve_var, value)
                 upper_key = key.upper()
+                
                 if upper_key in {"S3_BUCKET", "AWS_S3_BUCKET", "STORAGE_BUCKET", "GOOGLE_STORAGE_BUCKET"} and value:
                     endpoint_keys = {"S3_ENDPOINT", "MINIO_ENDPOINT", "STORAGE_ENDPOINT", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"}
                     local_endpoint = False
@@ -266,20 +299,87 @@ class DockerSwarmAdapter:
                         if host in services:
                             local_endpoint = True
                     if not local_endpoint:
-                        raise DockerServiceError(f"External storage configuration {key} cannot be proven build-private")
+                        # 外部存储：生成warning而非阻断
+                        loc = {"service": service_name, "key": key}
+                        if key not in warning_map:
+                            warning_map[key] = {
+                                "code": "EXTERNAL_STORAGE_DETECTED",
+                                "severity": "warning",
+                                "blocking": False,
+                                "message": "检测到外部存储配置",
+                                "environment_key": key,
+                                "locations": [loc],
+                            }
+                        else:
+                            # Deduplicate by (service, key)
+                            if not any(l.get("service") == service_name and l.get("key") == key for l in warning_map[key]["locations"]):
+                                warning_map[key]["locations"].append(loc)
                     continue
+                
+                # Check if this is an endpoint variable
+                is_endpoint = bool(endpoint_key.search(upper_key)) or upper_key in {"PGHOST", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"}
+                if not value or not is_endpoint:
+                    continue
+                
+                # Unresolved variables are errors
+                if "${" in value:
+                    raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
+                
+                # Try to parse as URI
                 try:
                     parsed = urlsplit(value)
-                    is_endpoint = bool(endpoint_key.search(upper_key)) or upper_key in {"PGHOST", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"} or parsed.scheme in stateful_schemes
-                    if not value or not is_endpoint:
-                        continue
-                    if "${" in value:
-                        raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
-                    host = parsed.hostname if parsed.scheme and "://" in value else urlsplit("//" + value).hostname
+                    # Additional heuristic: if it looks like a URI scheme, require valid parsing
+                    if parsed.scheme in stateful_schemes or "://" in value:
+                        host = parsed.hostname
+                        # Also validate port if present (will raise ValueError if invalid)
+                        _ = parsed.port  # Access to validate port format
+                        if not host:
+                            # Has scheme but no valid host - this is a broken URI
+                            raise ValueError("Invalid URI: no hostname")
+                    else:
+                        # Might be just a hostname:port or IP address
+                        parsed_bare = urlsplit("//" + value)
+                        host = parsed_bare.hostname
+                        _ = parsed_bare.port  # Validate port if present
+                        if not host:
+                            # Can't parse even as hostname - broken format
+                            raise ValueError("Invalid endpoint format")
                 except ValueError:
-                    raise DockerServiceError(f"Stateful endpoint configuration {key} is invalid") from None
-                if host not in private_hosts:
-                    raise DockerServiceError(f"External stateful endpoint {key} cannot be proven build-private; use a service in this build")
+                    # Broken URI format - block with INVALID_STATEFUL_ENDPOINT (security)
+                    error_detail = {
+                        "code": "COMPOSE_CONFIG_ERROR",
+                        "subcode": "INVALID_STATEFUL_ENDPOINT",
+                        "category": "configuration_error",
+                        "responsible_party": "app_developer",
+                        "summary": f"服务配置中端点格式无效",
+                        "endpoint_variable": key,
+                        "config_path": f"services.{service_name}.environment.{key}",
+                        "action_guidance": "检查端点配置格式是否正确",
+                        "recognized": True,
+                    }
+                    exc = DockerServiceError(f"Invalid stateful endpoint format in {key}")
+                    exc.error_detail = error_detail
+                    raise exc
+                
+                # Valid format - check if external
+                if host and host not in private_hosts:
+                    # 外部端点：生成非阻断warning（不再抛异常阻断构建）
+                    loc = {"service": service_name, "key": key}
+                    if key not in warning_map:
+                        warning_map[key] = {
+                            "code": "EXTERNAL_DEPENDENCY_DETECTED",
+                            "severity": "warning",
+                            "blocking": False,
+                            "message": "检测到外部依赖端点配置",
+                            "environment_key": key,
+                            "locations": [loc],
+                        }
+                    else:
+                        # Deduplicate by (service, key)
+                        if not any(l.get("service") == service_name and l.get("key") == key for l in warning_map[key]["locations"]):
+                            warning_map[key]["locations"].append(loc)
+        
+        return list(warning_map.values())
 
     def _assert_tracked_identity(self, kind: str, name: str, obj: Any) -> None:
         if self._tracker is None:

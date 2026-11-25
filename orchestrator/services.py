@@ -35,7 +35,9 @@ from orchestrator.tasks import TaskDispatcher
 from orchestrator.templates import TemplateError
 from orchestrator.gitlab import GitLabAdapter, GitLabComposeDocument, GitLabRepositoryRef
 from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceStore
+from orchestrator.compose_validator import ComposeEnvironmentValidator, format_validation_error
 from orchestrator.naming import build_namespace
+from orchestrator.error_classification import enrich_error_detail
 
 
 class NotFoundError(LookupError):
@@ -43,7 +45,11 @@ class NotFoundError(LookupError):
 
 
 class BuildInputError(ValueError):
-    pass
+    """Base class for build input validation errors."""
+    
+    def __init__(self, message: str, *, error_detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_detail = error_detail
 
 
 class InvalidBuildTransition(ValueError):
@@ -484,6 +490,7 @@ class BuildService:
             isinstance(name, str) and isinstance(service, Mapping) for name, service in services.items()
         ):
             raise BuildInputError("A user-provided Docker Compose document with services is required before creating a build")
+        
         from orchestrator.route_checks import BUILD_GATE_ERROR, DYNAMIC_ROLE, RouteCheckInputError
 
         if not app.require_route or self.route_checks is None:
@@ -493,6 +500,17 @@ class BuildService:
             checked = self.route_checks.require_static_pass(app, commit)
         except RouteCheckInputError as exc:
             raise BuildInputError(str(exc)) from exc
+        
+        # Batch validate environment variables AFTER static gate (preserve error priority)
+        application_environment = self.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+        missing_vars = ComposeEnvironmentValidator.validate(app.compose, application_environment)
+        if missing_vars:
+            error_detail = format_validation_error(missing_vars)
+            error_detail["failure_site"] = "precheck"
+            # summary will be generated from template in enrich_error_detail
+            # Use a placeholder that will be replaced
+            summary = "Compose配置缺失必需的环境变量"
+            raise BuildInputError(summary, error_detail=error_detail)
         dynamic_role = self.route_checks.roles.get(DYNAMIC_ROLE)
         build = BuildJob(build_id=uuid4().hex, appid=appid, git_ref=request.git_ref or app.git_ref,
             stage="queued", stage_history=["queued"],
@@ -528,7 +546,7 @@ class BuildService:
                         error_detail = {"failure_site": "precheck", "summary": str(exc), "recognized": True, "build_id": build.build_id}
                     else:
                         error_detail = {**error_detail, "failure_site": "precheck", "build_id": build.build_id}
-                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail=error_detail)
+                    self.fail(build.build_id, str(exc), failure_site="precheck", error_detail=error_detail, exception=exc)
                     raise BuildInputError(str(exc)) from exc
                 tracker.guard()
                 self.repository.update_build(build.build_id, snapshot)
@@ -541,7 +559,7 @@ class BuildService:
         try:
             submission = self.dispatcher.dispatch_build(build.build_id)
         except Exception as exc:
-            self.fail(build.build_id, "Unable to enqueue build task", failure_site="precheck", error_detail={"failure_site": "precheck", "summary": "Unable to enqueue build task", "recognized": True, "build_id": build.build_id})
+            self.fail(build.build_id, "Unable to enqueue build task", failure_site="precheck", error_detail={"failure_site": "precheck", "summary": "Unable to enqueue build task", "recognized": True, "build_id": build.build_id}, exception=exc)
             raise BuildInputError("Unable to enqueue build task") from exc
         updated = self.repository.update_build(build.build_id, {"celery_task_id": submission.task_id, "updated_at": utc_now()})
         if updated is None:
@@ -595,19 +613,41 @@ class BuildService:
         raw_log_excerpt: str | None = None,
         failure_logs: dict[str, Any] | None = None,
         failure_site: str | None = None,
+        exception: Exception | None = None,
     ) -> BuildJob:
         build = self.get_build(build_id)
         if build.status == BuildStatus.FAILED:
             return build
         if build.status in TERMINAL_BUILD_STATUSES:
             return build
-        fields: dict[str, Any] = {"error": message, "stage": "failed"}
+        
+        # Enrich error_detail with classification fields
+        if error_detail is not None:
+            error_detail = enrich_error_detail(error_detail, exception=exception)
+        else:
+            error_detail = enrich_error_detail({}, exception=exception)
+        
+        # 使用安全规范化后的summary，忽略传入的message参数
+        safe_message = error_detail.get("summary", "构建失败，请联系平台排查")
+        
+        # 清理raw_log_excerpt和failure_logs，不直通原始异常日志
+        # 原始自由日志不应放公共字段
+        safe_raw_log = None  # 未知原文设null，不回显
+        safe_failure_logs = None
+        if failure_logs is not None and isinstance(failure_logs, dict):
+            # 只保留source，使用安全summary
+            safe_failure_logs = {
+                "source": failure_logs.get("source", "unknown"),
+                "summary": safe_message,  # 使用安全summary，不用原始summary
+            }
+        
+        fields: dict[str, Any] = {"error": safe_message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail
-        if raw_log_excerpt is not None:
-            fields["raw_log_excerpt"] = raw_log_excerpt
-        if failure_logs is not None:
-            fields["failure_logs"] = failure_logs
+        if safe_raw_log is not None:
+            fields["raw_log_excerpt"] = safe_raw_log
+        if safe_failure_logs is not None:
+            fields["failure_logs"] = safe_failure_logs
         if failure_site is not None:
             fields["failure_site"] = failure_site
         elif isinstance(error_detail, dict) and error_detail.get("failure_site"):
@@ -619,20 +659,22 @@ class BuildService:
                 appid=failed.appid,
                 build_id=failed.build_id,
                 severity="error",
-                message=message,
+                message=safe_message,  # 使用安全message（与build.error一致）
             )
         )
+        # 事件details深层白名单，不泄漏raw日志
         event_details: dict[str, Any] = {}
         if error_detail is not None:
             event_details["error_detail"] = error_detail
-        if raw_log_excerpt is not None:
-            # Keep event payload bounded; full excerpt lives on build_info.
-            event_details["raw_log_excerpt_preview"] = raw_log_excerpt[:500]
-        if failure_logs is not None:
-            event_details["failure_logs_source"] = failure_logs.get("source")
+        # raw_log_excerpt不放事件（已在build_info清理为null）
+        # event_details不包含raw_log_excerpt_preview
+        if safe_failure_logs is not None:
+            # 只保留受控source，不用原始summary
+            event_details["failure_logs_source"] = safe_failure_logs.get("source")
         if failed.failure_site:
             event_details["failure_site"] = failed.failure_site
         if failed.stage:
             event_details["stage"] = failed.stage
-        self._event(failed.appid, failed.build_id, "build.alert", message, EventLevel.ERROR, **event_details)
+        # 事件message也使用安全summary（不用原始message参数）
+        self._event(failed.appid, failed.build_id, "build.alert", safe_message, EventLevel.ERROR, **event_details)
         return failed

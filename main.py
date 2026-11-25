@@ -64,6 +64,7 @@ from orchestrator.services import BuildInputError, GitLabUnavailableError, NotFo
 from orchestrator.templates import TemplateError
 from orchestrator.workspaces import ComposeConfigError, WorkspaceError, WorkspaceLimitError
 from orchestrator.route_checks import RouteCheckConflict, RouteCheckInputError, RouteCheckUnavailableError
+from orchestrator.error_classification import enrich_error_detail
 
 bearer = HTTPBearer(auto_error=False)
 _CHECK_PRIVATE_FIELDS = {"repository_url", "static_role_snapshot", "dynamic_role_snapshot", "static_run_token"}
@@ -211,9 +212,36 @@ def create_app(
     @api.exception_handler(ComposeConfigError)
     async def compose_config_error(_: Request, exc: ComposeConfigError) -> JSONResponse:
         """Handle Compose configuration errors with structured error details."""
+        error_detail = getattr(exc, "error_detail", None)
+        if error_detail:
+            error_detail = enrich_error_detail(error_detail, exception=exc)
+        else:
+            error_detail = enrich_error_detail({}, exception=exc)
+        
+        # 使用error_detail的安全summary（从模板生成）
+        safe_detail = error_detail.get("summary", "构建配置错误，请联系平台排查")
+        
         content = {
-            "detail": str(exc),
-            "error_detail": exc.error_detail,
+            "detail": safe_detail,
+            "error_detail": error_detail,
+        }
+        return JSONResponse(status_code=422, content=content)
+    
+    @api.exception_handler(BuildInputError)
+    async def build_input_error(_: Request, exc: BuildInputError) -> JSONResponse:
+        """Handle build input errors with structured error details."""
+        error_detail = getattr(exc, "error_detail", None)
+        if error_detail:
+            error_detail = enrich_error_detail(error_detail, exception=exc)
+        else:
+            error_detail = enrich_error_detail({}, exception=exc)
+        
+        # 使用error_detail的安全summary（从模板生成，包含变量名）
+        safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
+        
+        content = {
+            "detail": safe_detail,
+            "error_detail": error_detail,
         }
         return JSONResponse(status_code=422, content=content)
 
@@ -657,7 +685,18 @@ def create_app(
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found") from exc
         except BuildInputError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            # Return structured error_detail with classification
+            error_detail = getattr(exc, "error_detail", None)
+            if error_detail:
+                error_detail = enrich_error_detail(error_detail, exception=exc)
+            else:
+                error_detail = enrich_error_detail({}, exception=exc)
+            
+            # 使用error_detail的安全summary（从模板生成，包含变量名）
+            safe_detail = error_detail.get("summary", "构建输入验证失败，请联系平台排查")
+            
+            content = {"detail": safe_detail, "error_detail": error_detail}
+            return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content)
         except OSError as exc:
             raise HTTPException(status_code=503, detail="Unable to snapshot workspace storage") from exc
 

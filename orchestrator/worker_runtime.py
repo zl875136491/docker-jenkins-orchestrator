@@ -46,6 +46,7 @@ from orchestrator.registry import DockerRegistrySynchronizer, RegistrySyncError
 from orchestrator.services import BuildInputError, BuildService, NotFoundError
 from orchestrator.templates import TemplateCatalog, TemplateError
 from orchestrator.workspaces import WorkspaceStore
+from orchestrator.compose_validator import ComposeEnvironmentValidator, format_validation_error
 from orchestrator.build_resources import build_lease, ResourceConflict
 
 
@@ -261,14 +262,42 @@ class WorkerRuntime:
 
             if build.status is BuildStatus.VALIDATING:
                 runtime_compose = self._workspace_compose(build, compose)
-                application_environment = self.builds.application_service.secret_box.decrypt_environment(app.environment_ciphertext)
+                # Use _application() to get snapshot environment (via build_resources if ownership_version==1)
+                app_with_snapshot = self._application(build)
+                application_environment = self.builds.application_service.secret_box.decrypt_environment(app_with_snapshot.environment_ciphertext)
+                
+                # Batch validate environment variables (async defense-in-depth)
+                missing_vars = ComposeEnvironmentValidator.validate(runtime_compose, application_environment)
+                if missing_vars:
+                    error_detail = format_validation_error(missing_vars)
+                    error_detail["failure_site"] = "validating"
+                    error_detail["build_id"] = build_id
+                    summary = error_detail.get("summary", "Compose配置缺失必需的环境变量")
+                    raise BuildInputError(summary, error_detail=error_detail)
+                
                 runtime_compose = self._resolve_application_environment(runtime_compose, application_environment)
                 self._validate_source_compose(runtime_compose)
                 if self._isolated(build):
-                    self._docker_validation_adapter().validate_build_compose(
-                        runtime_compose,
-                        environment=application_environment,
-                    )
+                    try:
+                        warnings = self._docker_validation_adapter().validate_build_compose(
+                            runtime_compose,
+                            environment=application_environment,
+                        )
+                        # 存储非阻断warnings到build
+                        if warnings:
+                            self.repository.update_build(
+                                build_id,
+                                {"validation_warnings": warnings},
+                            )
+                    except DockerServiceError as exc:
+                        # DockerServiceError可能携带error_detail（如external stateful endpoint）
+                        # 确保error_detail被保留并enriched
+                        error_detail = getattr(exc, "error_detail", None)
+                        if error_detail:
+                            error_detail["failure_site"] = "validating"
+                            error_detail["build_id"] = build_id
+                            raise BuildInputError(str(exc), error_detail=error_detail) from exc
+                        raise
                     if any(len(f"{build.build_id}-{name}") > 128 for name in compose["services"]):
                         raise BuildInputError("Build-exclusive image tags must fit Docker's 128-character limit")
                 build_source = self.workspace.build_source(compose)
@@ -1075,9 +1104,12 @@ class WorkerRuntime:
         raw_log_excerpt = getattr(exc, "raw_log_excerpt", None)
         failure_logs = getattr(exc, "failure_logs", None)
         failure_site = self._infer_failure_site(current, exc)
-        fail_kwargs = {"failure_site": failure_site}
+        fail_kwargs = {"failure_site": failure_site, "exception": exc}
         if isinstance(error_detail, dict):
             fail_kwargs["error_detail"] = {**error_detail, "failure_site": error_detail.get("failure_site") or failure_site}
+            # Use Chinese summary from error_detail as top-level error message if available
+            if "summary" in error_detail and error_detail["summary"]:
+                report = error_detail["summary"]
         else:
             detail, _, logs, _ = structured_failure(
                 failure_site=failure_site,
@@ -1133,16 +1165,25 @@ def _result(build: BuildJob) -> dict[str, str]:
 
 
 def _safe_error(exc: Exception, fallback: str, *, summary_limit: int = DEFAULT_SUMMARY_MAX_CHARS) -> str:
-    """Only promote errors produced by adapters that deliberately redact secrets."""
-
-    if isinstance(exc, (BuildInputError, DockerServiceError, GitLabError, JenkinsError, RegistrySyncError, TemplateError, ValueError)):
-        message = str(exc).strip()
-        if message:
-            # Jenkins diagnostics already redact; allow the configured summary ceiling.
-            # Other adapter errors stay shorter to avoid leaking noisy stack traces.
-            limit = summary_limit if isinstance(exc, JenkinsError) else min(2000, summary_limit)
-            return message[:limit]
-    return fallback
+    """
+    获取异常的安全摘要（不泄露密码、凭据等）
+    
+    仅使用固定中文模板，不信任exc.error_detail.summary或str(exc)
+    """
+    from orchestrator.error_classification import get_safe_summary_from_template
+    
+    # 检查是否有明确的code/subcode（已识别错误）
+    error_detail = getattr(exc, "error_detail", None)
+    if error_detail and isinstance(error_detail, dict):
+        code = error_detail.get("code")
+        subcode = error_detail.get("subcode")
+        if code and subcode:
+            # 从模板生成安全summary
+            safe_summary = get_safe_summary_from_template(code, subcode, error_detail)
+            return safe_summary[:summary_limit]
+    
+    # 未识别错误，使用固定中文模板（不返回str(exc)）
+    return fallback[:summary_limit]
 
 def get_worker_runtime() -> WorkerRuntime:
     return WorkerRuntime(get_settings())
