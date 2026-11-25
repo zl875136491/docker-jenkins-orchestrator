@@ -279,10 +279,16 @@ class WorkerRuntime:
                 self._validate_source_compose(runtime_compose)
                 if self._isolated(build):
                     try:
-                        self._docker_validation_adapter().validate_build_compose(
+                        warnings = self._docker_validation_adapter().validate_build_compose(
                             runtime_compose,
                             environment=application_environment,
                         )
+                        # 存储非阻断warnings到build
+                        if warnings:
+                            self.build_service.repository.update_build(
+                                build_id,
+                                validation_warnings=warnings,
+                            )
                     except DockerServiceError as exc:
                         # DockerServiceError可能携带error_detail（如external stateful endpoint）
                         # 确保error_detail被保留并enriched

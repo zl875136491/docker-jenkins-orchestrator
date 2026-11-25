@@ -239,9 +239,15 @@ class DockerSwarmAdapter:
                     allowed = getattr(self, "_allowed_bind_root", self.workspace_host_root)
                     if allowed is None or not Path(source).is_relative_to(allowed) or ".." in Path(source).parts:
                         raise DockerServiceError("Absolute bind mounts must belong to the build workspace")
-        self._validate_private_backends(compose, environment or {})
+        warnings = self._validate_private_backends(compose, environment or {})
+        return warnings
 
-    def _validate_private_backends(self, compose: Mapping[str, Any], environment: Mapping[str, str]) -> None:
+    def _validate_private_backends(self, compose: Mapping[str, Any], environment: Mapping[str, str]) -> list[dict[str, Any]]:
+        """Detect external stateful endpoints and return as non-blocking warnings.
+        
+        No longer blocks builds for external databases - returns warnings instead.
+        """
+        warnings = []
         services = self._compose_services(compose)
         private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
         stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
@@ -267,7 +273,17 @@ class DockerSwarmAdapter:
                         if host in services:
                             local_endpoint = True
                     if not local_endpoint:
-                        raise DockerServiceError(f"External storage configuration {key} cannot be proven build-private")
+                        # 外部存储：生成warning而非阻断
+                        warning = {
+                            "code": "EXTERNAL_STORAGE_DETECTED",
+                            "severity": "warning",
+                            "blocking": False,
+                            "message": "检测到外部存储配置",
+                            "service": service_name,
+                            "environment_key": key,
+                            "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
+                        }
+                        warnings.append(warning)
                     continue
                 try:
                     parsed = urlsplit(value)
@@ -278,30 +294,33 @@ class DockerSwarmAdapter:
                         raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
                     host = parsed.hostname if parsed.scheme and "://" in value else urlsplit("//" + value).hostname
                 except ValueError:
-                    error_detail = {
-                        "code": "COMPOSE_CONFIG_ERROR",
-                        "subcode": "INVALID_STATEFUL_ENDPOINT",
-                        "summary": f"环境变量 {key} 配置的有状态端点格式无效",
-                        "remediation": "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接",
-                        "recognized": True,
+                    # 格式无效：仍作为warning（不阻断，让应用运行时处理）
+                    warning = {
+                        "code": "ENDPOINT_FORMAT_INVALID",
+                        "severity": "info",
+                        "blocking": False,
+                        "message": "端点配置格式可能无效",
+                        "service": service_name,
+                        "environment_key": key,
                         "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
                     }
-                    exc = DockerServiceError(f"Stateful endpoint configuration {key} is invalid")
-                    exc.error_detail = error_detail
-                    raise exc from None
+                    warnings.append(warning)
+                    continue
                 if host not in private_hosts:
-                    error_detail = {
-                        "code": "COMPOSE_CONFIG_ERROR",
-                        "subcode": "EXTERNAL_STATEFUL_ENDPOINT",
-                        "summary": f"环境变量 {key} 指向外部有状态端点，无法保证构建隔离",
-                        "remediation": f"在同一构建的 services 中定义 {key.replace('_URL', '').replace('_URI', '').lower()} 服务，使用服务名而非外部 URI 连接。例如：DATABASE_URL=postgres://db:5432/mydb",
-                        "recognized": True,
+                    # 外部端点：生成非阻断warning（不再抛异常阻断构建）
+                    warning = {
+                        "code": "EXTERNAL_DEPENDENCY_DETECTED",
+                        "severity": "warning",
+                        "blocking": False,
+                        "message": "检测到外部依赖端点配置",
+                        "service": service_name,
+                        "environment_key": key,
                         "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
-                        "endpoint_variable": key,
                     }
-                    exc = DockerServiceError(f"External stateful endpoint {key} cannot be proven build-private; use a service in this build")
-                    exc.error_detail = error_detail
-                    raise exc
+                    warnings.append(warning)
+                    continue
+        
+        return warnings
 
     def _assert_tracked_identity(self, kind: str, name: str, obj: Any) -> None:
         if self._tracker is None:

@@ -295,6 +295,8 @@ class BuildJob(DomainModel):
     raw_log_excerpt: str | None = None
     failure_logs: dict[str, Any] | None = None
     failure_site: str | None = None
+    # Non-blocking validation warnings (external dependencies, etc.)
+    validation_warnings: list[dict[str, Any]] | None = None
     # Lifecycle stage for APPS polling (mirrors BuildStatus values; updated on transitions).
     # Default None so legacy Mongo docs do not appear as queued after schema rollout.
     stage: str | None = None
