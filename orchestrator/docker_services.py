@@ -246,21 +246,33 @@ class DockerSwarmAdapter:
         """Detect external stateful endpoints and return as non-blocking warnings.
         
         No longer blocks builds for external databases - returns warnings instead.
+        Broken URI formats still cause INVALID_STATEFUL_ENDPOINT errors.
         """
         warnings = []
         services = self._compose_services(compose)
         private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
         stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
-        endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?)_(?:HOST|URL|URI|DSN|ENDPOINT)$")
+        # Match any HOST/URL/URI/DSN/ENDPOINT environment variable key (not just specific prefixes)
+        endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?|ECN|HANA|SQL|ORACLE|MSSQL)_(?:HOST|URL|URI|DSN|ENDPOINT|SERVER|ADDRESS)$|^(?:HOST|URL|URI|DSN|ENDPOINT|SERVER)$")
         # Build configurations list with service names for better error messages
         configurations = [(None, dict(environment))]  # (service_name, config_dict)
         configurations.extend((name, dict(value.split("=", 1) for value in self._environment(service.get("environment")))) for name, service in services.items())
+        
+        # Aggregate warnings by (key, locations) to avoid duplicates
+        warning_map: dict[str, dict[str, Any]] = {}
+        
         for service_name, values in configurations:
             for key, raw in values.items():
                 value = str(raw)
-                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}",
-                               lambda match: str(environment.get(match.group(1), values.get(match.group(1), match.group(2) or "${" + match.group(1) + "}"))), value)
+                # Resolve ${VAR:-default} with Compose semantics: use environment > values > default
+                def resolve_var(match):
+                    var_name = match.group(1)
+                    default_val = match.group(2) if match.group(2) is not None else ""
+                    return str(environment.get(var_name, values.get(var_name, default_val)))
+                
+                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}", resolve_var, value)
                 upper_key = key.upper()
+                
                 if upper_key in {"S3_BUCKET", "AWS_S3_BUCKET", "STORAGE_BUCKET", "GOOGLE_STORAGE_BUCKET"} and value:
                     endpoint_keys = {"S3_ENDPOINT", "MINIO_ENDPOINT", "STORAGE_ENDPOINT", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"}
                     local_endpoint = False
@@ -274,53 +286,82 @@ class DockerSwarmAdapter:
                             local_endpoint = True
                     if not local_endpoint:
                         # 外部存储：生成warning而非阻断
-                        warning = {
-                            "code": "EXTERNAL_STORAGE_DETECTED",
-                            "severity": "warning",
-                            "blocking": False,
-                            "message": "检测到外部存储配置",
-                            "service": service_name,
-                            "environment_key": key,
-                            "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
-                        }
-                        warnings.append(warning)
+                        loc = {"service": service_name, "key": key} if service_name else {"key": key}
+                        if key not in warning_map:
+                            warning_map[key] = {
+                                "code": "EXTERNAL_STORAGE_DETECTED",
+                                "severity": "warning",
+                                "blocking": False,
+                                "message": "检测到外部存储配置",
+                                "environment_key": key,
+                                "locations": [loc],
+                            }
+                        elif loc not in warning_map[key]["locations"]:
+                            warning_map[key]["locations"].append(loc)
                     continue
+                
+                # Check if this is an endpoint variable
+                is_endpoint = bool(endpoint_key.search(upper_key)) or upper_key in {"PGHOST", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"}
+                if not value or not is_endpoint:
+                    continue
+                
+                # Unresolved variables are errors
+                if "${" in value:
+                    raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
+                
+                # Try to parse as URI
                 try:
                     parsed = urlsplit(value)
-                    is_endpoint = bool(endpoint_key.search(upper_key)) or upper_key in {"PGHOST", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"} or parsed.scheme in stateful_schemes
-                    if not value or not is_endpoint:
-                        continue
-                    if "${" in value:
-                        raise DockerServiceError(f"Stateful endpoint configuration {key} is unresolved")
-                    host = parsed.hostname if parsed.scheme and "://" in value else urlsplit("//" + value).hostname
+                    # Additional heuristic: if it looks like a URI scheme, require valid parsing
+                    if parsed.scheme in stateful_schemes or "://" in value:
+                        host = parsed.hostname
+                        # Also validate port if present (will raise ValueError if invalid)
+                        _ = parsed.port  # Access to validate port format
+                        if not host:
+                            # Has scheme but no valid host - this is a broken URI
+                            raise ValueError("Invalid URI: no hostname")
+                    else:
+                        # Might be just a hostname:port or IP address
+                        parsed_bare = urlsplit("//" + value)
+                        host = parsed_bare.hostname
+                        _ = parsed_bare.port  # Validate port if present
+                        if not host:
+                            # Can't parse even as hostname - broken format
+                            raise ValueError("Invalid endpoint format")
                 except ValueError:
-                    # 格式无效：仍作为warning（不阻断，让应用运行时处理）
-                    warning = {
-                        "code": "ENDPOINT_FORMAT_INVALID",
-                        "severity": "info",
-                        "blocking": False,
-                        "message": "端点配置格式可能无效",
-                        "service": service_name,
-                        "environment_key": key,
+                    # Broken URI format - block with INVALID_STATEFUL_ENDPOINT (security)
+                    error_detail = {
+                        "code": "COMPOSE_CONFIG_ERROR",
+                        "subcode": "INVALID_STATEFUL_ENDPOINT",
+                        "category": "configuration_error",
+                        "responsible_party": "app_developer",
+                        "summary": f"服务配置中端点格式无效",
+                        "endpoint_variable": key,
                         "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
+                        "action_guidance": "检查端点配置格式是否正确",
+                        "recognized": True,
                     }
-                    warnings.append(warning)
-                    continue
-                if host not in private_hosts:
+                    exc = DockerServiceError(f"Invalid stateful endpoint format in {key}")
+                    exc.error_detail = error_detail
+                    raise exc
+                
+                # Valid format - check if external
+                if host and host not in private_hosts:
                     # 外部端点：生成非阻断warning（不再抛异常阻断构建）
-                    warning = {
-                        "code": "EXTERNAL_DEPENDENCY_DETECTED",
-                        "severity": "warning",
-                        "blocking": False,
-                        "message": "检测到外部依赖端点配置",
-                        "service": service_name,
-                        "environment_key": key,
-                        "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
-                    }
-                    warnings.append(warning)
-                    continue
+                    loc = {"service": service_name, "key": key} if service_name else {"key": key}
+                    if key not in warning_map:
+                        warning_map[key] = {
+                            "code": "EXTERNAL_DEPENDENCY_DETECTED",
+                            "severity": "warning",
+                            "blocking": False,
+                            "message": "检测到外部依赖端点配置",
+                            "environment_key": key,
+                            "locations": [loc],
+                        }
+                    elif loc not in warning_map[key]["locations"]:
+                        warning_map[key]["locations"].append(loc)
         
-        return warnings
+        return list(warning_map.values())
 
     def _assert_tracked_identity(self, kind: str, name: str, obj: Any) -> None:
         if self._tracker is None:

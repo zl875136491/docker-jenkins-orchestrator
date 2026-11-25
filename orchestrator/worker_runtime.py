@@ -285,9 +285,9 @@ class WorkerRuntime:
                         )
                         # 存储非阻断warnings到build
                         if warnings:
-                            self.build_service.repository.update_build(
+                            self.repository.update_build(
                                 build_id,
-                                validation_warnings=warnings,
+                                {"validation_warnings": warnings},
                             )
                     except DockerServiceError as exc:
                         # DockerServiceError可能携带error_detail（如external stateful endpoint）
