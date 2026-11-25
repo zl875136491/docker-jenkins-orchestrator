@@ -71,9 +71,11 @@ def test_scm_external_databases_generate_warnings_not_errors(client, container):
     assert data.get("error") is None
 
 
-def test_external_dependency_warnings_structure(container):
+def test_external_dependency_warnings_structure():
     """验证warnings结构：code, severity, blocking, service, environment_key, config_path"""
     from orchestrator.docker_services import DockerSwarmAdapter
+    from pathlib import Path
+    import docker
     
     compose = {
         "services": {
@@ -88,10 +90,13 @@ def test_external_dependency_warnings_structure(container):
         }
     }
     
+    # 创建adapter（不需要真实docker client来测试_validate_private_backends）
     adapter = DockerSwarmAdapter(
-        client=None,
+        docker_client=docker.from_env(),
+        appid="TESTAPP",
+        namespace="test-namespace",
         build_id="test-build",
-        workspace_host_root=None,
+        workspace_host_root=Path("/tmp"),
     )
     
     warnings = adapter._validate_private_backends(compose, {})
