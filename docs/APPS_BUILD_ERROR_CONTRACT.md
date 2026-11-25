@@ -16,6 +16,7 @@
 - `action_guidance`: 中文操作指引
 - `summary`: 中文错误摘要
 - `remediation`: 中文修复建议（部分错误类型）
+- `validation_warnings`: 非阻断警告列表（可选，仅当检测到外部依赖等情况时出现）
 
 ## 错误类别（category）
 
@@ -67,27 +68,68 @@
 - 通过应用配置界面添加环境变量
 - 重新创建构建
 
-### 2. 外部有状态端点
+### 2. 外部依赖端点检测（非阻断警告）
+
+**新行为**（2026-11-25起）：外部业务数据库引用不再默认阻断构建，而是生成非阻断警告。
+
+**validation_warnings字段**：
+```json
+{
+  "build_id": "abc123",
+  "status": "building",
+  "validation_warnings": [
+    {
+      "code": "EXTERNAL_DEPENDENCY_DETECTED",
+      "severity": "warning",
+      "blocking": false,
+      "message": "检测到外部依赖端点配置",
+      "environment_key": "ECN_DB_HOST",
+      "locations": [
+        {"service": "api", "key": "ECN_DB_HOST"},
+        {"service": "worker", "key": "ECN_DB_HOST"}
+      ]
+    }
+  ]
+}
+```
+
+**说明**：
+- `validation_warnings`出现时，构建正常继续（非阻断）
+- 警告仅供参考，不影响构建成功
+- 不会生成环境变量修复表单（warnings不是errors）
+- 检测范围：启发式匹配`*_HOST`/`*_URL`/`*_URI`等端点变量
+- 检测非全量：文档承认无法覆盖所有业务数据库变量
+
+**历史行为（保留用于兼容）**：
+某些情况下，外部端点仍会导致`EXTERNAL_STATEFUL_ENDPOINT`错误（如旧版本行为或明确的隔离违规）。处理规则：
+- 在同一构建的`services`中定义数据库服务
+- 使用服务名而非外部URI连接
+
+### 3. 端点格式无效（阻断错误）
 
 **识别字段**：
 ```json
 {
   "code": "COMPOSE_CONFIG_ERROR",
-  "subcode": "EXTERNAL_STATEFUL_ENDPOINT",
+  "subcode": "INVALID_STATEFUL_ENDPOINT",
   "category": "configuration_error",
   "responsible_party": "application_developer",
   "endpoint_variable": "DATABASE_URL",
-  "summary": "环境变量 DATABASE_URL 指向外部有状态端点，无法保证构建隔离"
+  "summary": "服务配置中端点格式无效"
 }
 ```
 
-**处理规则**：
-- 在同一构建的`services`中定义数据库服务
-- 使用服务名而非外部URI连接
-- 示例：`DATABASE_URL=postgres://db:5432/mydb`（其中`db`是服务名）
-- 不要使用外部数据库URI
+**触发条件**：
+- 端口号非数字（如`postgres://user:pass@host:badport/db`）
+- 主机名格式无效
+- URI语法错误
 
-### 3. 不支持的Git源码绑定挂载
+**处理规则**：
+- 检查连接字符串的主机名和端口格式是否正确
+- 确保端口号为有效数字
+- 不回显完整URI（安全考虑）
+
+### 4. 不支持的Git源码绑定挂载
 
 **识别字段**：
 ```json
@@ -321,4 +363,5 @@ def handle_build_error(error_detail: dict) -> dict:
 
 ## 变更历史
 
+- 2026-11-25: 外部依赖检测改为非阻断warnings；新增INVALID_STATEFUL_ENDPOINT错误类型；更新环境变量解析逻辑
 - 2026-11-23: 初始版本，支持配置错误分类

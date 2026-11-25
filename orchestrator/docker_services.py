@@ -252,11 +252,11 @@ class DockerSwarmAdapter:
         services = self._compose_services(compose)
         private_hosts = set(services) | {"localhost", "127.0.0.1", "::1"}
         stateful_schemes = {"postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss", "amqp", "amqps", "nats", "s3", "gs"}
-        # Match any HOST/URL/URI/DSN/ENDPOINT environment variable key (not just specific prefixes)
-        endpoint_key = re.compile(r"(?:DATABASE|DB|POSTGRES|PG|MYSQL|MARIADB|MONGO(?:DB)?|REDIS|CACHE|RABBITMQ|AMQP|S3|MINIO|STORAGE|ELASTIC(?:SEARCH)?|ECN|HANA|SQL|ORACLE|MSSQL)_(?:HOST|URL|URI|DSN|ENDPOINT|SERVER|ADDRESS)$|^(?:HOST|URL|URI|DSN|ENDPOINT|SERVER)$")
-        # Build configurations list with service names for better error messages
-        configurations = [(None, dict(environment))]  # (service_name, config_dict)
-        configurations.extend((name, dict(value.split("=", 1) for value in self._environment(service.get("environment")))) for name, service in services.items())
+        # Match endpoint variables: *_HOST, *_URL, *_URI, *_DSN, *_ENDPOINT, *_SERVER, *_ADDRESS
+        # Heuristic pattern covers common database/storage/messaging endpoints without hardcoding all vendor names
+        endpoint_key = re.compile(r"_(?:HOST|URL|URI|DSN|ENDPOINT|SERVER|ADDRESS)(?:_\w+)?$|^(?:HOST|URL|URI|DSN|ENDPOINT|SERVER)$", re.IGNORECASE)
+        # Only scan actual service environment declarations (real Compose references), not runtime environment
+        configurations = [(name, dict(value.split("=", 1) for value in self._environment(service.get("environment")))) for name, service in services.items()]
         
         # Aggregate warnings by (key, locations) to avoid duplicates
         warning_map: dict[str, dict[str, Any]] = {}
@@ -264,13 +264,27 @@ class DockerSwarmAdapter:
         for service_name, values in configurations:
             for key, raw in values.items():
                 value = str(raw)
-                # Resolve ${VAR:-default} with Compose semantics: use environment > values > default
+                # Resolve ${VAR:-default} with Compose semantics:
+                # Only use actual values from environment, not templates from values
                 def resolve_var(match):
                     var_name = match.group(1)
-                    default_val = match.group(2) if match.group(2) is not None else ""
-                    return str(environment.get(var_name, values.get(var_name, default_val)))
+                    separator = match.group(2)  # ":-", "-", or None
+                    default_val = match.group(3) if match.group(3) is not None else ""
+                    
+                    # Only check environment for actual values, never values (which may contain templates)
+                    if var_name in environment:
+                        env_val = environment[var_name]
+                        # ${VAR:-default} treats empty as unset, ${VAR-default} doesn't
+                        if separator == ":-" and env_val == "":
+                            return default_val
+                        return str(env_val)
+                    # Variable not in environment
+                    if separator:  # Has default
+                        return default_val
+                    # No default and not in environment - leave unresolved
+                    return match.group(0)
                 
-                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}", resolve_var, value)
+                value = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}", resolve_var, value)
                 upper_key = key.upper()
                 
                 if upper_key in {"S3_BUCKET", "AWS_S3_BUCKET", "STORAGE_BUCKET", "GOOGLE_STORAGE_BUCKET"} and value:
@@ -286,7 +300,7 @@ class DockerSwarmAdapter:
                             local_endpoint = True
                     if not local_endpoint:
                         # 外部存储：生成warning而非阻断
-                        loc = {"service": service_name, "key": key} if service_name else {"key": key}
+                        loc = {"service": service_name, "key": key}
                         if key not in warning_map:
                             warning_map[key] = {
                                 "code": "EXTERNAL_STORAGE_DETECTED",
@@ -296,8 +310,10 @@ class DockerSwarmAdapter:
                                 "environment_key": key,
                                 "locations": [loc],
                             }
-                        elif loc not in warning_map[key]["locations"]:
-                            warning_map[key]["locations"].append(loc)
+                        else:
+                            # Deduplicate by (service, key)
+                            if not any(l.get("service") == service_name and l.get("key") == key for l in warning_map[key]["locations"]):
+                                warning_map[key]["locations"].append(loc)
                     continue
                 
                 # Check if this is an endpoint variable
@@ -337,7 +353,7 @@ class DockerSwarmAdapter:
                         "responsible_party": "app_developer",
                         "summary": f"服务配置中端点格式无效",
                         "endpoint_variable": key,
-                        "config_path": f"services.{service_name}.environment.{key}" if service_name else f"environment.{key}",
+                        "config_path": f"services.{service_name}.environment.{key}",
                         "action_guidance": "检查端点配置格式是否正确",
                         "recognized": True,
                     }
@@ -348,7 +364,7 @@ class DockerSwarmAdapter:
                 # Valid format - check if external
                 if host and host not in private_hosts:
                     # 外部端点：生成非阻断warning（不再抛异常阻断构建）
-                    loc = {"service": service_name, "key": key} if service_name else {"key": key}
+                    loc = {"service": service_name, "key": key}
                     if key not in warning_map:
                         warning_map[key] = {
                             "code": "EXTERNAL_DEPENDENCY_DETECTED",
@@ -358,8 +374,10 @@ class DockerSwarmAdapter:
                             "environment_key": key,
                             "locations": [loc],
                         }
-                    elif loc not in warning_map[key]["locations"]:
-                        warning_map[key]["locations"].append(loc)
+                    else:
+                        # Deduplicate by (service, key)
+                        if not any(l.get("service") == service_name and l.get("key") == key for l in warning_map[key]["locations"]):
+                            warning_map[key]["locations"].append(loc)
         
         return list(warning_map.values())
 

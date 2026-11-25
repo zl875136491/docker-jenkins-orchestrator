@@ -192,13 +192,10 @@ def get_safe_remediation_from_template(code: str | None, subcode: str | None, me
                     return f"在应用配置或构建参数中补充：{', '.join(var_names)}"
             return "补充缺失的环境变量"
         elif subcode == "EXTERNAL_STATEFUL_ENDPOINT":
-            var = metadata.get("endpoint_variable", "")
-            if var:
-                service_hint = var.replace("_URL", "").replace("_URI", "").replace("_HOST", "").lower()
-                return f"在同一构建的 services 中定义 {service_hint} 服务，使用服务名连接。例如：{var}=postgres://db:5432/mydb"
-            return "在同一构建的 services 中定义对应服务，使用服务名连接"
+            # 外部端点错误：不猜测协议或造空库，提供安全引导
+            return "外部有状态服务不能在构建隔离环境中访问。如需数据库，请在 services 中定义并使用服务名连接"
         elif subcode == "INVALID_STATEFUL_ENDPOINT":
-            return "检查数据库连接字符串格式，或在同一构建中定义服务使用服务名连接"
+            return "端点配置格式无效。请检查连接字符串的主机名和端口格式是否正确"
         elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
             return "移除Compose中的Git仓库目录绑定，在Dockerfile中使用COPY指令或使用命名卷"
     

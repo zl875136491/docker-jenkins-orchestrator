@@ -35,7 +35,9 @@ def client():
         settings = Settings(
             workspace_root=Path(tmp) / "storage",
             workspace_host_root=Path("/srv/workspaces"),
-            workspace_download_base_url="http://testserver"
+            workspace_download_base_url="http://testserver",
+            harbor_url="https://harbor.invalid",
+            harbor_project="apps"
         )
         
         # Create container with fake GitLab adapter
