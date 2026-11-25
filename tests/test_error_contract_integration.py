@@ -258,6 +258,15 @@ def test_worker_invalid_stateful_endpoint_真实门禁_persists_classification(c
     if built.error_detail:
         assert built.error_detail.get("subcode") != "INVALID_STATEFUL_ENDPOINT"
     
+    # 验证validation_warnings可能包含格式检测
+    warnings = built.validation_warnings
+    if warnings:
+        # 检查warning结构
+        for w in warnings:
+            assert "code" in w
+            assert "severity" in w
+            assert "blocking" in w
+    
     # Classification
     assert error_detail["category"] == CONFIG_ERROR
     assert error_detail["responsible_party"] == APP_DEV
