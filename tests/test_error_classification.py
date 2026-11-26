@@ -223,6 +223,24 @@ def test_enrich_error_detail_handles_none():
     assert enriched["responsible_party"] == ResponsibleParty.UNKNOWN
 
 
+def test_enrich_infers_missing_build_context_from_raw_log_evidence():
+    """Jenkins build-context evidence yields stable COMPOSE_CONFIG_ERROR / MISSING_BUILD_CONTEXT."""
+    raw = "ERROR: service ai-worker build context does not exist: ./backend"
+    enriched = enrich_error_detail(
+        {"failure_site": "jenkins", "stage": "Validate Compose"},
+        evidence_texts=[raw],
+    )
+    assert enriched["code"] == "COMPOSE_CONFIG_ERROR"
+    assert enriched["subcode"] == "MISSING_BUILD_CONTEXT"
+    assert enriched["recognized"] is True
+    assert enriched["service"] == "ai-worker"
+    assert enriched["build_context_path"] == "./backend"
+    assert enriched["responsible_party"] == "application_developer"
+    assert "ai-worker" in enriched["summary"]
+    assert "./backend" in enriched["summary"]
+    assert "build.context" in enriched["remediation"]
+
+
 def test_classify_other_buildinputerror_is_unknown_unknown():
     """Other BuildInputError defaults to unknown_error/unknown (保守)."""
     exc = BuildInputError("Invalid configuration parameter")

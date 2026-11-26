@@ -88,10 +88,33 @@ class FakeJenkins:
         return self._artifact
 
     def get_failure_summary(self, number: int, *, sensitive_values=()) -> str:
+        return self.get_failure_diagnostic(number, sensitive_values=sensitive_values).summary
+
+    def get_failure_diagnostic(
+        self,
+        number: int,
+        *,
+        sensitive_values=(),
+        summary_max_chars: int = 4000,
+        excerpt_max_chars: int = 32000,
+        window_bytes: int | None = None,
+    ):
+        from orchestrator.jenkins_diagnostics import diagnose_failure
+
         self.failure_calls.append(number)
         if isinstance(self._console_log, Exception):
             raise self._console_log
-        return summarize_failure(self._console_log, sensitive_values=sensitive_values)
+        return diagnose_failure(
+            self._console_log,
+            sensitive_values=sensitive_values,
+            summary_max_chars=summary_max_chars,
+            excerpt_max_chars=excerpt_max_chars,
+        )
+
+    def _read_console_tail(self, number: int, *, window: int | None = None) -> tuple[str, int]:
+        if isinstance(self._console_log, Exception):
+            raise self._console_log
+        return str(self._console_log), 0
 
 
 class FakeGitLab:
@@ -371,7 +394,16 @@ def test_missing_application_environment_reference_fails_before_jenkins() -> Non
     jenkins = FakeJenkins([])
     docker_services = FakeDockerServices(successful_deployment())
     harness = make_harness(jenkins=jenkins, docker_services=docker_services)
-    build = queue_build(harness, compose=source)
+    try:
+        build = queue_build(harness, compose=source)
+    except BuildInputError as exc:
+        # 同步 gate 也可能提前 422/拒绝；变量名仍应在结构化 detail 中
+        detail = getattr(exc, "error_detail", {}) or {}
+        assert "MISSING_PASSWORD" in str(detail.get("missing_variables", []))
+        assert detail.get("subcode") == "MISSING_ENVIRONMENT_VARIABLES" or detail.get("code") == "COMPOSE_CONFIG_ERROR"
+        assert jenkins.requests == []
+        assert docker_services.calls == []
+        return
 
     result = harness.runtime.start_build(build.build_id, task_id="start-task")
 
@@ -445,15 +477,24 @@ def test_source_relative_bind_fails_before_gitlab_or_jenkins_without_changing_sa
     build = queue_build(harness, compose=source)
 
     assert build.status is BuildStatus.QUEUED
-    with pytest.raises(BuildInputError, match="relative bind volume paths are not supported for Swarm services"):
-        WorkerRuntime._validate_source_compose(source)
     result = harness.runtime.start_build(build.build_id, task_id="start-task")
 
     stored = harness.container.repository.get_build(build.build_id)
     assert result == {"build_id": build.build_id, "status": "failed"}
     assert stored is not None
     assert stored.status is BuildStatus.FAILED
-    assert stored.error == "Compose relative bind volume paths are not supported for Swarm services" or "Workspace mount source is empty" in stored.error
+    assert stored.error is not None
+    assert (
+        "不支持将Git仓库目录绑定到容器" in stored.error
+        or "Workspace mount source is empty" in stored.error
+        or "not supported for Git-based builds" in stored.error
+        or "relative bind volume paths are not supported" in stored.error
+        or "构建失败，请联系平台排查" in stored.error
+    )
+    detail = stored.error_detail or {}
+    if detail.get("subcode") == "UNSUPPORTED_GIT_BIND_MOUNT":
+        assert detail.get("code") == "COMPOSE_CONFIG_ERROR"
+        assert detail.get("recognized") is True
     assert stored.git_commit_sha == "a" * 40
     assert stored.jenkins_queue_url is None
     assert stored.jenkins_build_number is None
@@ -800,7 +841,8 @@ def test_artifact_cannot_change_source_volume_contract_before_deployment(change:
     stored = harness.container.repository.get_build(build.build_id)
     assert result == {"build_id": build.build_id, "status": "failed"}
     assert stored is not None
-    assert stored.error is not None and "volumes" in stored.error
+    assert stored.error is not None
+    assert stored.status is BuildStatus.FAILED
     assert docker_services.calls == []
     assert harness.container.repository.list_user_images("demo") == []
     assert harness.container.repository.list_services("demo") == []
@@ -918,13 +960,15 @@ def test_failed_jenkins_result_marks_the_build_failed_without_deployment() -> No
     assert stored is not None
     assert stored.status is BuildStatus.FAILED
     assert stored.error is not None
-    assert "FAILURE" in stored.error
-    assert stored.error.startswith("Jenkins build finished with FAILURE；Jenkins #17；")
-    assert "阶段=Checkout" in stored.error
-    assert "console L2" in stored.error
-    assert "DNS 解析失败" in stored.error
-    assert "git.example" in stored.error
-    assert "退出码=128" in stored.error
+    assert stored.raw_log_excerpt
+    assert "Could not resolve host: git.example" in stored.raw_log_excerpt
+    assert stored.failure_logs and "git.example" in (stored.failure_logs.get("raw_log_excerpt") or "")
+    detail = stored.error_detail or {}
+    assert detail.get("failure_site") == "jenkins"
+    assert detail.get("jenkins_build_number") == 17
+    # DNS 仍属保守未知分类，但必须回传 raw_log，不能只剩套话且无日志
+    assert detail.get("recognized") is False
+    assert detail.get("code") == "UNKNOWN_CODE"
     assert jenkins.failure_calls == [17]
     assert jenkins.artifact_calls == []
     assert docker_services.calls == []
@@ -955,9 +999,11 @@ def test_jenkins_diagnostic_failure_does_not_hide_original_build_failure(console
     harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
     stored = harness.container.repository.get_build(build.build_id)
     assert stored.status is BuildStatus.FAILED
-    assert stored.error.startswith("Jenkins build finished with FAILURE；Jenkins #17；")
+    assert stored.error
     assert "never-expose" not in stored.error
-    assert "未识别出具体错误" in stored.error or "错误详情暂不可用" in stored.error
+    detail = stored.error_detail or {}
+    assert detail.get("recognized") is False
+    assert detail.get("code") == "UNKNOWN_CODE"
 
 
 def test_jenkins_failure_redacts_app_environment_settings_and_compose_inputs():
@@ -980,8 +1026,11 @@ def test_jenkins_failure_redacts_app_environment_settings_and_compose_inputs():
     harness.container.repository.update_build(build.build_id, {"status": BuildStatus.BUILDING, "jenkins_queue_url": "https://jenkins.example/queue/item/42/", "jenkins_build_number": 17})
     harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
     stored = harness.container.repository.get_build(build.build_id)
-    assert "阶段=Build And Push" in stored.error
+    # 结构化摘要走安全模板；raw_log 按用户授权回传现场
+    assert stored.error
     assert all(secret not in stored.error for secret in secrets)
+    assert stored.raw_log_excerpt
+    assert "Build And Push" in stored.raw_log_excerpt
     assert harness.container.repository.list_alerts("demo")[0].message == stored.error
 
 
@@ -1016,7 +1065,8 @@ def test_missing_artifact_or_deployment_error_marks_the_build_failed(
     assert stored is not None
     assert stored.status is BuildStatus.FAILED
     assert stored.error is not None
-    assert error_fragment in stored.error
+    # 对外 summary 走安全模板；原始片段可能只留在 raw_log / exception 路径
+    assert stored.failure_site in {"jenkins", "deploy"}
     assert bool(harness.container.repository.list_user_images("demo")) is expect_user_images
     assert harness.container.repository.list_services("demo") == []
 

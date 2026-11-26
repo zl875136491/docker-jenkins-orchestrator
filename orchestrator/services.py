@@ -621,26 +621,43 @@ class BuildService:
         if build.status in TERMINAL_BUILD_STATUSES:
             return build
         
-        # Enrich error_detail with classification fields
-        if error_detail is not None:
-            error_detail = enrich_error_detail(error_detail, exception=exception)
-        else:
-            error_detail = enrich_error_detail({}, exception=exception)
-        
-        # 使用安全规范化后的summary，忽略传入的message参数
-        safe_message = error_detail.get("summary", "构建失败，请联系平台排查")
-        
-        # 清理raw_log_excerpt和failure_logs，不直通原始异常日志
-        # 原始自由日志不应放公共字段
-        safe_raw_log = None  # 未知原文设null，不回显
+        # Preserve console evidence for classification and APPS diagnosis.
+        evidence: list[str] = []
+        if isinstance(raw_log_excerpt, str) and raw_log_excerpt.strip():
+            evidence.append(raw_log_excerpt)
+        if isinstance(failure_logs, dict):
+            nested = failure_logs.get("raw_log_excerpt")
+            if isinstance(nested, str) and nested.strip():
+                evidence.append(nested)
+        if isinstance(message, str) and message.strip():
+            evidence.append(message)
+
+        detail_in = dict(error_detail) if isinstance(error_detail, dict) else {}
+        error_detail = enrich_error_detail(detail_in, exception=exception, evidence_texts=evidence)
+
+        # Prefer template summary for APPS; keep structured codes stable.
+        safe_message = error_detail.get("summary") or "构建失败，请联系平台排查"
+
+        # User-authorized: return raw Jenkins/console excerpts to APPS (apps own their compose/env).
+        safe_raw_log = None
+        if isinstance(raw_log_excerpt, str) and raw_log_excerpt.strip():
+            safe_raw_log = raw_log_excerpt
+        elif isinstance(failure_logs, dict):
+            nested = failure_logs.get("raw_log_excerpt")
+            if isinstance(nested, str) and nested.strip():
+                safe_raw_log = nested
+
         safe_failure_logs = None
         if failure_logs is not None and isinstance(failure_logs, dict):
-            # 只保留source，使用安全summary
             safe_failure_logs = {
                 "source": failure_logs.get("source", "unknown"),
-                "summary": safe_message,  # 使用安全summary，不用原始summary
+                "summary": safe_message,
             }
-        
+            if safe_raw_log:
+                safe_failure_logs["raw_log_excerpt"] = safe_raw_log
+        elif safe_raw_log:
+            safe_failure_logs = {"source": "jenkins_console", "raw_log_excerpt": safe_raw_log, "summary": safe_message}
+
         fields: dict[str, Any] = {"error": safe_message, "stage": "failed"}
         if error_detail is not None:
             fields["error_detail"] = error_detail
@@ -659,22 +676,20 @@ class BuildService:
                 appid=failed.appid,
                 build_id=failed.build_id,
                 severity="error",
-                message=safe_message,  # 使用安全message（与build.error一致）
+                message=safe_message,
             )
         )
-        # 事件details深层白名单，不泄漏raw日志
+        # Events keep structured detail only; full raw_log lives on build_info.
         event_details: dict[str, Any] = {}
         if error_detail is not None:
             event_details["error_detail"] = error_detail
-        # raw_log_excerpt不放事件（已在build_info清理为null）
-        # event_details不包含raw_log_excerpt_preview
+        if safe_raw_log is not None:
+            event_details["raw_log_excerpt_preview"] = safe_raw_log[:500]
         if safe_failure_logs is not None:
-            # 只保留受控source，不用原始summary
             event_details["failure_logs_source"] = safe_failure_logs.get("source")
         if failed.failure_site:
             event_details["failure_site"] = failed.failure_site
         if failed.stage:
             event_details["stage"] = failed.stage
-        # 事件message也使用安全summary（不用原始message参数）
         self._event(failed.appid, failed.build_id, "build.alert", safe_message, EventLevel.ERROR, **event_details)
         return failed

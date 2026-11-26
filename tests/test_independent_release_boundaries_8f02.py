@@ -49,6 +49,8 @@ def test_unknown_worker_logs_and_flags_are_safe(client,container,monkeypatch):
     r=client.get("/api/v1/jenkins/build_info/"+b.build_id)
     data=r.json()
     print("PUBLIC_LOG_FIELDS",json.dumps({k:data.get(k) for k in ("error","error_detail","failure_logs","raw_log_excerpt")},ensure_ascii=False))
-    assert "RawMarkerA7v2" not in r.text and "LogMarkerB8v3" not in r.text
+    # 用户授权回传 raw_log；结构化 error 仍用安全 summary
+    assert data["raw_log_excerpt"] and "RawMarkerA7v2" in data["raw_log_excerpt"]
+    assert "LogMarkerB8v3" not in (data.get("error") or "")
     assert data["error_detail"]["recognized"] is False
     assert data["error_detail"]["user_action_required"] is False
