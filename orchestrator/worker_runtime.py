@@ -1011,8 +1011,24 @@ class WorkerRuntime:
                 )
             else:
                 summary = adapter.get_failure_summary(number, sensitive_values=sensitive_values)
-                from orchestrator.jenkins_diagnostics import FailureDiagnostic
-                diagnostic = FailureDiagnostic(summary=summary, recognized=bool(summary))
+                from orchestrator.jenkins_diagnostics import FailureDiagnostic, CODE_JENKINS_BUILD_ERROR
+                raw_excerpt = ""
+                if hasattr(adapter, "_read_console_tail"):
+                    try:
+                        console, _start = adapter._read_console_tail(number, window=window)
+                        from orchestrator.jenkins_diagnostics import _strip_console_noise
+                        raw_excerpt = _strip_console_noise(console)
+                        if len(raw_excerpt) > excerpt_limit:
+                            raw_excerpt = raw_excerpt[-excerpt_limit:]
+                    except Exception:
+                        raw_excerpt = ""
+                diagnostic = FailureDiagnostic(
+                    summary=summary,
+                    recognized=bool(summary),
+                    raw_log_excerpt=raw_excerpt,
+                    code=CODE_JENKINS_BUILD_ERROR,
+                    subcode="UNKNOWN",
+                )
             detail = diagnostic.to_error_detail(
                 build_id=build.build_id,
                 jenkins_build_number=number,
@@ -1020,23 +1036,51 @@ class WorkerRuntime:
                 result=result,
             )
             detail["failure_site"] = FAILURE_SITE_JENKINS
+            excerpt = diagnostic.raw_log_excerpt or None
+            if excerpt and len(excerpt) > excerpt_limit:
+                excerpt = excerpt[: excerpt_limit - 1] + "…"
             logs = failure_logs_payload(
                 source="jenkins_console",
-                raw_log_excerpt=diagnostic.raw_log_excerpt,
+                raw_log_excerpt=excerpt,
                 max_chars=excerpt_limit,
             )
-            return f"{message}；{diagnostic.summary}", detail, diagnostic.raw_log_excerpt or None, logs
+            return f"{message}；{diagnostic.summary}", detail, excerpt, logs
         except Exception:
-            summary = "错误详情暂不可用（无法读取或解析 Jenkins 控制台日志）；请查看该 Jenkins 构建的控制台"
+            raw_excerpt = None
+            try:
+                adapter = self._jenkins_adapter()
+                if hasattr(adapter, "_read_console_tail"):
+                    console, _start = adapter._read_console_tail(number, window=window)
+                    from orchestrator.jenkins_diagnostics import _strip_console_noise
+                    raw_excerpt = _strip_console_noise(console)
+                    if len(raw_excerpt) > excerpt_limit:
+                        raw_excerpt = raw_excerpt[-excerpt_limit:]
+            except Exception:
+                raw_excerpt = None
+            summary = (
+                "错误详情暂不可用（无法读取或解析 Jenkins 控制台日志）；"
+                "请结合 raw_log_excerpt（若有）或 Jenkins 控制台排查"
+            )
             detail = {
                 "build_id": build.build_id,
                 "jenkins_build_number": number,
                 "jenkins_result": result,
                 "recognized": False,
+                "code": "JENKINS_BUILD_ERROR",
+                "subcode": "CONSOLE_UNAVAILABLE",
                 "summary": summary,
+                "remediation": "请打开对应 Jenkins 构建控制台查看完整日志，或稍后重试以重新拉取失败摘录。",
                 "failure_site": FAILURE_SITE_JENKINS,
             }
-            return f"{message}；{summary}", detail, None, {"source": "jenkins_console", "unavailable": True}
+            logs: dict[str, object] = {
+                "source": "jenkins_console",
+                "unavailable": not raw_excerpt,
+            }
+            if raw_excerpt:
+                logs["raw_log_excerpt"] = (
+                    raw_excerpt if len(raw_excerpt) <= excerpt_limit else raw_excerpt[: excerpt_limit - 1] + "…"
+                )
+            return f"{message}；{summary}", detail, raw_excerpt, logs
 
     def _jenkins_failure_message(self, build: BuildJob, number: int, result: str | None) -> str:
         message, _, _, _ = self._jenkins_failure_diagnostic(build, number, result)
@@ -1089,8 +1133,13 @@ class WorkerRuntime:
             fail_kwargs["error_detail"] = detail
             if logs and failure_logs is None:
                 fail_kwargs["failure_logs"] = logs
-        if isinstance(raw_log_excerpt, str) and raw_log_excerpt:
+        # Always persist raw_log when present; never blank it with a generic fallback path.
+        if isinstance(raw_log_excerpt, str) and raw_log_excerpt.strip():
             fail_kwargs["raw_log_excerpt"] = raw_log_excerpt
+        elif isinstance(failure_logs, dict):
+            nested = failure_logs.get("raw_log_excerpt")
+            if isinstance(nested, str) and nested.strip():
+                fail_kwargs["raw_log_excerpt"] = nested
         if isinstance(failure_logs, dict):
             fail_kwargs["failure_logs"] = failure_logs
         if current.status is BuildStatus.DEPLOYING:

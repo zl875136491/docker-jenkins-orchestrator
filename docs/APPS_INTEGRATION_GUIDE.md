@@ -46,11 +46,11 @@
 | code | subcode | 说明 | 触发时机 |
 |------|---------|------|---------|
 | `COMPOSE_CONFIG_ERROR` | `UNSUPPORTED_GIT_BIND_MOUNT` | Git源使用相对路径bind mount | validating阶段 |
+| `COMPOSE_CONFIG_ERROR` | `BUILD_CONTEXT_MISSING` | `build.context` 目录不存在 | validating / Jenkins Validate Compose |
+| `COMPOSE_CONFIG_ERROR` | `DOCKERFILE_MISSING` | Dockerfile 不存在 | validating / Jenkins Validate Compose |
+| `JENKINS_BUILD_ERROR` | 见 [APPS_ERROR_CONTRACT.md](APPS_ERROR_CONTRACT.md) | Jenkins 构建期分类错误 | jenkins 阶段 |
 
-**未来可扩展**（本次未实现）：
-- `INVALID_PORT_MAPPING` - 无效端口映射
-- `CIRCULAR_DEPENDENCY` - 服务循环依赖
-- `UNSUPPORTED_FEATURE` - 不支持的Compose特性
+完整字段优先级、`raw_log_excerpt` 约定与全部 subcode 表见 **[APPS_ERROR_CONTRACT.md](APPS_ERROR_CONTRACT.md)**。
 
 ---
 
@@ -165,7 +165,10 @@ def get_user_message(build: dict) -> str:
     
     # 兜底：从error_detail提取
     error_detail = build.get("error_detail", {})
-    return error_detail.get("summary") or "构建失败，请联系技术支持"
+    raw = build.get("raw_log_excerpt") or (build.get("failure_logs") or {}).get("raw_log_excerpt")
+    if raw:
+        return error_detail.get("summary") or "构建失败，详情见 raw_log_excerpt"
+    return error_detail.get("summary") or "构建失败，详情暂不可用（无 raw_log_excerpt）"
 
 
 def get_remediation(build: dict) -> str:

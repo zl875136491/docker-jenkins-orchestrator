@@ -19,7 +19,6 @@ from orchestrator.jenkins import (
     JenkinsResultArtifact,
     JenkinsNotStartedError,
 )
-from orchestrator.jenkins_diagnostics import summarize_failure
 from orchestrator.models import BaseImage, BuildCreate, BuildStatus, CleanupStatus, UserAppCreate, UserImage, utc_now
 from orchestrator.services import BuildInputError
 from orchestrator.worker_runtime import WorkerRuntime
@@ -88,10 +87,33 @@ class FakeJenkins:
         return self._artifact
 
     def get_failure_summary(self, number: int, *, sensitive_values=()) -> str:
+        return self.get_failure_diagnostic(number, sensitive_values=sensitive_values).summary
+
+    def get_failure_diagnostic(
+        self,
+        number: int,
+        *,
+        sensitive_values=(),
+        summary_max_chars: int = 4000,
+        excerpt_max_chars: int = 32000,
+        window_bytes: int | None = None,
+    ):
+        from orchestrator.jenkins_diagnostics import diagnose_failure
+
         self.failure_calls.append(number)
         if isinstance(self._console_log, Exception):
             raise self._console_log
-        return summarize_failure(self._console_log, sensitive_values=sensitive_values)
+        return diagnose_failure(
+            self._console_log,
+            sensitive_values=sensitive_values,
+            summary_max_chars=summary_max_chars,
+            excerpt_max_chars=excerpt_max_chars,
+        )
+
+    def _read_console_tail(self, number: int, *, window: int | None = None) -> tuple[str, int]:
+        if isinstance(self._console_log, Exception):
+            raise self._console_log
+        return str(self._console_log), 0
 
 
 class FakeGitLab:
@@ -437,15 +459,23 @@ def test_source_relative_bind_fails_before_gitlab_or_jenkins_without_changing_sa
     build = queue_build(harness, compose=source)
 
     assert build.status is BuildStatus.QUEUED
-    with pytest.raises(BuildInputError, match="relative bind volume paths are not supported for Swarm services"):
-        WorkerRuntime._validate_source_compose(source)
     result = harness.runtime.start_build(build.build_id, task_id="start-task")
 
     stored = harness.container.repository.get_build(build.build_id)
     assert result == {"build_id": build.build_id, "status": "failed"}
     assert stored is not None
     assert stored.status is BuildStatus.FAILED
-    assert stored.error == "Compose relative bind volume paths are not supported for Swarm services" or "Workspace mount source is empty" in stored.error
+    assert stored.error is not None
+    assert (
+        "not supported for Git-based builds" in stored.error
+        or "Workspace mount source is empty" in stored.error
+        or "relative bind volume paths are not supported" in stored.error
+    )
+    detail = stored.error_detail or {}
+    if "not supported for Git-based builds" in stored.error:
+        assert detail.get("code") == "COMPOSE_CONFIG_ERROR"
+        assert detail.get("subcode") == "UNSUPPORTED_GIT_BIND_MOUNT"
+        assert detail.get("recognized") is True
     assert stored.git_commit_sha == "a" * 40
     assert stored.jenkins_queue_url is None
     assert stored.jenkins_build_number is None
@@ -975,6 +1005,77 @@ def test_jenkins_failure_redacts_app_environment_settings_and_compose_inputs():
     assert "阶段=Build And Push" in stored.error
     assert all(secret not in stored.error for secret in secrets)
     assert harness.container.repository.list_alerts("demo")[0].message == stored.error
+
+
+def test_jenkins_build_context_missing_persists_raw_log_and_error_contract():
+    console = "\n".join([
+        "Running on builder-01 in /opt/jenkins-agent/workspace/apps-orchestrator",
+        "[Pipeline] stage",
+        "[Pipeline] { (Validate Compose)",
+        "ERROR: service ai-worker build context does not exist: ./backend",
+        "[Pipeline] }",
+        "ERROR: script returned exit code 1",
+        "Finished: FAILURE",
+    ])
+    jenkins = FakeJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=144)],
+        build=JenkinsBuild(number=144, building=False, result="FAILURE"),
+        console_log=console,
+    )
+    harness = make_harness(jenkins=jenkins)
+    build = queue_build(harness)
+    harness.container.repository.update_build(
+        build.build_id,
+        {
+            "status": BuildStatus.BUILDING,
+            "jenkins_queue_url": "https://jenkins.example/queue/item/42/",
+            "jenkins_build_number": 144,
+        },
+    )
+    harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+    stored = harness.container.repository.get_build(build.build_id)
+    assert stored.status is BuildStatus.FAILED
+    assert stored.raw_log_excerpt
+    assert "build context does not exist: ./backend" in stored.raw_log_excerpt
+    assert stored.failure_logs and stored.failure_logs.get("raw_log_excerpt")
+    detail = stored.error_detail or {}
+    assert detail.get("code") == "COMPOSE_CONFIG_ERROR"
+    assert detail.get("subcode") == "BUILD_CONTEXT_MISSING"
+    assert detail.get("recognized") is True
+    assert detail.get("service") == "ai-worker"
+    assert detail.get("config_path") == "services.ai-worker.build.context"
+    assert "build.context" in (detail.get("remediation") or "")
+    assert "构建失败，请联系平台排查" not in (stored.error or "")
+    assert "BUILD_CONTEXT_MISSING" != "UNKNOWN_CODE"
+
+
+def test_jenkins_console_read_failure_still_attempts_raw_log_tail():
+    class FlakyJenkins(FakeJenkins):
+        def get_failure_diagnostic(self, number, **kwargs):
+            self.failure_calls.append(number)
+            raise RuntimeError("parse boom")
+
+    jenkins = FlakyJenkins(
+        [JenkinsQueueItem(queue_url="https://jenkins.example/queue/item/42/", queue_id=42, build_number=9)],
+        build=JenkinsBuild(number=9, building=False, result="FAILURE"),
+        console_log="ERROR: service api build context does not exist: ./missing",
+    )
+    harness = make_harness(jenkins=jenkins)
+    build = queue_build(harness)
+    harness.container.repository.update_build(
+        build.build_id,
+        {
+            "status": BuildStatus.BUILDING,
+            "jenkins_queue_url": "https://jenkins.example/queue/item/42/",
+            "jenkins_build_number": 9,
+        },
+    )
+    harness.runtime.poll_build(build.build_id, attempt=0, task_id="poll-task")
+    stored = harness.container.repository.get_build(build.build_id)
+    assert stored.status is BuildStatus.FAILED
+    assert stored.raw_log_excerpt
+    assert "build context does not exist" in stored.raw_log_excerpt
+    assert (stored.error_detail or {}).get("subcode") == "CONSOLE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(

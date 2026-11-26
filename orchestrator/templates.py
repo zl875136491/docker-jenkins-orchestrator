@@ -29,6 +29,12 @@ from orchestrator.naming import (
 class TemplateError(ValueError):
     """Raised when a template catalog or compose request is invalid."""
 
+    def __init__(self, message: str, *, error_detail: dict | None = None, failure_site: str | None = None) -> None:
+        super().__init__(message)
+        self.error_detail = error_detail
+        self.failure_site = failure_site
+
+
 
 _APPID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 _DEPENDENCY_CONDITIONS = {
@@ -490,7 +496,11 @@ class TemplateCatalog:
         try:
             validate_local_build_compose(document)
         except ComposeBuildContractError as exc:
-            raise TemplateError(str(exc)) from exc
+            raise TemplateError(
+                str(exc),
+                error_detail={**exc.error_detail, "failure_site": "validating"},
+                failure_site="validating",
+            ) from exc
 
     def _validate_component(self, name: str, component: Any) -> dict[str, Any]:
         if not isinstance(component, Mapping):
@@ -506,7 +516,11 @@ class TemplateCatalog:
         try:
             build = normalize_local_build(raw_build, name)
         except ComposeBuildContractError as exc:
-            raise TemplateError(str(exc)) from exc
+            raise TemplateError(
+                str(exc),
+                error_detail={**exc.error_detail, "failure_site": "validating"},
+                failure_site="validating",
+            ) from exc
 
         raw_ports = component.get("ports")
         if raw_ports is None:

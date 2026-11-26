@@ -52,6 +52,16 @@
 - **原因**: Git源文件在Jenkins阶段才checkout，validating阶段不存在
 - **修复**: 使用Dockerfile `COPY`指令替代bind mount
 
+##### `BUILD_CONTEXT_MISSING`
+- **触发条件**: `service X build context does not exist: ./path`（Jenkins Validate Compose 或本地文件校验）
+- **原因**: `build.context` 指向的目录在源码/workspace 中不存在
+- **修复**: 修正 context 路径，或补齐缺失目录后重试
+
+##### `DOCKERFILE_MISSING`
+- **触发条件**: Dockerfile 相对 context 不存在
+- **原因**: `build.dockerfile` 路径错误或未提交
+- **修复**: 核对相对路径与大小写
+
 **示例**:
 ```json
 {
