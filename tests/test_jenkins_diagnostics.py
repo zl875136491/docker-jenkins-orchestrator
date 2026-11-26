@@ -312,3 +312,46 @@ def test_diagnose_failure_keeps_connection_refused_despite_token_redaction():
     assert "连接失败" in diagnostic.summary
     assert "refused" in diagnostic.reason
 
+
+def test_diagnose_build_context_missing_error_with_complete_raw_log():
+    """Verify that build context errors are captured with full raw log excerpt."""
+    console = "\n".join([
+        "Running on builder-01 in /opt/jenkins-agent/workspace/apps-orchestrator",
+        "[Pipeline] stage",
+        "[Pipeline] { (Validate Compose)",
+        "[2026-11-26T08:00:00.000Z] Validating Compose structure...",
+        "[2026-11-26T08:00:01.123Z] ERROR: service ai-worker build context does not exist: ./backend",
+        "[Pipeline] }",
+        "[Pipeline] // stage",
+        "ERROR: script returned exit code 1",
+        "Finished: FAILURE",
+    ])
+    diagnostic = diagnose_failure(console)
+    
+    # Verify diagnostic extracts key information
+    assert diagnostic.recognized is True
+    assert diagnostic.stage == "Validate Compose"
+    assert diagnostic.node == "builder-01"
+    assert diagnostic.cause == "文件或路径缺失"
+    assert "build context does not exist" in diagnostic.reason
+    assert "./backend" in diagnostic.reason
+    assert diagnostic.exit_code == "1"
+    
+    # Verify raw log excerpt contains the complete error context
+    assert diagnostic.raw_log_excerpt is not None
+    assert "service ai-worker build context does not exist: ./backend" in diagnostic.raw_log_excerpt
+    assert "Validate Compose" in diagnostic.raw_log_excerpt
+    assert "builder-01" in diagnostic.raw_log_excerpt
+    
+    # Verify error detail structure
+    detail = diagnostic.to_error_detail(build_id="2ab5ca84ecc1437a9520f222b59c4771", jenkins_build_number=144)
+    assert detail["build_id"] == "2ab5ca84ecc1437a9520f222b59c4771"
+    assert detail["jenkins_build_number"] == 144
+    assert detail["stage"] == "Validate Compose"
+    assert detail["cause"] == "文件或路径缺失"
+    assert detail["recognized"] is True
+    
+    # Summary should include key diagnostic information
+    assert "Validate Compose" in diagnostic.summary
+    assert "build context does not exist" in diagnostic.summary or "文件或路径缺失" in diagnostic.summary
+

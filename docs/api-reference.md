@@ -217,10 +217,12 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
 | 配置 | 默认 | 作用 |
 | --- | --- | --- |
 | `ORCHESTRATOR_FAILURE_SUMMARY_MAX_CHARS` | 4000 | `error` / alert `message` 摘要上限（原约 1200–1500） |
-| `ORCHESTRATOR_FAILURE_LOG_EXCERPT_MAX_CHARS` | 8000 | `raw_log_excerpt` / `failure_logs` 摘录上限 |
+| `ORCHESTRATOR_FAILURE_LOG_EXCERPT_MAX_CHARS` | 32000 | `raw_log_excerpt` / `failure_logs` 摘录上限（增大以捕获完整失败上下文） |
 | `ORCHESTRATOR_JENKINS_CONSOLE_WINDOW_BYTES` | 262144 | Jenkins progressiveText 读取窗口 |
 
 日志内容在进入告警前会移除终端控制序列，脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，追加可读的兜底提示，并尽量填充 `error_detail.recognized=false`。
+
+**重要更新（2026-11-26）**：失败诊断现在会尽可能保留原始日志摘录，即使在日志解析失败的情况下也会尝试获取 Jenkins console 尾部内容。`raw_log_excerpt` 字段现在默认最大 32000 字符（原 8000 字符），足以容纳典型的多阶段构建失败日志。APPS 平台应优先读取 `raw_log_excerpt` 字段获取完整的失败上下文，而不是依赖 `error` 字段的摘要信息。
 
 本机制在新版 worker 运行后对后续失败生效，不自动改写历史告警，也不要求调整应用 Compose、Dockerfile 或 Jenkins 共享 job。
 

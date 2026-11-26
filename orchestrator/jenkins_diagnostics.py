@@ -15,10 +15,11 @@ from urllib.parse import quote
 # Summary string (build.error / alerts.message) default ceiling.
 DEFAULT_SUMMARY_MAX_CHARS = 4000
 # Nearby redacted console excerpt stored on build.raw_log_excerpt.
-DEFAULT_EXCERPT_MAX_CHARS = 8000
+# Increased to capture complete failure context including multi-service errors.
+DEFAULT_EXCERPT_MAX_CHARS = 32000
 # How many console lines around the primary error to keep in the excerpt.
-DEFAULT_EXCERPT_CONTEXT_BEFORE = 12
-DEFAULT_EXCERPT_CONTEXT_AFTER = 20
+DEFAULT_EXCERPT_CONTEXT_BEFORE = 20
+DEFAULT_EXCERPT_CONTEXT_AFTER = 40
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _CONSOLE_NOTE = re.compile(r"\x1b\[8mha:.*?\x1b\[0m", re.DOTALL)
@@ -46,7 +47,7 @@ _CAUSES = (
     ("依赖运行时版本不兼容", r"\bEBADENGINE\b|unsupported engine|not compatible with your version of node"),
     ("连接失败", r"connection refused|connection timed out|connect ETIMEDOUT|network is unreachable|no route to host"),
     ("认证或权限失败", r"authentication failed|unauthorized|access denied|permission denied|requested access.+denied|denied:|status(?: code)?[: =]+(?:401|403)\b"),
-    ("文件或路径缺失", r"no such file|\bENOENT\b|cannot find module|(?:dockerfile|package\.json).+(?:not found|does not exist)"),
+    ("文件或路径缺失", r"no such file|\bENOENT\b|cannot find module|(?:dockerfile|package\.json).+(?:not found|does not exist)|build context does not exist|workspace .+ does not exist"),
     ("存储空间不足", r"no space left on device|\bENOSPC\b"),
     ("端口冲突", r"address already in use|port is already allocated"),
 )

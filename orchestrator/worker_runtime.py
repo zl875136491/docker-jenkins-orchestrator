@@ -1025,8 +1025,24 @@ class WorkerRuntime:
                 raw_log_excerpt=diagnostic.raw_log_excerpt,
                 max_chars=excerpt_limit,
             )
-            return f"{message}；{diagnostic.summary}", detail, diagnostic.raw_log_excerpt or None, logs
-        except Exception:
+            # Always expose raw log excerpt even if parsing failed
+            excerpt = diagnostic.raw_log_excerpt or None
+            return f"{message}；{diagnostic.summary}", detail, excerpt, logs
+        except Exception as exc:
+            # Try to fetch raw console tail even if parsing fails
+            raw_excerpt = None
+            try:
+                adapter = self._jenkins_adapter()
+                if hasattr(adapter, "_read_console_tail"):
+                    console, start = adapter._read_console_tail(number, window=window)
+                    # Redact sensitive values from raw excerpt
+                    sensitive_values = self._jenkins_sensitive_values(build)
+                    from orchestrator.jenkins_diagnostics import redact_console
+                    raw_excerpt = redact_console(console, sensitive_values)
+                    if len(raw_excerpt) > excerpt_limit:
+                        raw_excerpt = raw_excerpt[-excerpt_limit:]
+            except Exception:
+                pass
             summary = "错误详情暂不可用（无法读取或解析 Jenkins 控制台日志）；请查看该 Jenkins 构建的控制台"
             detail = {
                 "build_id": build.build_id,
@@ -1036,7 +1052,13 @@ class WorkerRuntime:
                 "summary": summary,
                 "failure_site": FAILURE_SITE_JENKINS,
             }
-            return f"{message}；{summary}", detail, None, {"source": "jenkins_console", "unavailable": True}
+            logs = {
+                "source": "jenkins_console",
+                "unavailable": not raw_excerpt,
+            }
+            if raw_excerpt:
+                logs["raw_log_excerpt"] = raw_excerpt if len(raw_excerpt) <= excerpt_limit else raw_excerpt[:excerpt_limit - 1] + "…"
+            return f"{message}；{summary}", detail, raw_excerpt, logs
 
     def _jenkins_failure_message(self, build: BuildJob, number: int, result: str | None) -> str:
         message, _, _, _ = self._jenkins_failure_diagnostic(build, number, result)
