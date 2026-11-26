@@ -105,14 +105,66 @@ def test_build_state_machine_records_events_and_alerts() -> None:
     )
     assert failed.status == BuildStatus.FAILED
     assert failed.error_detail["cause"] == "连接失败"
+    assert failed.error_detail["jenkins_build_number"] == 114
     assert "connection refused" in (failed.raw_log_excerpt or "")
     assert failed.failure_logs["source"] == "jenkins_console"
+    assert "connection refused" in (failed.failure_logs.get("raw_log_excerpt") or "")
     assert failed.failure_site == "jenkins"
     assert failed.stage == "failed"
     assert "building" in (failed.stage_history or [])
     assert (failed.stage_history or [])[-1] == "failed"
-    assert repository.list_alerts("stateful")[0].message == "Jenkins reported a failure"
+    assert repository.list_alerts("stateful")[0].message == failed.error
     assert {event.kind for event in repository.list_events("stateful")} >= {"build.queued", "build.failed"}
+
+
+def test_build_service_fail_keeps_raw_log_and_classifies_missing_build_context() -> None:
+    repository, applications, builds = build_service()
+    applications.create_app(
+        UserAppCreate(
+            appid="missing-context",
+            name="Missing Context",
+            require_route="/health",
+            repository_url="https://git.example/app.git",
+            compose={"services": {"api": {"image": "example/api"}}},
+        )
+    )
+    approve_static_check(builds, "missing-context")
+    build = builds.queue_build("missing-context", BuildCreate())
+    for target in (BuildStatus.VALIDATING, BuildStatus.TRIGGERING, BuildStatus.BUILDING):
+        build = builds.transition(build.build_id, target)
+
+    raw = "\n".join(
+        [
+            "[Pipeline] { (Validate Compose)",
+            "ERROR: service ai-worker build context does not exist: ./backend",
+            "ERROR: script returned exit code 1",
+        ]
+    )
+    failed = builds.fail(
+        build.build_id,
+        "Jenkins build finished with FAILURE；Jenkins #144",
+        error_detail={"failure_site": "jenkins", "stage": "Validate Compose", "jenkins_build_number": 144},
+        raw_log_excerpt=raw,
+        failure_logs={"source": "jenkins_console", "raw_log_excerpt": raw},
+        failure_site="jenkins",
+    )
+
+    assert failed.status == BuildStatus.FAILED
+    assert failed.raw_log_excerpt and "./backend" in failed.raw_log_excerpt
+    assert failed.failure_logs and "./backend" in (failed.failure_logs.get("raw_log_excerpt") or "")
+    detail = failed.error_detail or {}
+    assert detail["code"] == "COMPOSE_CONFIG_ERROR"
+    assert detail["subcode"] == "MISSING_BUILD_CONTEXT"
+    assert detail["recognized"] is True
+    assert detail["responsible_party"] == "application_developer"
+    assert detail["user_action_required"] is True
+    assert detail["service"] == "ai-worker"
+    assert detail["config_path"] == "services.ai-worker.build.context"
+    assert detail["build_context_path"] == "./backend"
+    assert "ai-worker" in failed.error
+    assert "./backend" in failed.error
+    assert "请联系平台排查" not in failed.error
+    assert "build.context" in (detail.get("remediation") or "")
 
 
 def test_build_state_machine_rejects_skipped_steps() -> None:

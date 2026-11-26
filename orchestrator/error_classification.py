@@ -107,16 +107,21 @@ def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
             if safe_vars:
                 safe["missing_variables"] = safe_vars
     
-    # config_path: 只保留路径格式（不含值）
-    if "config_path" in metadata:
-        path = metadata["config_path"]
-        if isinstance(path, str) and len(path) < 200:
-            safe["config_path"] = path
+    # config_path / build paths: 只保留相对路径形态（不含凭据）
+    for field in ("config_path", "build_context_path", "dockerfile_path"):
+        if field in metadata:
+            path = metadata[field]
+            if isinstance(path, str) and 0 < len(path) < 200 and "://" not in path and "@" not in path:
+                safe[field] = path
     
     # check_scope, failure_site, stage, source: 保留已有上下文字段
-    for field in ("check_scope", "failure_site", "stage", "source", "service"):
+    for field in ("check_scope", "failure_site", "stage", "source", "service", "cause", "location"):
         if field in metadata and isinstance(metadata[field], str) and len(metadata[field]) < 100:
             safe[field] = metadata[field]
+    if "jenkins_build_number" in metadata and isinstance(metadata["jenkins_build_number"], int):
+        safe["jenkins_build_number"] = metadata["jenkins_build_number"]
+    if "console_line" in metadata and isinstance(metadata["console_line"], int):
+        safe["console_line"] = metadata["console_line"]
     
     # exception_type: 保留类型名（但不信任）
     if "exception_type" in metadata and isinstance(metadata["exception_type"], str):
@@ -167,6 +172,22 @@ def get_safe_summary_from_template(code: str | None, subcode: str | None, metada
             return "有状态端点配置格式无效"
         elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
             return "不支持将Git仓库目录绑定到容器（构建隔离要求）"
+        elif subcode == "MISSING_BUILD_CONTEXT":
+            service = metadata.get("service", "")
+            path = metadata.get("build_context_path", "")
+            if service and path:
+                return f"服务 {service} 的构建上下文不存在：{path}"
+            if service:
+                return f"服务 {service} 的构建上下文目录不存在"
+            return "Compose 声明的 build.context 目录在源码中不存在"
+        elif subcode == "MISSING_DOCKERFILE":
+            service = metadata.get("service", "")
+            path = metadata.get("dockerfile_path", "")
+            if service and path:
+                return f"服务 {service} 的 Dockerfile 不存在：{path}"
+            if service:
+                return f"服务 {service} 的 Dockerfile 不存在"
+            return "Compose 声明的 Dockerfile 在源码中不存在"
     
     # 未知或无模板，返回通用中文摘要
     return "构建失败，请联系平台排查"
@@ -198,8 +219,64 @@ def get_safe_remediation_from_template(code: str | None, subcode: str | None, me
             return "端点配置格式无效。请检查连接字符串的主机名和端口格式是否正确"
         elif subcode == "UNSUPPORTED_GIT_BIND_MOUNT":
             return "移除Compose中的Git仓库目录绑定，在Dockerfile中使用COPY指令或使用命名卷"
+        elif subcode == "MISSING_BUILD_CONTEXT":
+            service = metadata.get("service", "")
+            path = metadata.get("build_context_path", "")
+            target = f"服务 {service} 的 build.context" if service else "build.context"
+            hint = f"（当前为 {path}）" if path else ""
+            return (
+                f"请检查 {target}{hint} 是否指向仓库或 workspace 内真实存在的目录；"
+                "修正 Compose 路径或补齐缺失目录后重新构建。"
+            )
+        elif subcode == "MISSING_DOCKERFILE":
+            service = metadata.get("service", "")
+            path = metadata.get("dockerfile_path", "")
+            target = f"服务 {service} 的 build.dockerfile" if service else "build.dockerfile"
+            hint = f"（当前为 {path}）" if path else ""
+            return f"请确认 {target}{hint} 相对 build.context 真实存在，并注意文件名大小写。"
     
     return "联系平台排查具体原因"
+
+
+_BUILD_CONTEXT_MISSING_RE = re.compile(
+    r"service\s+(?P<service>[A-Za-z0-9._-]+)\s+build context does not exist:\s*(?P<path>\./[^\s\"']+|/[^\s\"']+|[A-Za-z0-9._/-]+)",
+    re.IGNORECASE,
+)
+_DOCKERFILE_MISSING_RE = re.compile(
+    r"service\s+(?P<service>[A-Za-z0-9._-]+)\s+Dockerfile does not exist:\s*(?P<path>\./[^\s\"']+|/[^\s\"']+|[A-Za-z0-9._/-]+)",
+    re.IGNORECASE,
+)
+
+
+def infer_error_from_evidence(*texts: str | None) -> dict[str, Any] | None:
+    """从 Jenkins/控制台证据推断高置信的稳定 code/subcode（不含 secret 地址类字段）。"""
+
+    blob = "\n".join(text for text in texts if isinstance(text, str) and text.strip())
+    if not blob:
+        return None
+    match = _BUILD_CONTEXT_MISSING_RE.search(blob)
+    if match:
+        service = match.group("service")
+        path = match.group("path")
+        return {
+            "code": "COMPOSE_CONFIG_ERROR",
+            "subcode": "MISSING_BUILD_CONTEXT",
+            "service": service,
+            "config_path": f"services.{service}.build.context",
+            "build_context_path": path,
+        }
+    match = _DOCKERFILE_MISSING_RE.search(blob)
+    if match:
+        service = match.group("service")
+        path = match.group("path")
+        return {
+            "code": "COMPOSE_CONFIG_ERROR",
+            "subcode": "MISSING_DOCKERFILE",
+            "service": service,
+            "config_path": f"services.{service}.build.dockerfile",
+            "dockerfile_path": path,
+        }
+    return None
 
 
 def classify_error(
@@ -262,6 +339,22 @@ def classify_error(
                 "retryable": False,
                 "user_action_required": True,
                 "action_guidance": "检查数据库连接字符串格式",
+            }
+        elif error_subcode == "MISSING_BUILD_CONTEXT":
+            return {
+                "category": ErrorCategory.CONFIGURATION_ERROR,
+                "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "修正 Compose build.context 路径或补齐缺失目录后重新构建",
+            }
+        elif error_subcode == "MISSING_DOCKERFILE":
+            return {
+                "category": ErrorCategory.CONFIGURATION_ERROR,
+                "responsible_party": ResponsibleParty.APPLICATION_DEVELOPER,
+                "retryable": False,
+                "user_action_required": True,
+                "action_guidance": "修正 Compose build.dockerfile 路径或补齐 Dockerfile 后重新构建",
             }
     
     # 使用异常类型判断
@@ -337,12 +430,15 @@ def classify_error(
 def enrich_error_detail(
     error_detail: dict[str, Any] | None,
     exception: Exception | None = None,
+    *,
+    evidence_texts: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """enrichment existing error_detail with classification fields
     
     Args:
         error_detail: 现有的error_detail字典
         exception: 原始异常对象
+        evidence_texts: 额外证据文本（如 raw_log_excerpt），用于高置信识别
         
     Returns:
         增强后的error_detail，包含category, responsible_party, retryable等字段和安全summary
@@ -352,6 +448,21 @@ def enrich_error_detail(
     
     # 不能提前返回：即使已有分类字段，也必须安全规范化summary/remediation
     # 已有的category/responsible_party可能来自不可信源，summary也可能含secret
+
+    code = error_detail.get("code")
+    subcode = error_detail.get("subcode")
+    needs_inference = (not code or code == "UNKNOWN_CODE") or (not subcode or subcode == "UNKNOWN_SUBCODE")
+    if needs_inference:
+        inferred = infer_error_from_evidence(
+            error_detail.get("reason"),
+            error_detail.get("cause"),
+            error_detail.get("summary"),
+            error_detail.get("location"),
+            *(evidence_texts or ()),
+            str(exception) if exception is not None else None,
+        )
+        if inferred:
+            error_detail = {**error_detail, **inferred}
     
     # 提取现有字段用于分类
     classification = classify_error(
@@ -420,6 +531,8 @@ def enrich_error_detail(
         ("COMPOSE_CONFIG_ERROR", "EXTERNAL_STATEFUL_ENDPOINT"),
         ("COMPOSE_CONFIG_ERROR", "INVALID_STATEFUL_ENDPOINT"),
         ("COMPOSE_CONFIG_ERROR", "UNSUPPORTED_GIT_BIND_MOUNT"),
+        ("COMPOSE_CONFIG_ERROR", "MISSING_BUILD_CONTEXT"),
+        ("COMPOSE_CONFIG_ERROR", "MISSING_DOCKERFILE"),
     }
     code = result.get("code")
     subcode = result.get("subcode")
@@ -441,6 +554,8 @@ def enrich_error_detail(
         "failure_site", "build_id", "stage", "source",
         # 白名单元数据（已通过_sanitize_metadata验证或为合法技术字段）
         "endpoint_variable", "missing_variables", "config_path", "check_scope", "service",
+        "build_context_path", "dockerfile_path",
+        "cause", "location", "jenkins_build_number", "console_line",
         "exception_type",  # 保留但不信任
     }
     

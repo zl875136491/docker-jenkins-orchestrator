@@ -46,7 +46,9 @@ _CAUSES = (
     ("依赖运行时版本不兼容", r"\bEBADENGINE\b|unsupported engine|not compatible with your version of node"),
     ("连接失败", r"connection refused|connection timed out|connect ETIMEDOUT|network is unreachable|no route to host"),
     ("认证或权限失败", r"authentication failed|unauthorized|access denied|permission denied|requested access.+denied|denied:|status(?: code)?[: =]+(?:401|403)\b"),
-    ("文件或路径缺失", r"no such file|\bENOENT\b|cannot find module|(?:dockerfile|package\.json).+(?:not found|does not exist)"),
+    ("构建上下文缺失", r"build context does not exist|service \S+ build context does not exist"),
+    ("Dockerfile 缺失", r"service \S+ Dockerfile does not exist|(?:dockerfile|Dockerfile).+(?:not found|does not exist)"),
+    ("文件或路径缺失", r"no such file|\bENOENT\b|cannot find module|(?:package\.json).+(?:not found|does not exist)"),
     ("存储空间不足", r"no space left on device|\bENOSPC\b"),
     ("端口冲突", r"address already in use|port is already allocated"),
 )
