@@ -162,8 +162,8 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
 
 | 字段 | 说明 |
 | --- | --- |
-| `error_detail` | 失败现场对象：`failure_site` / `stage` / `node` / `location` / `source_file` / `cause` / `reason` / `exit_code` / `console_line` / `build_id` / `jenkins_build_number` / `jenkins_job` / `recognized` / `summary` 等 |
-| `raw_log_excerpt` | 脱敏后的关键日志摘录（Jenkins 控制台附近行，或动态失败时的容器日志拼接） |
+| `error_detail` | 失败现场对象：`code` / `subcode` / `remediation` / `failure_site` / `stage` / `node` / `location` / `source_file` / `cause` / `reason` / `exit_code` / `console_line` / `service` / `config_path` / `build_id` / `jenkins_build_number` / `jenkins_job` / `recognized` / `summary` 等 |
+| `raw_log_excerpt` | 失败日志摘录（ANSI 已剥离；**不做应用秘密脱敏**）。Jenkins 控制台附近行，或动态失败时的容器日志拼接 |
 | `failure_logs` | 日志袋：`source`（`jenkins_console` / `container_logs` / 其它站点名）及对应摘录 |
 | `failure_site` | 失败站点短标签：`precheck` / `validating` / `triggering` / `jenkins` / `poll_timeout` / `deploy` / `dynamic_check` / `static_check` / `worker` |
 | `stage` | 当前生命周期阶段（与 `BuildStatus` 值对齐：`queued`/`validating`/`triggering`/`building`/`deploying`/`succeeded`/`failed`/`cancelled`）。失败时为 `failed`；失败前阶段见 `stage_history` / `failure_site` |
@@ -191,6 +191,8 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
   "stage": "failed",
   "stage_history": ["queued", "validating", "triggering", "building", "failed"],
   "error_detail": {
+    "code": "JENKINS_BUILD_ERROR",
+    "subcode": "CONNECTION_FAILED",
     "failure_site": "jenkins",
     "stage": "Build And Push",
     "source_file": "Dockerfile:4",
@@ -199,7 +201,8 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
     "exit_code": "1",
     "jenkins_build_number": 114,
     "build_id": "efde613a...",
-    "recognized": true
+    "recognized": true,
+    "remediation": "请检查镜像仓库/依赖服务地址、端口与构建节点网络连通性。"
   },
   "raw_log_excerpt": "   L71: ...
 >> L79: dial tcp ... connection refused
@@ -208,7 +211,9 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
 }
 ```
 
-诊断直接保留日志证据，不凭最终 `FAILURE` 猜测根因。当前可识别 DNS、连接、TLS、认证/权限、缺少文件、Node engines、存储和端口错误；编译错误保留源码位置，Dockerfile 和 Python traceback 可补充文件行号。跳过的阶段、流水线最终退出包装与 Post Actions 中的后续错误不会覆盖已捕获的主失败。
+诊断直接保留日志证据，不凭最终 `FAILURE` 猜测根因。当前可识别 DNS、连接、TLS、认证/权限、构建上下文缺失、Dockerfile 缺失、缺少文件、Node engines、存储和端口错误，并输出稳定 `code`/`subcode` 与中文 `remediation`；编译错误保留源码位置，Dockerfile 和 Python traceback 可补充文件行号。跳过的阶段、流水线最终退出包装与 Post Actions 中的后续错误不会覆盖已捕获的主失败。
+
+完整错误契约见 [APPS_ERROR_CONTRACT.md](APPS_ERROR_CONTRACT.md)。
 
 仅失败终态读取日志，成功构建不增加日志请求。优先用 `HEAD logText/progressiveText` 的 `X-Text-Size` 定位最后窗口（默认 **256 KiB**，配置项 `ORCHESTRATOR_JENKINS_CONSOLE_WINDOW_BYTES`），实际响应最多读取窗口的 2 倍。尾部片段行号会明确标注为片段内行号及字节起点。
 
@@ -217,10 +222,10 @@ Jenkins 构建结束且结果不是 `SUCCESS` 时，worker 自动读取该构建
 | 配置 | 默认 | 作用 |
 | --- | --- | --- |
 | `ORCHESTRATOR_FAILURE_SUMMARY_MAX_CHARS` | 4000 | `error` / alert `message` 摘要上限（原约 1200–1500） |
-| `ORCHESTRATOR_FAILURE_LOG_EXCERPT_MAX_CHARS` | 8000 | `raw_log_excerpt` / `failure_logs` 摘录上限 |
+| `ORCHESTRATOR_FAILURE_LOG_EXCERPT_MAX_CHARS` | 32000 | `raw_log_excerpt` / `failure_logs` 摘录上限 |
 | `ORCHESTRATOR_JENKINS_CONSOLE_WINDOW_BYTES` | 262144 | Jenkins progressiveText 读取窗口 |
 
-日志内容在进入告警前会移除终端控制序列，脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，追加可读的兜底提示，并尽量填充 `error_detail.recognized=false`。
+`raw_log_excerpt` 仅剥离 ANSI/控制序列，保留原始失败文本供 APPS 诊断。`error` / 告警摘要仍会脱敏已知应用环境值、Compose environment/build args、平台凭据、URL 用户信息/查询参数以及常见 token/password/Authorization 内容。无法读取日志、没有权限或没有识别到具体错误时，仍保留 `Jenkins build finished with FAILURE` 和 Jenkins 编号，尽量回传 console 尾部到 `raw_log_excerpt`，并填充 `error_detail.code=JENKINS_BUILD_ERROR`、`recognized=false`。
 
 本机制在新版 worker 运行后对后续失败生效，不自动改写历史告警，也不要求调整应用 Compose、Dockerfile 或 Jenkins 共享 job。
 

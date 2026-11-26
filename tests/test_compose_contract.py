@@ -50,5 +50,21 @@ def test_local_build_files_requires_context_and_dockerfile_to_exist(tmp_path: Pa
     validate_local_build_files(compose, source_root)
 
     (source_root / "Dockerfile").unlink()
-    with pytest.raises(ComposeBuildContractError, match="Dockerfile does not exist"):
+    with pytest.raises(ComposeBuildContractError, match="Dockerfile does not exist") as missing_df:
         validate_local_build_files(compose, source_root)
+    assert missing_df.value.subcode == "DOCKERFILE_MISSING"
+    assert missing_df.value.error_detail["code"] == "COMPOSE_CONFIG_ERROR"
+
+
+def test_local_build_files_missing_context_exposes_stable_contract(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    compose = compose_with_build({"context": "./backend", "dockerfile": "Dockerfile"})
+    with pytest.raises(ComposeBuildContractError, match="build context does not exist") as excinfo:
+        validate_local_build_files(compose, source_root)
+    err = excinfo.value
+    assert err.subcode == "BUILD_CONTEXT_MISSING"
+    assert err.service == "app"
+    assert err.config_path == "services.app.build.context"
+    assert err.error_detail["code"] == "COMPOSE_CONFIG_ERROR"
+    assert "backend" in (err.remediation or "")

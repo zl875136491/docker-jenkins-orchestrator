@@ -226,13 +226,14 @@ def test_failure_summary_reads_only_a_bounded_console_tail_and_redacts_credentia
     assert "DNS 解析失败" in summary
     assert "gitlab.example" in summary
     assert "退出码=128" in summary
-    assert f"字节起点 {size - 128 * 1024}" in summary
+    window_size = 256 * 1024
+    assert f"字节起点 {size - window_size}" in summary
     for value in ("repository-secret", "query-secret", "inline-secret", "adapter-password"):
         assert value not in summary
     assert transport.calls[0]["method"] == "HEAD"
     assert transport.calls[0]["max_bytes"] == 0
-    assert transport.calls[1]["url"] == f"https://jenkins.example/ci/job/folder/job/apps/67/logText/progressiveText?start={size - 128 * 1024}"
-    assert transport.calls[1]["max_bytes"] == 256 * 1024
+    assert transport.calls[1]["url"] == f"https://jenkins.example/ci/job/folder/job/apps/67/logText/progressiveText?start={size - window_size}"
+    assert transport.calls[1]["max_bytes"] == window_size * 2
     assert transport.calls[1]["headers"]["Accept"] == "text/plain"
 
 
@@ -242,7 +243,7 @@ def test_failure_summary_falls_back_to_a_bounded_prefix_when_size_is_unavailable
     adapter = JenkinsHttpAdapter("https://jenkins.example", "worker", "secret", transport=transport)
     assert "console L1" in adapter.get_failure_summary(5)
     assert transport.calls[1]["url"].endswith("/5/logText/progressiveText?start=0")
-    assert transport.calls[1]["max_bytes"] == 256 * 1024
+    assert transport.calls[1]["max_bytes"] == 256 * 1024 * 2
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 500])
